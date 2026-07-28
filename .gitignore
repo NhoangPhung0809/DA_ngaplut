@@ -1,0 +1,12 @@
+.venv/
+venv/
+__pycache__/
+*.zip
+*.tar.gz
+*.h5
+*.pt
+models/
+pm/
+*.pkl
+*.deb
+.venv/
