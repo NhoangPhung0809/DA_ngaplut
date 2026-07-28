@@ -1,0 +1,15 @@
+{
+    "label_source": "rule_based_multiclass_regenerated",
+    "target_definition": {
+        "0": "An toàn",
+        "1": "Ngập nhẹ",
+        "2": "Ngập nặng"
+    },
+    "total_rows": 438120,
+    "class_distribution": {
+        "0": 431776,
+        "1": 325,
+        "2": 6019
+    },
+    "note": "EDA khong dung truc tiep nhan cu trong CSV. Script tao lai nhan 3 lop theo cung logic rule-based voi pipeline huan luyen hien tai."
+}

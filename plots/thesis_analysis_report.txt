@@ -1,0 +1,49 @@
+PHÂN TÍCH THĂM DÒ DỮ LIỆU (EDA) CHO BÀI TOÁN DỰ BÁO NGUY CƠ NGẬP
+
+Lưu ý phương pháp: Toàn bộ các biểu đồ và nhận xét dưới đây sử dụng nhãn `Nguy_cơ_ngập` được tái tạo lại theo rule-based 3 lớp giống pipeline huấn luyện hiện tại, không dùng trực tiếp nhãn cũ có thể còn lưu trong một số file CSV lịch sử.
+
+THESIS ANALYSIS 1. CORRELATION HEATMAP
+
+Biểu đồ heatmap Pearson cho thấy biến `Chiều_cao_triều_m` có mức tương quan dương mạnh nhất với biến mục tiêu `Nguy_cơ_ngập` với hệ số xấp xỉ 0.50. Điều này hàm ý rằng khi `Chiều_cao_triều_m` gia tăng, xác suất xuất hiện trạng thái ngập nhẹ hoặc ngập nặng cũng tăng theo. Kết quả này phù hợp với bản chất vật lý của bài toán, vì các tín hiệu khí tượng và thủy văn cực đoan thường là tác nhân kích hoạt trực tiếp rủi ro ngập.
+
+Ngoài ra, mối tương quan giữa `Lượng_mưa_mm` và `Độ_ẩm_đất` đạt khoảng 0.15, cho thấy lượng mưa lớn có xu hướng làm đất bão hòa ẩm. Đây là một quan sát quan trọng trong bối cảnh thủy văn khu vực Huế, nơi mưa kéo dài kết hợp với nền đất giữ nước có thể làm giảm khả năng thấm, khiến nước mặt tích tụ nhanh hơn và làm gia tăng nguy cơ ngập cục bộ.
+
+Tương quan giữa `Lượng_mưa_mm` và `Chiều_cao_triều_m` ở mức 0.17, phản ánh rằng hai biến này không hoàn toàn đồng biến nhưng có thể cộng hưởng trong các đợt rủi ro cao. Trên thực tế, ngập lụt ở vùng ven biển và đầm phá không chỉ chịu tác động của mưa mà còn chịu ảnh hưởng của triều cường, khiến quá trình tiêu thoát nước bị chậm lại. Vì vậy, việc đồng thời đưa dữ liệu mưa, độ ẩm đất và triều vào mô hình là hợp lý về cả mặt thống kê lẫn mặt chuyên ngành.
+
+Ở chiều ngược lại, biến `Nhiệt_độ_C` có hệ số tương quan thấp nhất với `Nguy_cơ_ngập`, xấp xỉ -0.11. Điều này cho thấy biến này ít mang thông tin trực tiếp hơn cho việc nhận diện ngập so với nhóm biến mưa, đất và triều. Tuy nhiên, biến này vẫn có giá trị hỗ trợ vì nó có thể phản ánh trạng thái nền khí quyển chung, giúp mô hình học được bối cảnh thời tiết trước khi xuất hiện hiện tượng ngập.
+
+THESIS ANALYSIS 2. CLASS DISTRIBUTION
+
+Biểu đồ phân bố lớp cho thấy bộ dữ liệu có sự mất cân bằng rất mạnh giữa ba mức nguy cơ ngập sau khi tái tạo nhãn theo luật chuyên gia 3 lớp. Cụ thể, lớp 0 (An toàn) có 431,776 quan sát, lớp 1 (Ngập nhẹ) có 325 quan sát và lớp 2 (Ngập nặng) có 6,019 quan sát. Trong đó, lớp 0 (An toàn) chiếm khoảng 98.55% tổng số quan sát, còn lớp 1 (Ngập nhẹ) chỉ chiếm khoảng 0.07%.
+
+Mất cân bằng lớp có ý nghĩa thực tiễn rất lớn. Nếu không xử lý phù hợp, mô hình có thể thiên về dự đoán lớp chiếm đa số và bỏ sót các trường hợp ngập nhẹ hoặc ngập nặng, vốn là những lớp có giá trị cảnh báo cao nhất. Kết quả EDA này do đó củng cố tính cần thiết của bước cân bằng dữ liệu bằng SMOTE trong pipeline huấn luyện.
+
+Về mặt học thuật, cần lưu ý rằng phân bố này được tạo ra từ nhãn rule-based đang dùng trong pipeline huấn luyện hiện tại, chứ không lấy nguyên trạng nhãn cũ có sẵn trong một số file CSV lịch sử. Điều này giúp toàn bộ EDA, huấn luyện mô hình và dashboard sử dụng cùng một định nghĩa mục tiêu, tránh tình trạng biểu đồ và phần diễn giải dựa trên các phiên bản nhãn khác nhau.
+
+THESIS ANALYSIS 3. RAINFALL DISTRIBUTION BY TARGET CLASS
+
+Biểu đồ phân bố `Lượng_mưa_mm` theo lớp mục tiêu cho thấy lượng mưa vẫn là biến phân tách quan trọng giữa các trạng thái ngập. Giá trị trung bình của lượng mưa tăng mạnh từ khoảng 0.27 mm ở lớp an toàn lên 17.84 mm ở lớp ngập nhẹ, trong khi lớp ngập nặng có giá trị trung bình khoảng 2.19 mm. Mẫu hình này cho thấy lớp ngập nặng trong bộ dữ liệu không chỉ do mưa cực lớn quyết định mà còn chịu tác động đáng kể của các điều kiện kết hợp, đặc biệt là triều cường và độ bão hòa ẩm của đất. Tuy vậy, trung vị của lớp ngập nặng vẫn cao hơn lớp an toàn (0.80 mm so với 0.00 mm), chứng tỏ mưa vẫn là một tín hiệu quan trọng trong nhận diện rủi ro.
+
+Phân bố này cho thấy mưa là điều kiện kích hoạt quan trọng của rủi ro ngập, đặc biệt trong quá trình chuyển từ lớp an toàn sang lớp ngập nhẹ. Tuy nhiên, với lớp ngập nặng, số liệu cho thấy mức độ nghiêm trọng không nhất thiết đi kèm lượng mưa trung bình lớn nhất, mà còn phụ thuộc mạnh vào tổ hợp điều kiện thủy văn khác. Đây là dấu hiệu cho thấy trong bộ dữ liệu hiện tại, triều cường đóng vai trò chi phối rõ rệt đối với lớp ngập nặng.
+
+Mặt khác, phần đuôi phải kéo dài của phân bố mưa cho thấy tồn tại các thời điểm mưa rất lớn, đại diện cho những sự kiện cực trị. Những quan sát này đặc biệt quan trọng đối với mô hình dự báo, vì chúng chứa tín hiệu mạnh cho các lớp cảnh báo cao. Do đó, biến lượng mưa cần được xem là một trong những biến đầu vào cốt lõi trong toàn bộ hệ thống dự báo ngập.
+
+Bảng thống kê mô tả:
+                    mean  median   std   min   max
+Lớp 0 - An toàn     0.27     0.0  0.90   0.0  15.0
+Lớp 1 - Ngập nhẹ   17.84    16.9  5.99  10.1  44.7
+Lớp 2 - Ngập nặng   2.19     0.8  5.62   0.0  92.0
+
+THESIS ANALYSIS 4. TIDE HEIGHT DISTRIBUTION BY TARGET CLASS
+
+Biểu đồ phân bố `Chiều_cao_triều_m` cho thấy các lớp có mức nguy cơ ngập cao thường đi kèm nền triều cao hơn. Giá trị trung bình chiều cao triều tăng từ khoảng 0.69 m ở lớp an toàn lên 1.12 m ở lớp ngập nhẹ và đạt 2.95 m ở lớp ngập nặng. Đặc biệt, lớp ngập nặng có thể xuất hiện ở các ngưỡng triều cực đại đến khoảng 5.00 m, cho thấy vai trò khuếch đại của triều cường trong quá trình hình thành ngập.
+
+Phát hiện này có ý nghĩa thực tiễn rõ rệt đối với khu vực Huế, nơi chịu tác động đồng thời của mưa lớn, hệ thống sông ngòi dày đặc và ảnh hưởng từ biển/đầm phá. Khi mực triều tăng cao, nước trong hệ thống thoát ra cửa biển chậm hơn, làm gia tăng hiện tượng dồn ứ nước mặt. Vì vậy, cùng một lượng mưa nhưng trong điều kiện triều cao, rủi ro ngập có thể nghiêm trọng hơn đáng kể.
+
+Kết quả EDA cũng cho thấy chiều cao triều không phải là biến duy nhất quyết định ngập, nhưng là biến bổ trợ quan trọng khi kết hợp với lượng mưa và độ ẩm đất. Điều này phù hợp với cách xây dựng nhãn rule-based cũng như định hướng mô hình hóa đa nguồn dữ liệu trong đề tài.
+
+Bảng thống kê mô tả:
+                   mean  median   std   min  max
+Lớp 0 - An toàn    0.69    0.54  0.45  0.08  2.5
+Lớp 1 - Ngập nhẹ   1.12    0.54  0.72  0.18  2.5
+Lớp 2 - Ngập nặng  2.95    2.82  0.47  0.38  5.0
