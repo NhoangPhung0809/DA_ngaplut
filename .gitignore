@@ -10,3 +10,9 @@ pm/
 *.pkl
 *.deb
 .venv/
+
+models/
+pm/
+*.pkl
+*.deb
+.venv/
