@@ -366,12 +366,18 @@ def get_all_model_names() -> list[str]:
         "Linear Regression Threshold",
         "Polynomial Regression Threshold",
         "Random Forest",
+        "KNN",
+        "SVC",
+        "AdaBoost",
         "XGBoost",
         "LightGBM",
         "CatBoost",
         "ARIMA",
         "SARIMA",
         "LSTM",
+        "GRU",
+        "1D-CNN",
+        "CNN-LSTM",
         "LSTM + XGBoost Hybrid",
     ]
     try:

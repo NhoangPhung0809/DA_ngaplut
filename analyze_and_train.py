@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import AdaBoostClassifier
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LinearRegression
@@ -24,9 +25,11 @@ from sklearn.metrics import (
     recall_score,
 )
 from sklearn.model_selection import train_test_split
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
 from xgboost import XGBClassifier
 
 try:
@@ -66,15 +69,19 @@ try:
     from tensorflow.keras import Model
     from tensorflow.keras import backend as K
     from tensorflow.keras.callbacks import EarlyStopping
-    from tensorflow.keras.layers import LSTM, Dense, Input
+    from tensorflow.keras.layers import Conv1D, Dense, Flatten, GRU, Input, LSTM, MaxPooling1D
     from tensorflow.keras.models import Sequential, load_model
 except ImportError:
     Model = None
     K = None
     EarlyStopping = None
+    Conv1D = None
     LSTM = None
+    GRU = None
     Dense = None
+    Flatten = None
     Input = None
+    MaxPooling1D = None
     Sequential = None
     load_model = None
 
@@ -115,12 +122,18 @@ ALL_MODEL_NAMES = [
     "Linear Regression Threshold",
     "Polynomial Regression Threshold",
     "Random Forest",
+    "KNN",
+    "SVC",
+    "AdaBoost",
     "XGBoost",
     "LightGBM",
     "CatBoost",
     "ARIMA",
     "SARIMA",
     "LSTM",
+    "GRU",
+    "1D-CNN",
+    "CNN-LSTM",
     "LSTM + XGBoost Hybrid",
 ]
 SEQUENCE_WINDOW = 7
@@ -845,6 +858,44 @@ def build_lstm_classifier(input_shape):
     return model
 
 
+def build_gru_classifier(input_shape):
+    inputs = Input(shape=input_shape)
+    encoded = GRU(32, name="gru_encoder")(inputs)
+    dense_features = Dense(16, activation="relu", name="dense_features")(encoded)
+    outputs = Dense(len(CLASS_LABELS), activation="softmax", name="class_output")(dense_features)
+    model = Model(inputs=inputs, outputs=outputs, name="flood_gru_classifier")
+    model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+    return model
+
+
+def build_cnn1d_classifier(input_shape):
+    inputs = Input(shape=input_shape)
+    x = Conv1D(filters=32, kernel_size=3, activation="relu", padding="same")(inputs)
+    x = MaxPooling1D(pool_size=2)(x)
+    x = Conv1D(filters=64, kernel_size=3, activation="relu", padding="same")(x)
+    x = MaxPooling1D(pool_size=2)(x)
+    x = Flatten()(x)
+    x = Dense(32, activation="relu")(x)
+    outputs = Dense(len(CLASS_LABELS), activation="softmax", name="class_output")(x)
+    model = Model(inputs=inputs, outputs=outputs, name="flood_cnn1d_classifier")
+    model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+    return model
+
+
+def build_cnn_lstm_classifier(input_shape):
+    inputs = Input(shape=input_shape)
+    x = Conv1D(filters=32, kernel_size=3, activation="relu", padding="same")(inputs)
+    x = MaxPooling1D(pool_size=2)(x)
+    x = Conv1D(filters=64, kernel_size=3, activation="relu", padding="same")(x)
+    x = MaxPooling1D(pool_size=2)(x)
+    x = LSTM(32, name="cnn_lstm_encoder")(x)
+    x = Dense(16, activation="relu")(x)
+    outputs = Dense(len(CLASS_LABELS), activation="softmax", name="class_output")(x)
+    model = Model(inputs=inputs, outputs=outputs, name="flood_cnn_lstm_classifier")
+    model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+    return model
+
+
 def clear_tensorflow_session() -> None:
     """Giải phóng resource TensorFlow/Keras để tránh giữ session quá lâu trong Streamlit."""
     if K is not None:
@@ -1153,8 +1204,8 @@ def train_lstm_sequence_model(model_name: str, daily_df: pd.DataFrame) -> tuple[
         X_train_seq,
         y_train_seq,
         validation_split=0.2,
-        epochs=25,
-        batch_size=32,
+        epochs=30,
+        batch_size=64,
         callbacks=callbacks,
         verbose=0,
         class_weight=class_weights,
@@ -1170,6 +1221,42 @@ def train_lstm_sequence_model(model_name: str, daily_df: pd.DataFrame) -> tuple[
         evaluation_scope="daily_sequence",
     )
     return metrics, lstm_model, seq_scaler
+
+
+def train_sequence_deep_model(
+    model_name: str,
+    daily_df: pd.DataFrame,
+    model_builder,
+    epochs: int = 30,
+    batch_size: int = 64,
+) -> dict:
+    X_train_seq, y_train_seq, X_test_seq, y_test_seq, _ = build_sequence_datasets(daily_df)
+    try:
+        model = model_builder((X_train_seq.shape[1], X_train_seq.shape[2]))
+        callbacks = [EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)]
+        class_weights = build_class_weight_mapping(y_train_seq)
+        model.fit(
+            X_train_seq,
+            y_train_seq,
+            validation_split=0.2,
+            epochs=epochs,
+            batch_size=batch_size,
+            callbacks=callbacks,
+            verbose=0,
+            class_weight=class_weights,
+        )
+        probabilities = model.predict(X_test_seq, verbose=0)
+        predictions = np.argmax(probabilities, axis=1)
+        return evaluate_prediction_arrays(
+            model_name=model_name,
+            y_true=y_test_seq,
+            y_pred=predictions,
+            category="Deep Learning",
+            deployment_compatible=False,
+            evaluation_scope="daily_sequence",
+        )
+    finally:
+        clear_tensorflow_session()
 
 
 def train_lstm_xgboost_hybrid_model(model_name: str, daily_df: pd.DataFrame) -> dict:
@@ -1249,6 +1336,24 @@ def build_model_registry() -> dict:
             "deployment_compatible": True,
             "model": RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1),
         },
+        "KNN": {
+            "kind": "tabular_classifier",
+            "category": "Machine Learning",
+            "deployment_compatible": True,
+            "model": KNeighborsClassifier(),
+        },
+        "SVC": {
+            "kind": "tabular_classifier",
+            "category": "Machine Learning",
+            "deployment_compatible": True,
+            "model": SVC(probability=True, random_state=42),
+        },
+        "AdaBoost": {
+            "kind": "tabular_classifier",
+            "category": "Machine Learning",
+            "deployment_compatible": True,
+            "model": AdaBoostClassifier(random_state=42),
+        },
         "XGBoost": {
             "kind": "tabular_classifier",
             "category": "Machine Learning",
@@ -1320,6 +1425,23 @@ def build_model_registry() -> dict:
             "category": "Deep Learning",
             "deployment_compatible": False,
         }
+        if GRU is not None:
+            registry["GRU"] = {
+                "kind": "gru_sequence",
+                "category": "Deep Learning",
+                "deployment_compatible": False,
+            }
+        if Conv1D is not None and MaxPooling1D is not None and Flatten is not None:
+            registry["1D-CNN"] = {
+                "kind": "cnn1d_sequence",
+                "category": "Deep Learning",
+                "deployment_compatible": False,
+            }
+            registry["CNN-LSTM"] = {
+                "kind": "cnn_lstm_sequence",
+                "category": "Deep Learning",
+                "deployment_compatible": False,
+            }
         registry["LSTM + XGBoost Hybrid"] = {
             "kind": "lstm_xgboost_hybrid",
             "category": "Hybrid",
@@ -1397,6 +1519,30 @@ def train_and_evaluate_models(
                 "model": lstm_model,
                 "seq_scaler": seq_scaler,
             }
+        elif model_kind == "gru_sequence":
+            metrics = train_sequence_deep_model(
+                model_name=model_name,
+                daily_df=daily_df,
+                model_builder=build_gru_classifier,
+                epochs=30,
+                batch_size=64,
+            )
+        elif model_kind == "cnn1d_sequence":
+            metrics = train_sequence_deep_model(
+                model_name=model_name,
+                daily_df=daily_df,
+                model_builder=build_cnn1d_classifier,
+                epochs=30,
+                batch_size=64,
+            )
+        elif model_kind == "cnn_lstm_sequence":
+            metrics = train_sequence_deep_model(
+                model_name=model_name,
+                daily_df=daily_df,
+                model_builder=build_cnn_lstm_classifier,
+                epochs=30,
+                batch_size=64,
+            )
         elif model_kind == "lstm_xgboost_hybrid":
             metrics = train_lstm_xgboost_hybrid_model(model_name, daily_df)
         else:
@@ -1446,6 +1592,13 @@ def save_evaluation_metrics(evaluation_results: dict, output_dir: Path) -> Path:
 
     print(f"\nSaved evaluation metrics to: {metrics_path}")
     return metrics_path
+
+
+def save_leaderboard_csv(leaderboard_df: pd.DataFrame, output_dir: Path) -> Path:
+    output_path = output_dir / "leaderboard.csv"
+    leaderboard_df.to_csv(output_path, index=False, encoding="utf-8-sig")
+    print(f"Saved leaderboard csv to: {output_path}")
+    return output_path
 
 
 def select_best_model(evaluation_results: dict, trained_models: dict):
@@ -1662,11 +1815,13 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
     best_model_name, best_model = select_best_model(evaluation_results, trained_models)
 
     print_leaderboard(leaderboard_df)
+    leaderboard_path = save_leaderboard_csv(leaderboard_df, run_dir)
     metrics_path = save_evaluation_metrics(evaluation_results, run_dir)
     best_model_path, scaler_path = save_run_artifacts(best_model, scaler, run_dir)
     confusion_matrix_path = plot_confusion_matrix(best_model, X_test_scaled, y_test, run_dir)
     feature_importance_path = plot_feature_importance(best_model, X_test_scaled, y_test, run_dir)
 
+    latest_leaderboard_path = copy_artifact_to_latest(leaderboard_path, "leaderboard.csv")
     latest_metrics_path = copy_artifact_to_latest(metrics_path, "evaluation_metrics.json")
     latest_model_path = copy_artifact_to_latest(best_model_path, "best_model.pkl")
     latest_scaler_path = copy_artifact_to_latest(scaler_path, "scaler.pkl")
@@ -1686,6 +1841,7 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
         "best_model_latest_path": str(latest_model_path),
         "scaler_latest_path": str(latest_scaler_path),
         "metrics_latest_path": str(latest_metrics_path),
+        "leaderboard_latest_path": str(latest_leaderboard_path),
         "balancing_method_used": balancing_method_used,
         "leaderboard": leaderboard_df.to_dict(orient="records"),
     }
