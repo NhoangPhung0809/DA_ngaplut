@@ -84,6 +84,9 @@ DATA_DIR = BASE_DIR / "data" / "historical"
 MODELS_DIR = BASE_DIR / "models"
 PLOTS_DIR = BASE_DIR / "plots"
 LATEST_MODELS_DIR = MODELS_DIR / "latest"
+CTGAN_BEFORE_PATH = BASE_DIR / "data" / "data_before_ctgan.csv"
+CTGAN_AFTER_PATH = BASE_DIR / "data" / "data_after_ctgan.csv"
+CTGAN_DISTRIBUTION_PATH = BASE_DIR / "data" / "ctgan_class_distribution.json"
 
 TIME_COL = "Thời_gian"
 DATE_COL = "Ngày"
@@ -119,6 +122,7 @@ CTGAN_MAX_TRAIN_ROWS_PER_CLASS = 5000
 CTGAN_MAX_TARGET_ROWS_PER_CLASS = 10000
 CTGAN_EPOCHS = 10
 CTGAN_BATCH_SIZE = 256
+CTGAN_EXPORT_SAMPLE_SIZE = 1000
 TARGET_LEAKAGE_KEYWORDS = (
     "muc_ngap",
     "flood_class",
@@ -132,6 +136,7 @@ TARGET_LEAKAGE_KEYWORDS = (
 
 def ensure_base_directories() -> None:
     """Tạo các thư mục gốc phục vụ pipeline và frontend."""
+    CTGAN_BEFORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     LATEST_MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -443,6 +448,70 @@ def apply_random_oversampling(X_train_scaled: pd.DataFrame, y_train: pd.Series):
     return X_train_balanced, y_train_balanced
 
 
+def build_training_snapshot_dataframe(X_values: pd.DataFrame, y_values: pd.Series) -> pd.DataFrame:
+    """Ghép feature và target thành một DataFrame để export nhanh cho Streamlit."""
+    snapshot_df = X_values.reset_index(drop=True).copy()
+    snapshot_df[TARGET_COL] = pd.Series(y_values, name=TARGET_COL).reset_index(drop=True).astype(int)
+    return snapshot_df
+
+
+def summarize_class_distribution(y_values: pd.Series) -> dict[str, int]:
+    """Chuẩn hóa value_counts thành dict JSON-friendly."""
+    counts = pd.Series(y_values, name=TARGET_COL).value_counts().sort_index()
+    return {str(int(label)): int(count) for label, count in counts.items()}
+
+
+def export_ctgan_snapshot_csv(snapshot_df: pd.DataFrame, output_path: Path) -> int:
+    """Lưu mẫu dữ liệu trước/sau CTGAN để app có thể đọc nhanh."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sample_size = min(CTGAN_EXPORT_SAMPLE_SIZE, len(snapshot_df))
+    if len(snapshot_df) > sample_size:
+        export_df = snapshot_df.sample(n=sample_size, random_state=42).reset_index(drop=True)
+    else:
+        export_df = snapshot_df.reset_index(drop=True)
+    export_df.to_csv(output_path, index=False, encoding="utf-8-sig")
+    return len(export_df)
+
+
+def export_ctgan_comparison_artifacts(
+    X_before: pd.DataFrame,
+    y_before: pd.Series,
+    X_after: pd.DataFrame | None = None,
+    y_after: pd.Series | None = None,
+    method_used: str = "CTGAN",
+    status: str = "completed",
+) -> None:
+    """Export dữ liệu và phân phối lớp trước/sau augmentation cho UI Streamlit."""
+    before_df = build_training_snapshot_dataframe(X_before, y_before)
+    before_sample_rows = export_ctgan_snapshot_csv(before_df, CTGAN_BEFORE_PATH)
+
+    after_total_rows = None
+    after_sample_rows = None
+    if X_after is not None and y_after is not None:
+        after_df = build_training_snapshot_dataframe(X_after, y_after)
+        after_sample_rows = export_ctgan_snapshot_csv(after_df, CTGAN_AFTER_PATH)
+        after_total_rows = len(after_df)
+
+    summary_payload = {
+        "method_used": method_used,
+        "status": status,
+        "target_column": TARGET_COL,
+        "feature_columns": FEATURE_COLS,
+        "before": {
+            "total_rows": len(before_df),
+            "sample_rows": before_sample_rows,
+            "class_distribution": summarize_class_distribution(y_before),
+        },
+        "after": {
+            "total_rows": after_total_rows,
+            "sample_rows": after_sample_rows,
+            "class_distribution": summarize_class_distribution(y_after) if y_after is not None else {},
+        },
+    }
+    with CTGAN_DISTRIBUTION_PATH.open("w", encoding="utf-8") as file:
+        json.dump(summary_payload, file, indent=2, ensure_ascii=False)
+
+
 def resolve_balancing_method(balancing_method: str = "auto") -> str:
     """Chọn chiến lược cân bằng dữ liệu an toàn cho pipeline."""
     requested_method = str(balancing_method or "auto").strip().lower()
@@ -472,6 +541,12 @@ def apply_gan_data_augmentation(
 
     print("\nClass distribution BEFORE CTGAN augmentation:")
     print(y_train.value_counts().sort_index())
+    export_ctgan_comparison_artifacts(
+        X_before=X_train,
+        y_before=y_train,
+        method_used="CTGAN",
+        status="before_exported",
+    )
 
     class_counts = y_train.value_counts().sort_index()
     if class_counts.empty:
@@ -495,7 +570,16 @@ def apply_gan_data_augmentation(
                 f"Friendly warning: Lớp {class_label} chỉ có {len(class_features)} mẫu, "
                 "không đủ ổn định cho CTGAN. Fallback về SMOTE."
             )
-            return apply_smote_to_training_data(X_train, y_train)
+            X_fallback, y_fallback = apply_smote_to_training_data(X_train, y_train)
+            export_ctgan_comparison_artifacts(
+                X_before=X_train,
+                y_before=y_train,
+                X_after=X_fallback,
+                y_after=y_fallback,
+                method_used="SMOTE_FALLBACK",
+                status="fallback_from_small_class",
+            )
+            return X_fallback, y_fallback
 
         if len(class_features) > max_train_rows_per_class:
             class_features = class_features.sample(
@@ -532,14 +616,32 @@ def apply_gan_data_augmentation(
                 "Fallback về RandomOverSampler."
             )
             gc.collect()
-            return apply_random_oversampling(X_train, y_train)
+            X_fallback, y_fallback = apply_random_oversampling(X_train, y_train)
+            export_ctgan_comparison_artifacts(
+                X_before=X_train,
+                y_before=y_train,
+                X_after=X_fallback,
+                y_after=y_fallback,
+                method_used="RandomOverSampler_FALLBACK",
+                status="fallback_from_memory_error",
+            )
+            return X_fallback, y_fallback
         except Exception as exc:
             print(
                 f"Friendly warning: CTGAN failed for class {class_label} ({exc}). "
                 "Fallback về SMOTE."
             )
             gc.collect()
-            return apply_smote_to_training_data(X_train, y_train)
+            X_fallback, y_fallback = apply_smote_to_training_data(X_train, y_train)
+            export_ctgan_comparison_artifacts(
+                X_before=X_train,
+                y_before=y_train,
+                X_after=X_fallback,
+                y_after=y_fallback,
+                method_used="SMOTE_FALLBACK",
+                status="fallback_from_exception",
+            )
+            return X_fallback, y_fallback
         finally:
             gc.collect()
 
@@ -553,6 +655,14 @@ def apply_gan_data_augmentation(
     print(f"\nCTGAN synthetic rows added: {generated_total}")
     print("Class distribution AFTER CTGAN augmentation:")
     print(y_train_balanced.value_counts().sort_index())
+    export_ctgan_comparison_artifacts(
+        X_before=X_train,
+        y_before=y_train,
+        X_after=X_train_balanced,
+        y_after=y_train_balanced,
+        method_used="CTGAN",
+        status="completed",
+    )
     gc.collect()
     return X_train_balanced, y_train_balanced
 

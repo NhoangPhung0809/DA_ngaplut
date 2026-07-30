@@ -49,6 +49,13 @@ EXPECTED_HISTORICAL_FILES = {
     "Huong_Tra_10years.csv",
     "Quang_Dien_10years.csv",
 }
+CTGAN_BEFORE_PATH = BASE_DIR / "data" / "data_before_ctgan.csv"
+CTGAN_AFTER_PATH = BASE_DIR / "data" / "data_after_ctgan.csv"
+CTGAN_DISTRIBUTION_PATH = BASE_DIR / "data" / "ctgan_class_distribution.json"
+MENU_OPTIONS = [
+    "🌊 Tổng quan dự báo",
+    "📊 So sánh dữ liệu CTGAN",
+]
 
 # Khởi tạo client Open-Meteo có cache và retry để hạn chế lỗi mạng tạm thời.
 cache_session = requests_cache.CachedSession(".cache", expire_after=3600)
@@ -247,6 +254,17 @@ def get_all_model_names() -> list[str]:
     except Exception:
         pass
     return fallback_names
+
+
+def render_navigation_menu() -> str:
+    """Điều hướng nhanh giữa dashboard chính và màn hình so sánh CTGAN."""
+    st.sidebar.markdown("## Menu")
+    return st.sidebar.radio(
+        "Chọn màn hình",
+        options=MENU_OPTIONS,
+        key="app_menu_selection",
+        label_visibility="collapsed",
+    )
 
 
 def training_artifacts_missing() -> bool:
@@ -601,6 +619,25 @@ def format_risk_label(prediction: int) -> str:
 def get_processing_timestamp_display() -> str:
     """Trả về thời gian xử lý hiện tại theo định dạng dễ đọc cho dashboard."""
     return datetime.now().strftime("%H:%M - %d/%m/%Y")
+
+
+@st.cache_data(show_spinner=False)
+def load_ctgan_comparison_artifacts():
+    """Đọc dữ liệu export trước/sau CTGAN để hiển thị nhanh trên Streamlit."""
+    if not CTGAN_DISTRIBUTION_PATH.exists():
+        return None
+
+    with CTGAN_DISTRIBUTION_PATH.open("r", encoding="utf-8") as file:
+        summary = json.load(file)
+
+    before_df = pd.read_csv(CTGAN_BEFORE_PATH) if CTGAN_BEFORE_PATH.exists() else pd.DataFrame()
+    after_df = pd.read_csv(CTGAN_AFTER_PATH) if CTGAN_AFTER_PATH.exists() else pd.DataFrame()
+
+    return {
+        "summary": summary,
+        "before_df": before_df,
+        "after_df": after_df,
+    }
 
 
 def get_realtime_prediction(model, scaler):
@@ -1535,6 +1572,84 @@ def render_sidebar_controls(df_predictions: pd.DataFrame, df_future: pd.DataFram
         )
 
 
+def build_ctgan_distribution_dataframe(section_summary: dict | None) -> pd.DataFrame:
+    """Chuyển class distribution JSON sang DataFrame gọn cho UI."""
+    distribution = (section_summary or {}).get("class_distribution", {})
+    if not distribution:
+        return pd.DataFrame(columns=["Lớp", "Số lượng"])
+    rows = [
+        {"Lớp": str(label), "Số lượng": int(count)}
+        for label, count in sorted(distribution.items(), key=lambda item: int(item[0]))
+    ]
+    return pd.DataFrame(rows)
+
+
+def render_ctgan_dataset_panel(
+    title: str,
+    subtitle: str,
+    summary: dict | None,
+    dataset_df: pd.DataFrame,
+) -> None:
+    """Render 1 cột dữ liệu trước hoặc sau CTGAN."""
+    st.markdown(f"### {title}")
+    st.caption(subtitle)
+    total_rows = (summary or {}).get("total_rows")
+    sample_rows = (summary or {}).get("sample_rows")
+    metric_col_1, metric_col_2 = st.columns(2)
+    metric_col_1.metric("Tổng số dòng", total_rows if total_rows is not None else "N/A")
+    metric_col_2.metric("Số dòng hiển thị", sample_rows if sample_rows is not None else "N/A")
+
+    distribution_df = build_ctgan_distribution_dataframe(summary)
+    if distribution_df.empty:
+        st.info("Chưa có thống kê phân phối lớp.")
+    else:
+        st.dataframe(distribution_df, use_container_width=True, hide_index=True, height=160)
+
+    if dataset_df.empty:
+        st.info("Chưa có file dữ liệu để hiển thị.")
+    else:
+        st.dataframe(dataset_df, use_container_width=True, hide_index=True, height=420)
+
+
+def render_ctgan_comparison_page() -> None:
+    """Màn hình so sánh trực quan dữ liệu trước và sau CTGAN."""
+    st.subheader("📊 So sánh dữ liệu CTGAN")
+    st.caption("Trang này đọc các file export từ pipeline huấn luyện để so sánh nhanh dữ liệu trước và sau augmentation.")
+
+    artifacts = load_ctgan_comparison_artifacts()
+    if artifacts is None:
+        st.info(
+            "Chưa tìm thấy file export CTGAN. Hãy chạy huấn luyện với CTGAN trong `analyze_and_train.py` "
+            "để tạo `data_before_ctgan.csv`, `data_after_ctgan.csv` và file thống kê phân phối lớp."
+        )
+        return
+
+    summary = artifacts["summary"]
+    method_used = summary.get("method_used", "Unknown")
+    status = summary.get("status", "unknown")
+    if method_used != "CTGAN":
+        st.warning(
+            f"Kết quả export gần nhất không hoàn tất bằng CTGAN thuần. Method dùng thực tế: `{method_used}` | trạng thái: `{status}`."
+        )
+    else:
+        st.success(f"Export CTGAN sẵn sàng. Trạng thái gần nhất: `{status}`.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        render_ctgan_dataset_panel(
+            title="Dữ liệu Gốc (Bị mất cân bằng)",
+            subtitle="Snapshot trước khi áp dụng CTGAN.",
+            summary=summary.get("before"),
+            dataset_df=artifacts["before_df"],
+        )
+    with col2:
+        render_ctgan_dataset_panel(
+            title="Dữ liệu sau CTGAN (Đã cân bằng)",
+            subtitle="Snapshot sau khi augmentation hoàn tất.",
+            summary=summary.get("after"),
+            dataset_df=artifacts["after_df"],
+        )
+
 def render_model_metrics(evaluation_metrics, runtime_info):
     """Hiển thị bảng số liệu, biểu đồ Plotly và ảnh artifact đánh giá mô hình."""
     st.subheader("Model Evaluation Metrics")
@@ -1656,6 +1771,12 @@ def main():
     apply_global_ui_theme()
     st.title("🌊 Hệ thống Dự báo Ngập lụt tại Thành phố Huế")
     st.markdown("---")
+    selected_menu = render_navigation_menu()
+
+    if selected_menu == "📊 So sánh dữ liệu CTGAN":
+        render_training_controls()
+        render_ctgan_comparison_page()
+        return
 
     try:
         model, scaler, evaluation_metrics, runtime_info = load_runtime_artifacts()
