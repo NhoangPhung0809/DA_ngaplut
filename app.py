@@ -1815,9 +1815,15 @@ def load_daily_rainfall_history(location_csv_name: str) -> pd.DataFrame:
     return daily
 
 
-@st.cache_resource(show_spinner=False)
 def get_chronos_module():
-    return dynamically_import_module("chronos_predictor_runtime", BASE_DIR / "chronos_predictor.py")
+    import importlib
+    import sys
+
+    base_dir_str = str(BASE_DIR)
+    if base_dir_str not in sys.path:
+        sys.path.insert(0, base_dir_str)
+
+    return importlib.import_module("chronos_predictor")
 
 
 def render_chronos_llm_page() -> None:
@@ -1856,7 +1862,8 @@ def render_chronos_llm_page() -> None:
         try:
             chronos_module = get_chronos_module()
         except Exception as exc:
-            st.error(f"Không thể nạp Chronos module/dependencies: {exc}")
+            st.error("Không thể nạp Chronos module/dependencies.")
+            st.exception(exc)
             return
 
         with st.spinner("Đang chạy Chronos Zero-shot inference trên CPU..."):
@@ -1872,7 +1879,8 @@ def render_chronos_llm_page() -> None:
                 )
                 plot_df = chronos_module.chronos_result_to_plotly_frame(result)
             except Exception as exc:
-                st.error(f"Chronos inference thất bại: {exc}")
+                st.error("Chronos inference thất bại.")
+                st.exception(exc)
                 return
 
         import plotly.graph_objects as go
