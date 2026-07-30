@@ -888,6 +888,56 @@ def export_multiclass_roc_curve_data(
     return output_path
 
 
+def export_multiclass_roc_curve_from_proba(
+    best_model_name: str,
+    y_true: np.ndarray,
+    y_proba: np.ndarray,
+    output_dir: Path,
+) -> Path:
+    """Xuất ROC curve data (OvR) từ y_true + y_proba (dùng cho Keras/DL models)."""
+    output_path = output_dir / "roc_curve_data.json"
+    y_true = np.asarray(y_true).astype(int)
+    y_proba = np.asarray(y_proba, dtype=float)
+
+    if y_proba.ndim != 2 or y_proba.shape[1] != len(CLASS_LABELS):
+        payload = {
+            "status": "unavailable",
+            "reason": "unexpected_proba_shape",
+            "model_name": best_model_name,
+            "proba_shape": list(y_proba.shape),
+        }
+        with output_path.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, indent=2, ensure_ascii=False)
+        return output_path
+
+    y_bin = label_binarize(y_true, classes=CLASS_LABELS)
+    per_class = {}
+    for class_index, class_label in enumerate(CLASS_LABELS):
+        try:
+            fpr, tpr, _ = roc_curve(y_bin[:, class_index], y_proba[:, class_index])
+            auc_value = float(roc_auc_score(y_bin[:, class_index], y_proba[:, class_index]))
+            per_class[str(class_label)] = {
+                "fpr": [float(v) for v in fpr.tolist()],
+                "tpr": [float(v) for v in tpr.tolist()],
+                "auc": auc_value,
+            }
+        except Exception:
+            per_class[str(class_label)] = {"fpr": [], "tpr": [], "auc": None}
+
+    payload = {
+        "status": "ok",
+        "model_name": best_model_name,
+        "auc_ovr_macro": safe_compute_roc_auc_ovr_macro(y_true, y_proba),
+        "classes": [int(v) for v in CLASS_LABELS],
+        "class_names": {str(k): v for k, v in CLASS_NAME_MAP.items()},
+        "curves": per_class,
+    }
+    with output_path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2, ensure_ascii=False)
+    print(f"Saved ROC curve data to: {output_path}")
+    return output_path
+
+
 def build_sequence_datasets(
     daily_df: pd.DataFrame,
     window_size: int = SEQUENCE_WINDOW,
@@ -1318,7 +1368,10 @@ def train_arima_family_model(model_name: str, daily_df: pd.DataFrame, seasonal: 
     )
 
 
-def train_lstm_sequence_model(model_name: str, daily_df: pd.DataFrame) -> tuple[dict, object, StandardScaler]:
+def train_lstm_sequence_model(
+    model_name: str,
+    daily_df: pd.DataFrame,
+) -> tuple[dict, object, StandardScaler, np.ndarray, np.ndarray]:
     """Huấn luyện LSTM classifier trên sequence theo ngày."""
     X_train_seq, y_train_seq, X_test_seq, y_test_seq, seq_scaler = build_sequence_datasets(daily_df)
     lstm_model = build_lstm_classifier((X_train_seq.shape[1], X_train_seq.shape[2]))
@@ -1344,7 +1397,8 @@ def train_lstm_sequence_model(model_name: str, daily_df: pd.DataFrame) -> tuple[
         deployment_compatible=False,
         evaluation_scope="daily_sequence",
     )
-    return metrics, lstm_model, seq_scaler
+    metrics["roc_auc_ovr_macro"] = safe_compute_roc_auc_ovr_macro(y_test_seq, probabilities)
+    return metrics, lstm_model, seq_scaler, np.asarray(y_test_seq, dtype=int), np.asarray(probabilities, dtype=float)
 
 
 def train_sequence_deep_model(
@@ -1371,7 +1425,7 @@ def train_sequence_deep_model(
         )
         probabilities = model.predict(X_test_seq, verbose=0)
         predictions = np.argmax(probabilities, axis=1)
-        return evaluate_prediction_arrays(
+        metrics = evaluate_prediction_arrays(
             model_name=model_name,
             y_true=y_test_seq,
             y_pred=predictions,
@@ -1379,6 +1433,8 @@ def train_sequence_deep_model(
             deployment_compatible=False,
             evaluation_scope="daily_sequence",
         )
+        metrics["roc_auc_ovr_macro"] = safe_compute_roc_auc_ovr_macro(y_test_seq, probabilities)
+        return metrics, y_test_seq, probabilities
     finally:
         clear_tensorflow_session()
 
@@ -1422,7 +1478,7 @@ def train_lstm_xgboost_hybrid_model(model_name: str, daily_df: pd.DataFrame) -> 
         )
         hybrid_classifier.fit(train_embeddings, y_train_seq)
         hybrid_predictions = hybrid_classifier.predict(test_embeddings)
-        return evaluate_prediction_arrays(
+        metrics = evaluate_prediction_arrays(
             model_name=model_name,
             y_true=y_test_seq,
             y_pred=hybrid_predictions,
@@ -1430,6 +1486,13 @@ def train_lstm_xgboost_hybrid_model(model_name: str, daily_df: pd.DataFrame) -> 
             deployment_compatible=False,
             evaluation_scope="daily_sequence",
         )
+        try:
+            hybrid_proba = hybrid_classifier.predict_proba(test_embeddings)
+            metrics["roc_auc_ovr_macro"] = safe_compute_roc_auc_ovr_macro(y_test_seq, hybrid_proba)
+        except Exception:
+            hybrid_proba = None
+            metrics["roc_auc_ovr_macro"] = None
+        return metrics, np.asarray(y_test_seq, dtype=int), hybrid_proba
     finally:
         clear_tensorflow_session()
 
@@ -1599,6 +1662,7 @@ def train_and_evaluate_models(
     """Huấn luyện và đánh giá mô hình theo từng nhóm phương pháp."""
     trained_models = {}
     evaluation_results = {}
+    roc_cache: dict[str, dict[str, np.ndarray]] = {}
 
     print(f"\n=== TRAINING {len(selected_models)} SELECTED MODELS ACROSS MULTIPLE CATEGORIES ===")
     for index, (model_name, model_config) in enumerate(selected_models.items(), start=1):
@@ -1644,37 +1708,43 @@ def train_and_evaluate_models(
         elif model_kind == "time_series_sarima":
             metrics = train_arima_family_model(model_name, daily_df, seasonal=True)
         elif model_kind == "lstm_sequence":
-            metrics, lstm_model, seq_scaler = train_lstm_sequence_model(model_name, daily_df)
+            metrics, lstm_model, seq_scaler, y_true_seq, y_proba_seq = train_lstm_sequence_model(model_name, daily_df)
             trained_models[model_name] = {
                 "model": lstm_model,
                 "seq_scaler": seq_scaler,
             }
+            roc_cache[model_name] = {"y_true": y_true_seq, "y_proba": y_proba_seq}
         elif model_kind == "gru_sequence":
-            metrics = train_sequence_deep_model(
+            metrics, y_true_seq, y_proba_seq = train_sequence_deep_model(
                 model_name=model_name,
                 daily_df=daily_df,
                 model_builder=build_gru_classifier,
                 epochs=30,
                 batch_size=64,
             )
+            roc_cache[model_name] = {"y_true": y_true_seq, "y_proba": y_proba_seq}
         elif model_kind == "cnn1d_sequence":
-            metrics = train_sequence_deep_model(
+            metrics, y_true_seq, y_proba_seq = train_sequence_deep_model(
                 model_name=model_name,
                 daily_df=daily_df,
                 model_builder=build_cnn1d_classifier,
                 epochs=30,
                 batch_size=64,
             )
+            roc_cache[model_name] = {"y_true": y_true_seq, "y_proba": y_proba_seq}
         elif model_kind == "cnn_lstm_sequence":
-            metrics = train_sequence_deep_model(
+            metrics, y_true_seq, y_proba_seq = train_sequence_deep_model(
                 model_name=model_name,
                 daily_df=daily_df,
                 model_builder=build_cnn_lstm_classifier,
                 epochs=30,
                 batch_size=64,
             )
+            roc_cache[model_name] = {"y_true": y_true_seq, "y_proba": y_proba_seq}
         elif model_kind == "lstm_xgboost_hybrid":
-            metrics = train_lstm_xgboost_hybrid_model(model_name, daily_df)
+            metrics, y_true_seq, y_proba_seq = train_lstm_xgboost_hybrid_model(model_name, daily_df)
+            if y_proba_seq is not None:
+                roc_cache[model_name] = {"y_true": y_true_seq, "y_proba": np.asarray(y_proba_seq, dtype=float)}
         else:
             raise ValueError(f"Unsupported model kind: {model_kind}")
 
@@ -1686,7 +1756,7 @@ def train_and_evaluate_models(
             f"Accuracy={metrics['accuracy']:.4f}"
         )
 
-    return trained_models, evaluation_results
+    return trained_models, evaluation_results, roc_cache
 
 
 def build_leaderboard_dataframe(evaluation_results: dict) -> pd.DataFrame:
@@ -1929,7 +1999,7 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
         balancing_method=balancing_method_used,
     )
 
-    trained_models, evaluation_results = train_and_evaluate_models(
+    trained_models, evaluation_results, roc_cache = train_and_evaluate_models(
         selected_models,
         X_train_balanced,
         y_train_balanced,
@@ -1939,11 +2009,13 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
         balancing_method_used,
     )
     save_incremental_candidate_artifacts(trained_models, run_dir=run_dir)
-    if "LSTM" in trained_models:
-        clear_tensorflow_session()
 
     leaderboard_df = build_leaderboard_dataframe(evaluation_results)
     best_model_name, best_model = select_best_model(evaluation_results, trained_models)
+    best_overall_model_name = max(
+        evaluation_results.keys(),
+        key=lambda candidate: float(evaluation_results[candidate].get("f1_macro", 0.0)),
+    )
 
     print_leaderboard(leaderboard_df)
     leaderboard_path = save_leaderboard_csv(leaderboard_df, run_dir)
@@ -1951,7 +2023,26 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
     best_model_path, scaler_path = save_run_artifacts(best_model, scaler, run_dir)
     confusion_matrix_path = plot_confusion_matrix(best_model, X_test_scaled, y_test, run_dir)
     feature_importance_path = plot_feature_importance(best_model, X_test_scaled, y_test, run_dir)
-    roc_curve_path = export_multiclass_roc_curve_data(best_model_name, best_model, X_test_scaled, y_test, run_dir)
+    if best_overall_model_name in roc_cache:
+        roc_curve_path = export_multiclass_roc_curve_from_proba(
+            best_overall_model_name,
+            roc_cache[best_overall_model_name]["y_true"],
+            roc_cache[best_overall_model_name]["y_proba"],
+            run_dir,
+        )
+    else:
+        model_for_roc = trained_models.get(best_overall_model_name)
+        if isinstance(model_for_roc, dict) and "model" in model_for_roc:
+            model_for_roc = model_for_roc["model"]
+        if model_for_roc is None:
+            model_for_roc = object()
+        roc_curve_path = export_multiclass_roc_curve_data(
+            best_overall_model_name,
+            model_for_roc,
+            X_test_scaled,
+            y_test,
+            run_dir,
+        )
 
     latest_leaderboard_path = copy_artifact_to_latest(leaderboard_path, "leaderboard.csv")
     latest_metrics_path = copy_artifact_to_latest(metrics_path, "evaluation_metrics.json")
@@ -1978,6 +2069,7 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
         "roc_curve_latest_path": str(latest_roc_curve_path),
         "balancing_method_used": balancing_method_used,
         "leaderboard": leaderboard_df.to_dict(orient="records"),
+        "best_overall_model_name": best_overall_model_name,
     }
 
 
