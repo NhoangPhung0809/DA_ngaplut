@@ -6,11 +6,12 @@ from typing import Any
 import folium
 import networkx as nx
 import osmnx as ox
+import streamlit as st
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Polygon, box, shape
 
 
 BASE_DIR = Path(__file__).resolve().parent
-GRAPH_CACHE_PATH = BASE_DIR / "data" / "geo" / "hue_drive.graphml"
+GRAPH_CACHE_PATH = BASE_DIR / "data" / "geo" / "hue_map.graphml"
 DEFAULT_PLACE_NAME = "Thừa Thiên Huế, Vietnam"
 DEFAULT_CENTER = (16.4637, 107.5909)
 DEFAULT_PENALTY_FACTOR = 10_000
@@ -51,13 +52,18 @@ def _save_graphml(graph: nx.MultiDiGraph, cache_path: Path) -> None:
     ox.io.save_graphml(graph, cache_path)
 
 
+@st.cache_resource(show_spinner=False)
 def download_or_load_graph(
     cache_path: str | Path = GRAPH_CACHE_PATH,
     place_name: str = DEFAULT_PLACE_NAME,
     force_download: bool = False,
 ) -> nx.MultiDiGraph:
     """
-    Download the drivable OSM graph for Hue and cache it locally as GraphML.
+    Offline-first loading for the drivable Hue OSM graph.
+
+    - If `hue_map.graphml` already exists locally, load it directly.
+    - Otherwise, fetch from OSM, save immediately to `hue_map.graphml`, then return it.
+    - Streamlit caches the in-memory graph so repeated reruns do not reload it.
     """
     cache_path = Path(cache_path)
     cache_path.parent.mkdir(parents=True, exist_ok=True)

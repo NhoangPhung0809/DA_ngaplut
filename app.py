@@ -494,7 +494,7 @@ def get_future_predictions(model, scaler, forecast_days=14):
             continue
 
         feature_frame = location_forecast[feature_columns].copy()
-        scaled_features = scaler.transform(feature_frame)
+        scaled_features = scale_feature_frame_for_inference(scaler, feature_frame)
         predictions = model.predict(scaled_features)
         if hasattr(model, "predict_proba"):
             proba_matrix = model.predict_proba(scaled_features)
@@ -557,7 +557,17 @@ def build_feature_frame(weather, feature_columns):
     return pd.DataFrame([row], columns=feature_columns)
 
 
-def get_prediction_and_flood_probability(model, features_scaled):
+def scale_feature_frame_for_inference(scaler, feature_frame: pd.DataFrame) -> pd.DataFrame:
+    """Scale dữ liệu nhưng vẫn giữ nguyên DataFrame và tên cột cho sklearn."""
+    scaled_values = scaler.transform(feature_frame)
+    return pd.DataFrame(
+        scaled_values,
+        columns=feature_frame.columns,
+        index=feature_frame.index,
+    )
+
+
+def get_prediction_and_flood_probability(model, features_scaled: pd.DataFrame):
     """
     Trả về:
     - nhãn dự đoán
@@ -606,7 +616,7 @@ def get_realtime_prediction(model, scaler):
     for location in LOCATIONS:
         weather = get_current_weather(location)
         feature_frame = build_feature_frame(weather, feature_columns)
-        scaled_features = scaler.transform(feature_frame)
+        scaled_features = scale_feature_frame_for_inference(scaler, feature_frame)
 
         prediction, probability = get_prediction_and_flood_probability(model, scaled_features)
 

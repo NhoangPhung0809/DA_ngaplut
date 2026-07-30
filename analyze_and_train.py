@@ -23,6 +23,7 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.preprocessing import StandardScaler
@@ -75,7 +76,6 @@ except ImportError:
     Sequential = None
 
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
-warnings.filterwarnings("ignore", category=UserWarning)
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" / "historical"
@@ -117,6 +117,15 @@ CTGAN_MAX_TRAIN_ROWS_PER_CLASS = 5000
 CTGAN_MAX_TARGET_ROWS_PER_CLASS = 10000
 CTGAN_EPOCHS = 10
 CTGAN_BATCH_SIZE = 256
+TARGET_LEAKAGE_KEYWORDS = (
+    "muc_ngap",
+    "flood_class",
+    "target",
+    "rain_level",
+    "label",
+    "nguy_cơ_ngập",
+    "nguy_co_ngap",
+)
 
 
 def ensure_base_directories() -> None:
@@ -288,23 +297,94 @@ def preprocess_features(df: pd.DataFrame) -> pd.DataFrame:
     return processed_df[[LOCATION_COL, TIME_COL, *FEATURE_COLS, TARGET_COL]]
 
 
+def detect_target_leakage_columns(df: pd.DataFrame) -> list[str]:
+    """Phát hiện các cột có dấu hiệu rò rỉ nhãn để loại khỏi feature set."""
+    leakage_columns = []
+    for column in df.columns:
+        normalized_column = str(column).strip().lower()
+        if column == TARGET_COL:
+            continue
+        if any(keyword in normalized_column for keyword in TARGET_LEAKAGE_KEYWORDS):
+            leakage_columns.append(column)
+    return leakage_columns
+
+
+def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Tạo ma trận feature sạch, chỉ giữ đúng các biến đầu vào hợp lệ."""
+    leakage_columns = detect_target_leakage_columns(df)
+    if leakage_columns:
+        print(
+            "Dropped potential leakage columns from feature candidates: "
+            + ", ".join(sorted(leakage_columns))
+        )
+
+    missing_features = [column for column in FEATURE_COLS if column not in df.columns]
+    if missing_features:
+        raise ValueError(
+            "Thiếu các cột feature bắt buộc: " + ", ".join(missing_features)
+        )
+
+    return df.loc[:, FEATURE_COLS].copy()
+
+
 def chronological_train_test_split(df: pd.DataFrame, train_ratio: float = 0.8):
-    """Chia train/test theo trục thời gian, tuyệt đối không shuffle."""
-    sorted_df = df.sort_values(TIME_COL).reset_index(drop=True)
-    split_index = int(len(sorted_df) * train_ratio)
+    """
+    Chia train/test theo thời gian cho từng địa phương trước, sau đó mới tạo nhãn T+1.
 
-    train_df = sorted_df.iloc[:split_index].copy()
-    test_df = sorted_df.iloc[split_index:].copy()
+    Điều này giúp:
+    - không dùng feature ngày T để dự đoán nhãn của chính ngày T
+    - không để nhãn train "ăn sang" khoảng thời gian test
+    - đảm bảo split xảy ra trước mọi bước scaling / balancing
+    """
+    train_parts = []
+    test_parts = []
 
-    X_train = train_df[FEATURE_COLS]
-    y_train = train_df[TARGET_COL]
-    X_test = test_df[FEATURE_COLS]
-    y_test = test_df[TARGET_COL]
+    for location_name, location_df in df.groupby(LOCATION_COL):
+        location_df = location_df.sort_values(TIME_COL).reset_index(drop=True)
+        if len(location_df) < 4:
+            print(
+                f"Skipping {location_name}: only {len(location_df)} rows, "
+                "not enough for split + T+1 target shift."
+            )
+            continue
 
-    print("\nChronological split completed:")
-    print(f"Train rows: {len(train_df)}")
-    print(f"Test rows : {len(test_df)}")
-    print(f"Split time: {test_df[TIME_COL].min()}")
+        train_location_df, test_location_df = train_test_split(
+            location_df,
+            train_size=train_ratio,
+            shuffle=False,
+        )
+
+        if len(train_location_df) < 2 or len(test_location_df) < 2:
+            print(
+                f"Skipping {location_name}: train/test partitions are too small after split."
+            )
+            continue
+
+        train_parts.append(train_location_df.copy())
+        test_parts.append(test_location_df.copy())
+
+    if not train_parts or not test_parts:
+        raise ValueError("Không đủ dữ liệu để tạo train/test split theo thời gian.")
+
+    train_df = pd.concat(train_parts, ignore_index=True)
+    test_df = pd.concat(test_parts, ignore_index=True)
+
+    train_df = apply_time_lag_target_shift(train_df)
+    test_df = apply_time_lag_target_shift(test_df)
+
+    if train_df.empty or test_df.empty:
+        raise ValueError("Tập train/test rỗng sau khi áp dụng nhãn trễ T+1.")
+
+    X_train = build_feature_frame(train_df)
+    y_train = train_df[TARGET_COL].copy()
+    X_test = build_feature_frame(test_df)
+    y_test = test_df[TARGET_COL].copy()
+
+    print("\nChronological split completed before scaling/balancing:")
+    print(f"Train rows after T+1 shift: {len(train_df)}")
+    print(f"Test rows after T+1 shift : {len(test_df)}")
+    print(f"Train time range          : {train_df[TIME_COL].min()} -> {train_df[TIME_COL].max()}")
+    print(f"Test time range           : {test_df[TIME_COL].min()} -> {test_df[TIME_COL].max()}")
 
     return X_train, X_test, y_train, y_test
 
@@ -917,7 +997,7 @@ def train_and_evaluate_models(
                 y_pred=predictions,
                 category=category,
                 deployment_compatible=deployment_compatible,
-                evaluation_scope="hourly_tabular",
+                evaluation_scope="daily_t_plus_1_tabular",
             )
         elif model_kind == "tabular_regressor":
             model = model_config["model"]
@@ -930,7 +1010,7 @@ def train_and_evaluate_models(
                 y_pred=predictions,
                 category=category,
                 deployment_compatible=deployment_compatible,
-                evaluation_scope="hourly_tabular",
+                evaluation_scope="daily_t_plus_1_tabular",
             )
         elif model_kind == "time_series_arima":
             metrics = train_arima_family_model(model_name, daily_df, seasonal=False)
@@ -1149,12 +1229,16 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
     run_dir = MODELS_DIR / f"run_{ts}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    df = load_and_concatenate_csvs()
-    df = create_multiclass_flood_label(df)
-    df = preprocess_features(df)
-    daily_df = build_daily_modeling_dataset(df)
+    raw_df = load_and_concatenate_csvs()
+    daily_feature_df = build_daily_feature_dataset(raw_df)
+    labeled_daily_df = create_multiclass_flood_label(daily_feature_df)
+    modeling_df = preprocess_features(labeled_daily_df)
+    daily_df = build_daily_modeling_dataset(modeling_df)
 
-    X_train, X_test, y_train, y_test = chronological_train_test_split(df, train_ratio=0.8)
+    X_train, X_test, y_train, y_test = chronological_train_test_split(
+        modeling_df,
+        train_ratio=0.8,
+    )
     X_train_scaled, X_test_scaled, scaler = scale_features(X_train, X_test)
     balancing_method_used = resolve_balancing_method(balancing_method)
     X_train_balanced, y_train_balanced = balance_training_data(
