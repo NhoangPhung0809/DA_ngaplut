@@ -1652,11 +1652,11 @@ def render_training_controls():
 
         action_col_1, action_col_2 = st.columns(2)
         if action_col_1.button("Làm mới trạng thái", key="refresh_training_status_button", use_container_width=True):
-            st.rerun()
+            st.info("Đã cập nhật trạng thái train nền.")
         if action_col_2.button("Nạp artifact mới", key="reload_trained_artifacts_button", use_container_width=True):
             st.cache_data.clear()
             st.cache_resource.clear()
-            st.rerun()
+            st.success("Đã xóa cache artifact. App sẽ dùng artifact mới ở lần render hiện tại.")
 
         training_log_tail = read_training_log_tail()
         if training_log_tail:
@@ -1682,7 +1682,6 @@ def render_sidebar_controls(df_predictions: pd.DataFrame, df_future: pd.DataFram
             st.toast("Đang cập nhật dữ liệu mới...", icon="⏳")
             st.cache_data.clear()
             st.cache_resource.clear()
-            st.rerun()
         except Exception as e:
             st.error(str(e))
 
@@ -2022,7 +2021,7 @@ def main():
     if st.button("🔄 Làm mới dữ liệu"):
         st.cache_data.clear()
         st.cache_resource.clear()
-        st.rerun()
+        st.success("Đã làm mới cache dữ liệu cho lần render hiện tại.")
 
 
 if __name__ == "__main__":
