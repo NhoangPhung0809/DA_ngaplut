@@ -1,4 +1,8 @@
 import math
+import json
+import os
+import subprocess
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -9,6 +13,9 @@ from retry_requests import retry
 
 BASE_DIR = Path(__file__).resolve().parent
 HISTORICAL_DIR = BASE_DIR / "data" / "historical"
+CACHE_DIR = BASE_DIR / "cache"
+INCREMENTAL_NEW_ROWS_PATH = CACHE_DIR / "new_historical_rows.csv"
+TRAINING_WORKER_PATH = BASE_DIR / "training_worker.py"
 
 # Cấu hình cache và retry cho các yêu cầu HTTP.
 cache_session = requests_cache.CachedSession(str(BASE_DIR / ".cache"), expire_after=-1)
@@ -31,6 +38,7 @@ START_DATE_STR = START_DATE.strftime("%Y-%m-%d")
 END_DATE_STR = END_DATE.strftime("%Y-%m-%d")
 
 HISTORICAL_DIR.mkdir(parents=True, exist_ok=True)
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def build_hourly_index(hourly_block):
@@ -181,16 +189,65 @@ def main():
     print("=== BẮT ĐẦU TẢI DỮ LIỆU LỊCH SỬ ===")
     print(f"Thời gian: {START_DATE_STR} đến {END_DATE_STR}\n")
 
+    new_rows_frames = []
     for location in LOCATIONS:
         df = fetch_location_data(location)
         if df.empty:
             continue
 
         save_path = HISTORICAL_DIR / f"{location['name']}_10years.csv"
-        df.to_csv(save_path, index=False)
-        print(f"✅ Đã lưu thành công: {save_path} ({len(df)} dòng)")
+        location_name_for_training = save_path.stem.replace("_10years", "").replace("_", " ").strip()
+        df["Địa phương"] = location_name_for_training
+
+        existing_df = pd.DataFrame()
+        if save_path.exists():
+            try:
+                existing_df = pd.read_csv(save_path)
+                existing_df["Thời_gian"] = pd.to_datetime(existing_df["Thời_gian"], errors="coerce")
+                existing_df = existing_df.dropna(subset=["Thời_gian"]).sort_values("Thời_gian").reset_index(drop=True)
+            except Exception:
+                existing_df = pd.DataFrame()
+
+        df["Thời_gian"] = pd.to_datetime(df["Thời_gian"], errors="coerce")
+        df = df.dropna(subset=["Thời_gian"]).sort_values("Thời_gian").reset_index(drop=True)
+
+        if not existing_df.empty:
+            max_existing_time = existing_df["Thời_gian"].max()
+            new_rows = df.loc[df["Thời_gian"] > max_existing_time].copy()
+        else:
+            new_rows = df.copy()
+
+        if not new_rows.empty:
+            new_rows_frames.append(new_rows)
+
+        combined = pd.concat([existing_df, df], ignore_index=True) if not existing_df.empty else df
+        combined = combined.drop_duplicates(subset=["Thời_gian"], keep="last").sort_values("Thời_gian").reset_index(drop=True)
+        combined.to_csv(save_path, index=False, encoding="utf-8-sig")
+        print(f"✅ Đã đồng bộ: {save_path} (total={len(combined)} | new={len(new_rows)})")
 
     print("\n=== HOÀN THÀNH TẢI DỮ LIỆU! ===")
+    if new_rows_frames:
+        new_rows_all = pd.concat(new_rows_frames, ignore_index=True)
+        new_rows_all.to_csv(INCREMENTAL_NEW_ROWS_PATH, index=False, encoding="utf-8-sig")
+        print(f"✅ Export new rows for incremental training: {INCREMENTAL_NEW_ROWS_PATH} ({len(new_rows_all)} dòng)")
+
+        if str(os.environ.get("AUTO_INCREMENTAL_TRAINING", "1")).strip() == "1":
+            command = [
+                sys.executable,
+                str(TRAINING_WORKER_PATH),
+                "--mode",
+                "incremental",
+                "--models-json",
+                json.dumps([], ensure_ascii=False),
+                "--balancing-method",
+                "auto",
+                "--new-data-csv",
+                str(INCREMENTAL_NEW_ROWS_PATH),
+            ]
+            subprocess.Popen(command, cwd=str(BASE_DIR))
+            print("✅ Đã khởi chạy incremental training worker.")
+    else:
+        print("ℹ️ Không có bản ghi mới để incremental training.")
 
 
 if __name__ == "__main__":

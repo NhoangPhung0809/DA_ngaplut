@@ -67,7 +67,7 @@ try:
     from tensorflow.keras import backend as K
     from tensorflow.keras.callbacks import EarlyStopping
     from tensorflow.keras.layers import LSTM, Dense, Input
-    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.models import Sequential, load_model
 except ImportError:
     Model = None
     K = None
@@ -76,6 +76,7 @@ except ImportError:
     Dense = None
     Input = None
     Sequential = None
+    load_model = None
 
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
@@ -87,6 +88,11 @@ LATEST_MODELS_DIR = MODELS_DIR / "latest"
 CTGAN_BEFORE_PATH = BASE_DIR / "data" / "data_before_ctgan.csv"
 CTGAN_AFTER_PATH = BASE_DIR / "data" / "data_after_ctgan.csv"
 CTGAN_DISTRIBUTION_PATH = BASE_DIR / "data" / "ctgan_class_distribution.json"
+INCREMENTAL_CACHE_DIR = BASE_DIR / "cache"
+INCREMENTAL_CURSOR_PATH = INCREMENTAL_CACHE_DIR / "incremental_cursor.json"
+BEST_XGBOOST_PATH = LATEST_MODELS_DIR / "best_xgboost.json"
+BEST_LSTM_PATH = LATEST_MODELS_DIR / "best_lstm_model.keras"
+LSTM_SEQ_SCALER_PATH = LATEST_MODELS_DIR / "lstm_seq_scaler.pkl"
 
 TIME_COL = "Thời_gian"
 DATE_COL = "Ngày"
@@ -123,6 +129,8 @@ CTGAN_MAX_TARGET_ROWS_PER_CLASS = 10000
 CTGAN_EPOCHS = 10
 CTGAN_BATCH_SIZE = 256
 CTGAN_EXPORT_SAMPLE_SIZE = 1000
+INCREMENTAL_LSTM_EPOCHS = 6
+INCREMENTAL_XGB_N_ESTIMATORS = 60
 TARGET_LEAKAGE_KEYWORDS = (
     "muc_ngap",
     "flood_class",
@@ -140,6 +148,7 @@ def ensure_base_directories() -> None:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     LATEST_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    INCREMENTAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def validate_optional_dependencies() -> None:
@@ -843,6 +852,250 @@ def clear_tensorflow_session() -> None:
     gc.collect()
 
 
+def log_realtime_update(message: str) -> None:
+    """Log chuẩn hóa cho incremental learning."""
+    print(f"\n[REALTIME-INCREMENTAL] {message}")
+
+
+def load_incremental_cursor() -> dict:
+    """Đọc cursor để tránh fine-tune lặp lại cùng bản ghi theo ngày."""
+    ensure_base_directories()
+    if not INCREMENTAL_CURSOR_PATH.exists():
+        return {}
+    with INCREMENTAL_CURSOR_PATH.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def save_incremental_cursor(cursor: dict) -> None:
+    """Lưu cursor incremental."""
+    ensure_base_directories()
+    with INCREMENTAL_CURSOR_PATH.open("w", encoding="utf-8") as file:
+        json.dump(cursor, file, indent=2, ensure_ascii=False)
+
+
+def normalize_input_new_data(new_data_df: pd.DataFrame) -> pd.DataFrame:
+    """Chuẩn hóa DataFrame đầu vào incremental để khớp schema pipeline."""
+    df = new_data_df.copy()
+    if LOCATION_COL not in df.columns:
+        df[LOCATION_COL] = "Unknown"
+    if TIME_COL in df.columns:
+        df[TIME_COL] = pd.to_datetime(df[TIME_COL], errors="coerce")
+    return df
+
+
+def build_incremental_tabular_dataset(new_data_df: pd.DataFrame) -> pd.DataFrame:
+    """Tạo dữ liệu tabular T->T+1 từ các bản ghi mới (hourly->daily->label->shift)."""
+    normalized = normalize_input_new_data(new_data_df)
+    daily_features = build_daily_feature_dataset(normalized)
+    labeled_daily = create_multiclass_flood_label(daily_features)
+    processed = preprocess_features(labeled_daily)
+    shifted = apply_time_lag_target_shift(processed)
+    return shifted
+
+
+def load_latest_scaler() -> StandardScaler:
+    """Nạp scaler đã fit từ lần train đầy đủ gần nhất."""
+    scaler_path = LATEST_MODELS_DIR / "scaler.pkl"
+    if not scaler_path.exists():
+        raise FileNotFoundError("Không tìm thấy `models/latest/scaler.pkl` để incremental transform.")
+    return joblib.load(scaler_path)
+
+
+def ensure_xgboost_model_available() -> XGBClassifier | None:
+    """Bảo đảm có model XGBoost artifact cho incremental update."""
+    if BEST_XGBOOST_PATH.exists():
+        model = XGBClassifier(
+            objective="multi:softprob",
+            num_class=3,
+            n_estimators=INCREMENTAL_XGB_N_ESTIMATORS,
+            max_depth=6,
+            learning_rate=0.05,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            random_state=42,
+            eval_metric="mlogloss",
+            n_jobs=-1,
+        )
+        model.load_model(str(BEST_XGBOOST_PATH))
+        return model
+    return None
+
+
+def save_xgboost_artifact(xgb_model: XGBClassifier, run_dir: Path | None = None) -> None:
+    """Lưu XGBoost model để dùng incremental."""
+    ensure_base_directories()
+    if run_dir is not None:
+        xgb_run_path = run_dir / "xgboost_model.json"
+        xgb_model.save_model(str(xgb_run_path))
+    xgb_model.save_model(str(BEST_XGBOOST_PATH))
+
+
+def ensure_lstm_model_available() -> tuple[object | None, StandardScaler | None]:
+    """Bảo đảm có model LSTM + seq_scaler để incremental update."""
+    if load_model is None:
+        return None, None
+    if not BEST_LSTM_PATH.exists():
+        return None, None
+    lstm_model = load_model(str(BEST_LSTM_PATH))
+    lstm_model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+    if LSTM_SEQ_SCALER_PATH.exists():
+        seq_scaler = joblib.load(LSTM_SEQ_SCALER_PATH)
+    else:
+        seq_scaler = None
+    return lstm_model, seq_scaler
+
+
+def save_lstm_artifact(lstm_model, seq_scaler: StandardScaler | None, run_dir: Path | None = None) -> None:
+    """Lưu LSTM model và seq scaler để dùng incremental."""
+    ensure_base_directories()
+    if run_dir is not None:
+        lstm_run_path = run_dir / "lstm_model.keras"
+        lstm_model.save(str(lstm_run_path))
+    lstm_model.save(str(BEST_LSTM_PATH))
+    if seq_scaler is not None:
+        joblib.dump(seq_scaler, LSTM_SEQ_SCALER_PATH)
+
+
+def build_incremental_lstm_sequences(
+    full_daily_df: pd.DataFrame,
+    new_daily_df: pd.DataFrame,
+    seq_scaler: StandardScaler,
+    window_size: int = SEQUENCE_WINDOW,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Tạo sequence samples cho đúng các ngày mới, dùng context từ full history."""
+    X_sequences = []
+    y_sequences = []
+    if new_daily_df.empty:
+        return np.empty((0, window_size, len(FEATURE_COLS)), dtype=np.float32), np.empty((0,), dtype=np.int32)
+
+    for location_name, location_new_df in new_daily_df.groupby(LOCATION_COL):
+        location_all = full_daily_df.loc[full_daily_df[LOCATION_COL] == location_name].sort_values(TIME_COL).reset_index(drop=True)
+        if location_all.empty:
+            continue
+        time_to_index = {timestamp: idx for idx, timestamp in enumerate(location_all[TIME_COL])}
+        for timestamp in location_new_df[TIME_COL].tolist():
+            idx = time_to_index.get(timestamp)
+            if idx is None or idx < window_size - 1:
+                continue
+            window_df = location_all.iloc[idx - window_size + 1 : idx + 1]
+            scaled_window = seq_scaler.transform(window_df[FEATURE_COLS])
+            X_sequences.append(scaled_window)
+            y_sequences.append(int(location_all.iloc[idx][TARGET_COL]))
+
+    if not X_sequences:
+        return np.empty((0, window_size, len(FEATURE_COLS)), dtype=np.float32), np.empty((0,), dtype=np.int32)
+    return np.asarray(X_sequences, dtype=np.float32), np.asarray(y_sequences, dtype=np.int32)
+
+
+def incremental_train(new_data_df: pd.DataFrame) -> dict:
+    """
+    Fine-tune nhanh mô hình tốt nhất (XGBoost, LSTM) dựa trên dữ liệu mới.
+
+    new_data_df có thể là hourly data (có TIME_COL) kèm các cột FEATURE_COLS và LOCATION_COL.
+    """
+    ensure_base_directories()
+    log_realtime_update(f"Real-time Update Triggered: Fine-tuning model on {len(new_data_df)} new records.")
+
+    if new_data_df is None or new_data_df.empty:
+        return {"status": "skipped", "reason": "empty_new_data"}
+
+    if not (LATEST_MODELS_DIR / "scaler.pkl").exists():
+        log_realtime_update("Không tìm thấy scaler/model artifacts. Trigger full retrain (XGBoost) trước khi incremental update.")
+        run_training_pipeline(["XGBoost"])
+    scaler = load_latest_scaler()
+    cursor = load_incremental_cursor()
+    incremental_report = {"status": "completed", "updated_models": [], "skipped_models": []}
+
+    tabular_shifted = build_incremental_tabular_dataset(new_data_df)
+    if tabular_shifted.empty:
+        incremental_report["status"] = "skipped"
+        incremental_report["reason"] = "no_incremental_tabular_rows_after_shift"
+    else:
+        if "tabular_last_time" in cursor:
+            last_time_global = pd.to_datetime(cursor["tabular_last_time"], errors="coerce")
+            if pd.notna(last_time_global):
+                tabular_shifted = tabular_shifted.loc[tabular_shifted[TIME_COL] > last_time_global].copy()
+
+        if tabular_shifted.empty:
+            incremental_report["status"] = "skipped"
+            incremental_report["reason"] = "tabular_rows_already_processed"
+        else:
+            X_new = build_feature_frame(tabular_shifted)
+            y_new = tabular_shifted[TARGET_COL].astype(int)
+            X_new_scaled = pd.DataFrame(scaler.transform(X_new), columns=FEATURE_COLS)
+
+            xgb_model = ensure_xgboost_model_available()
+            if xgb_model is None:
+                log_realtime_update("Không tìm thấy `best_xgboost.json`. Trigger full retrain (XGBoost).")
+                run_training_pipeline(["XGBoost"])
+                xgb_model = ensure_xgboost_model_available()
+            if xgb_model is None:
+                incremental_report["skipped_models"].append("XGBoost")
+            else:
+                xgb_model.fit(X_new_scaled, y_new, xgb_model=str(BEST_XGBOOST_PATH))
+                save_xgboost_artifact(xgb_model)
+                incremental_report["updated_models"].append("XGBoost")
+
+            cursor["tabular_last_time"] = str(pd.to_datetime(tabular_shifted[TIME_COL]).max())
+            save_incremental_cursor(cursor)
+
+    lstm_model, seq_scaler = ensure_lstm_model_available()
+    if lstm_model is None:
+        if Sequential is not None and load_model is not None:
+            log_realtime_update("Không tìm thấy `best_lstm_model.keras`. Trigger full retrain (LSTM + XGBoost).")
+            available = list_available_models()
+            requested = [name for name in ["XGBoost", "LSTM"] if name in available]
+            if requested:
+                run_training_pipeline(requested)
+            lstm_model, seq_scaler = ensure_lstm_model_available()
+        if lstm_model is None:
+            incremental_report["skipped_models"].append("LSTM")
+            return incremental_report
+
+    try:
+        full_raw_df = load_and_concatenate_csvs()
+        full_daily_features = build_daily_feature_dataset(full_raw_df)
+        full_labeled = create_multiclass_flood_label(full_daily_features)
+        full_processed = preprocess_features(full_labeled)
+        full_daily_df = build_daily_modeling_dataset(full_processed)
+
+        new_norm = normalize_input_new_data(new_data_df)
+        new_daily_features = build_daily_feature_dataset(new_norm)
+        new_labeled = create_multiclass_flood_label(new_daily_features)
+        new_processed = preprocess_features(new_labeled)
+        new_daily_df = build_daily_modeling_dataset(new_processed)
+
+        if seq_scaler is None:
+            train_daily = full_daily_df.copy()
+            seq_scaler = StandardScaler()
+            seq_scaler.fit(train_daily[FEATURE_COLS])
+
+        if "lstm_last_time" in cursor:
+            last_lstm_time = pd.to_datetime(cursor["lstm_last_time"], errors="coerce")
+            if pd.notna(last_lstm_time):
+                new_daily_df = new_daily_df.loc[new_daily_df[TIME_COL] > last_lstm_time].copy()
+
+        X_seq, y_seq = build_incremental_lstm_sequences(full_daily_df, new_daily_df, seq_scaler, window_size=SEQUENCE_WINDOW)
+        if len(X_seq) == 0:
+            incremental_report["skipped_models"].append("LSTM")
+            return incremental_report
+
+        lstm_model.fit(
+            X_seq,
+            y_seq,
+            epochs=INCREMENTAL_LSTM_EPOCHS,
+            batch_size=32,
+            verbose=0,
+        )
+        save_lstm_artifact(lstm_model, seq_scaler)
+        incremental_report["updated_models"].append("LSTM")
+        cursor["lstm_last_time"] = str(pd.to_datetime(new_daily_df[TIME_COL]).max())
+        save_incremental_cursor(cursor)
+        return incremental_report
+    finally:
+        clear_tensorflow_session()
+
+
 def train_arima_family_model(model_name: str, daily_df: pd.DataFrame, seasonal: bool) -> dict:
     """Huấn luyện ARIMA/SARIMA trên chuỗi nhãn theo ngày của từng địa phương."""
     y_true_all = []
@@ -890,36 +1143,33 @@ def train_arima_family_model(model_name: str, daily_df: pd.DataFrame, seasonal: 
     )
 
 
-def train_lstm_sequence_model(model_name: str, daily_df: pd.DataFrame) -> tuple[dict, object]:
+def train_lstm_sequence_model(model_name: str, daily_df: pd.DataFrame) -> tuple[dict, object, StandardScaler]:
     """Huấn luyện LSTM classifier trên sequence theo ngày."""
-    try:
-        X_train_seq, y_train_seq, X_test_seq, y_test_seq, _ = build_sequence_datasets(daily_df)
-        lstm_model = build_lstm_classifier((X_train_seq.shape[1], X_train_seq.shape[2]))
-        callbacks = [EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)]
-        class_weights = build_class_weight_mapping(y_train_seq)
-        lstm_model.fit(
-            X_train_seq,
-            y_train_seq,
-            validation_split=0.2,
-            epochs=25,
-            batch_size=32,
-            callbacks=callbacks,
-            verbose=0,
-            class_weight=class_weights,
-        )
-        probabilities = lstm_model.predict(X_test_seq, verbose=0)
-        predictions = np.argmax(probabilities, axis=1)
-        metrics = evaluate_prediction_arrays(
-            model_name=model_name,
-            y_true=y_test_seq,
-            y_pred=predictions,
-            category="Deep Learning",
-            deployment_compatible=False,
-            evaluation_scope="daily_sequence",
-        )
-        return metrics, lstm_model
-    finally:
-        clear_tensorflow_session()
+    X_train_seq, y_train_seq, X_test_seq, y_test_seq, seq_scaler = build_sequence_datasets(daily_df)
+    lstm_model = build_lstm_classifier((X_train_seq.shape[1], X_train_seq.shape[2]))
+    callbacks = [EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)]
+    class_weights = build_class_weight_mapping(y_train_seq)
+    lstm_model.fit(
+        X_train_seq,
+        y_train_seq,
+        validation_split=0.2,
+        epochs=25,
+        batch_size=32,
+        callbacks=callbacks,
+        verbose=0,
+        class_weight=class_weights,
+    )
+    probabilities = lstm_model.predict(X_test_seq, verbose=0)
+    predictions = np.argmax(probabilities, axis=1)
+    metrics = evaluate_prediction_arrays(
+        model_name=model_name,
+        y_true=y_test_seq,
+        y_pred=predictions,
+        category="Deep Learning",
+        deployment_compatible=False,
+        evaluation_scope="daily_sequence",
+    )
+    return metrics, lstm_model, seq_scaler
 
 
 def train_lstm_xgboost_hybrid_model(model_name: str, daily_df: pd.DataFrame) -> dict:
@@ -1142,7 +1392,11 @@ def train_and_evaluate_models(
         elif model_kind == "time_series_sarima":
             metrics = train_arima_family_model(model_name, daily_df, seasonal=True)
         elif model_kind == "lstm_sequence":
-            metrics, _ = train_lstm_sequence_model(model_name, daily_df)
+            metrics, lstm_model, seq_scaler = train_lstm_sequence_model(model_name, daily_df)
+            trained_models[model_name] = {
+                "model": lstm_model,
+                "seq_scaler": seq_scaler,
+            }
         elif model_kind == "lstm_xgboost_hybrid":
             metrics = train_lstm_xgboost_hybrid_model(model_name, daily_df)
         else:
@@ -1227,6 +1481,25 @@ def save_run_artifacts(best_model, scaler: StandardScaler, run_dir: Path) -> tup
     print(f"Saved best model to: {best_model_path}")
     print(f"Saved scaler to    : {scaler_path}")
     return best_model_path, scaler_path
+
+
+def save_incremental_candidate_artifacts(trained_models: dict, run_dir: Path) -> None:
+    """Lưu các model ứng viên cho incremental (XGBoost, LSTM) vào latest để fine-tune nhanh."""
+    if "XGBoost" in trained_models:
+        try:
+            save_xgboost_artifact(trained_models["XGBoost"], run_dir=run_dir)
+            print(f"Saved XGBoost incremental artifact to: {BEST_XGBOOST_PATH}")
+        except Exception as exc:
+            print(f"Friendly warning: Không thể lưu XGBoost incremental artifact ({exc}).")
+
+    if "LSTM" in trained_models:
+        bundle = trained_models.get("LSTM")
+        if isinstance(bundle, dict) and bundle.get("model") is not None:
+            try:
+                save_lstm_artifact(bundle["model"], bundle.get("seq_scaler"), run_dir=run_dir)
+                print(f"Saved LSTM incremental artifact to: {BEST_LSTM_PATH}")
+            except Exception as exc:
+                print(f"Friendly warning: Không thể lưu LSTM incremental artifact ({exc}).")
 
 
 def plot_confusion_matrix(best_model, X_test_scaled: pd.DataFrame, y_test: pd.Series, output_dir: Path) -> Path:
@@ -1381,6 +1654,9 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
         daily_df,
         balancing_method_used,
     )
+    save_incremental_candidate_artifacts(trained_models, run_dir=run_dir)
+    if "LSTM" in trained_models:
+        clear_tensorflow_session()
 
     leaderboard_df = build_leaderboard_dataframe(evaluation_results)
     best_model_name, best_model = select_best_model(evaluation_results, trained_models)
