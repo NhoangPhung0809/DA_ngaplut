@@ -16,7 +16,6 @@ import streamlit as st
 from branca.colormap import LinearColormap
 from dotenv import load_dotenv
 from retry_requests import retry
-from routing_engine import DEFAULT_CENTER, build_visual_line_map, download_or_load_graph, get_safe_route
 from streamlit_folium import st_folium
 
 # Tải biến môi trường từ file .env nếu có.
@@ -122,9 +121,6 @@ MAP_NAME_NORMALIZATION = {
     "Quảng Điền": "Quảng Điền",
     "Huyện Quảng Điền": "Quảng Điền",
 }
-
-HUE_LAT_RANGE = (15.80, 16.85)
-HUE_LON_RANGE = (107.35, 107.95)
 
 
 def apply_global_ui_theme():
@@ -1024,153 +1020,6 @@ def load_geojson_data():
     return geojson_data
 
 
-@st.cache_resource(show_spinner=False)
-def load_routing_graph():
-    """Nạp graph OSM đường bộ cho Huế và cache ở cấp resource."""
-    return download_or_load_graph()
-
-
-def initialize_routing_state():
-    """Khởi tạo state cho tính năng click chọn điểm và định tuyến an toàn."""
-    default_start = LOCATIONS[0]
-    default_end = LOCATIONS[1] if len(LOCATIONS) > 1 else LOCATIONS[0]
-    defaults = {
-        "route_start_lat": float(default_start["lat"]),
-        "route_start_lon": float(default_start["lon"]),
-        "route_end_lat": float(default_end["lat"]),
-        "route_end_lon": float(default_end["lon"]),
-        "routing_enabled": False,
-        "routing_last_clicked": None,
-        "routing_last_error": None,
-        "routing_last_summary": None,
-    }
-
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
-
-
-def prediction_label_to_routing_risk(label: str) -> str:
-    """Ánh xạ nhãn nguy cơ tiếng Việt sang nhãn routing_engine."""
-    value = str(label or "")
-    if "Ngập nặng" in value:
-        return "Heavy Flood"
-    if "Ngập nhẹ" in value:
-        return "Light Flood"
-    return "Safe"
-
-
-def build_flooded_regions_from_predictions(df_predictions: pd.DataFrame) -> list[dict]:
-    """Chuyển dự báo theo địa phương thành vùng flood để tô màu OSM roads."""
-    risk_lookup = build_risk_lookup(df_predictions)
-    geojson_data = load_geojson_data()
-    flooded_regions = []
-
-    if geojson_data and geojson_data.get("features"):
-        for feature in geojson_data.get("features", []):
-            properties = feature.get("properties", {})
-            district_name = properties.get("name")
-            district_info = risk_lookup.get(district_name)
-            if not district_info:
-                continue
-
-            risk_status = prediction_label_to_routing_risk(district_info["risk"])
-            if risk_status == "Safe":
-                continue
-
-            geometry = feature.get("geometry")
-            if geometry is None:
-                continue
-
-            flooded_regions.append(
-                {
-                    "name": district_name,
-                    "risk": risk_status,
-                    "geometry": geometry,
-                }
-            )
-
-        return flooded_regions
-
-    for _, row in df_predictions.iterrows():
-        risk_status = prediction_label_to_routing_risk(row.get("Nguy cơ"))
-        if risk_status == "Safe":
-            continue
-
-        center_lat = float(row["Vĩ độ"])
-        center_lon = float(row["Kinh độ"])
-        flooded_regions.append(
-            {
-                "name": row["Địa phương"],
-                "risk": risk_status,
-                "bounds": [
-                    center_lat - 0.045,
-                    center_lon - 0.055,
-                    center_lat + 0.045,
-                    center_lon + 0.055,
-                ],
-            }
-        )
-
-    return flooded_regions
-
-
-def add_selected_route_markers(base_map: folium.Map) -> None:
-    """Hiển thị marker A/B hiện tại khi chưa chạy route hoặc route lỗi."""
-    folium.Marker(
-        location=[
-            float(st.session_state["route_start_lat"]),
-            float(st.session_state["route_start_lon"]),
-        ],
-        tooltip="Start Point (A)",
-        icon=folium.Icon(color="green", icon="play"),
-    ).add_to(base_map)
-    folium.Marker(
-        location=[
-            float(st.session_state["route_end_lat"]),
-            float(st.session_state["route_end_lon"]),
-        ],
-        tooltip="Destination (B)",
-        icon=folium.Icon(color="red", icon="stop"),
-    ).add_to(base_map)
-
-
-def update_routing_click_state(map_state):
-    """Lưu tọa độ click mới nhất trên bản đồ để sidebar có thể gán cho A/B."""
-    last_clicked = (map_state or {}).get("last_clicked")
-    if not isinstance(last_clicked, dict):
-        return
-
-    lat = last_clicked.get("lat")
-    lng = last_clicked.get("lng")
-    if lat is None or lng is None:
-        return
-
-    st.session_state["routing_last_clicked"] = {
-        "lat": float(lat),
-        "lng": float(lng),
-    }
-
-
-def apply_last_click_to_route_point(target: str):
-    """Gán click gần nhất trên bản đồ cho điểm xuất phát hoặc đích."""
-    last_clicked = st.session_state.get("routing_last_clicked")
-    if not isinstance(last_clicked, dict):
-        return False
-
-    if target == "start":
-        st.session_state["route_start_lat"] = float(last_clicked["lat"])
-        st.session_state["route_start_lon"] = float(last_clicked["lng"])
-        return True
-
-    if target == "end":
-        st.session_state["route_end_lat"] = float(last_clicked["lat"])
-        st.session_state["route_end_lon"] = float(last_clicked["lng"])
-        return True
-
-    return False
-
-
 def build_risk_lookup(df_predictions):
     """Tạo dictionary lookup nhanh theo tên địa phương."""
     lookup = {}
@@ -1269,39 +1118,82 @@ def add_boundary_labels(base_map, geojson_data):
 
 
 def render_boundary_map(df_predictions):
-    """Render OSM road network với Visual Line và route detour an toàn nếu có."""
-    flooded_regions = build_flooded_regions_from_predictions(df_predictions)
-    routing_graph = load_routing_graph()
-    map_center = [DEFAULT_CENTER[0], DEFAULT_CENTER[1]]
-
-    st.session_state["routing_last_error"] = None
-    st.session_state["routing_last_summary"] = None
-
-    if st.session_state.get("routing_enabled", False):
-        try:
-            route_nodes, route_map, _ = get_safe_route(
-                routing_graph,
-                start_lat=float(st.session_state["route_start_lat"]),
-                start_lon=float(st.session_state["route_start_lon"]),
-                end_lat=float(st.session_state["route_end_lat"]),
-                end_lon=float(st.session_state["route_end_lon"]),
-                flooded_regions=flooded_regions,
-            )
-            st.session_state["routing_last_summary"] = (
-                f"Computed safe route across {len(route_nodes)} OSM nodes."
-            )
-            return route_map
-        except Exception as exc:
-            st.session_state["routing_last_error"] = str(exc)
-
-    visual_map = build_visual_line_map(
-        routing_graph,
-        flooded_regions=flooded_regions,
-        map_center=map_center,
-        zoom_start=11,
+    """Render bản đồ nhẹ để ưu tiên hiệu năng cho phần ML/deep learning."""
+    risk_lookup = build_risk_lookup(df_predictions)
+    base_map = folium.Map(location=[16.47, 107.63], zoom_start=10, tiles=None)
+    add_map_tiles(base_map)
+    heat_colormap = LinearColormap(
+        colors=["#11c26d", "#ffe082", "#ff8f00", "#d50000"],
+        vmin=0,
+        vmax=100,
     )
-    add_selected_route_markers(visual_map)
-    return visual_map
+    heat_colormap.caption = "Xác suất ngập (%)"
+
+    geojson_data = load_geojson_data()
+
+    if geojson_data and geojson_data.get("features") and geojson_is_in_target_region(geojson_data):
+        def style_function(feature):
+            name = feature["properties"].get("name")
+            info = risk_lookup.get(name, {})
+            probability = float(info.get("prob", 0))
+            fill_color = heat_colormap(probability)
+            return {
+                "fillColor": fill_color,
+                "color": "#80ffff",
+                "weight": 3,
+                "fillOpacity": 0.45,
+            }
+
+        def highlight_function(feature):
+            _ = feature
+            return {
+                "color": "#fff176",
+                "weight": 4,
+                "fillOpacity": 0.5,
+            }
+
+        folium.GeoJson(
+            geojson_data,
+            name="Ranh giới hành chính",
+            style_function=style_function,
+            highlight_function=highlight_function,
+            tooltip=folium.GeoJsonTooltip(
+                fields=["name"],
+                aliases=["Địa phương"],
+                localize=True,
+                sticky=False,
+            ),
+        ).add_to(base_map)
+        add_boundary_labels(base_map, geojson_data)
+    else:
+        for _, row in df_predictions.iterrows():
+            probability = float(row["Xác suất ngập (%)"])
+            color = heat_colormap(probability)
+            folium.CircleMarker(
+                location=[row["Vĩ độ"], row["Kinh độ"]],
+                radius=10,
+                color="#ffffff",
+                weight=2,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.88,
+                tooltip=f"{row['Địa phương']} - {row['Xác suất ngập (%)']}%",
+                popup=folium.Popup(
+                    build_map_popup_html(row),
+                    max_width=260,
+                ),
+            ).add_to(base_map)
+
+        bounds = [
+            [float(row["Vĩ độ"]), float(row["Kinh độ"])]
+            for _, row in df_predictions.iterrows()
+        ]
+        if bounds:
+            base_map.fit_bounds(bounds, padding=(30, 30))
+
+    heat_colormap.add_to(base_map)
+    folium.LayerControl().add_to(base_map)
+    return base_map
 
 
 def build_map_popup_html(row) -> str:
@@ -1521,6 +1413,16 @@ def render_sidebar_info(model, scaler):
     expected_features = get_expected_feature_columns(model, scaler)
     st.sidebar.subheader("Thông tin hệ thống")
     st.sidebar.write(f"Số địa phương đang theo dõi: {len(LOCATIONS)}")
+    st.sidebar.info(
+        "App đang dùng bản đồ nhẹ để ưu tiên hiệu năng cho huấn luyện ML/deep learning. "
+        "Routing OSM tạm thời được tách khỏi màn hình chính để tránh lag và crash trình duyệt."
+    )
+    st.sidebar.toggle(
+        "Hiển thị bản đồ nhẹ",
+        value=False,
+        key="show_light_map",
+        help="Để tắt mặc định nhằm giảm tải cho trình duyệt khi tập trung huấn luyện mô hình.",
+    )
     #st.sidebar.write(f"Số biến đầu vào mô hình: {len(expected_features)}")
     #st.sidebar.write("Thứ tự biến đầu vào:")
     #st.sidebar.code(", ".join(expected_features))
@@ -1631,89 +1533,6 @@ def render_sidebar_controls(df_predictions: pd.DataFrame, df_future: pd.DataFram
             key="download_future_csv_button",
             use_container_width=True,
         )
-
-
-def render_routing_sidebar():
-    """Sidebar cho nhập tọa độ, nhận click bản đồ và chạy safe routing."""
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🛣️ Dynamic Safe Routing")
-    st.sidebar.caption(
-        "Nhập tọa độ hoặc click lên bản đồ Huế rồi gán cho Start Point (A) và Destination (B)."
-    )
-
-    last_clicked = st.session_state.get("routing_last_clicked")
-    if isinstance(last_clicked, dict):
-        st.sidebar.caption(
-            f"Map click gần nhất: {last_clicked['lat']:.6f}, {last_clicked['lng']:.6f}"
-        )
-    else:
-        st.sidebar.caption("Map click gần nhất: chưa có")
-
-    click_col_a, click_col_b = st.sidebar.columns(2)
-    if click_col_a.button("Dùng click cho A", key="use_last_click_for_start", use_container_width=True):
-        if apply_last_click_to_route_point("start"):
-            st.rerun()
-        else:
-            st.sidebar.warning("Hãy click lên bản đồ trước khi gán cho điểm A.")
-    if click_col_b.button("Dùng click cho B", key="use_last_click_for_end", use_container_width=True):
-        if apply_last_click_to_route_point("end"):
-            st.rerun()
-        else:
-            st.sidebar.warning("Hãy click lên bản đồ trước khi gán cho điểm B.")
-
-    st.sidebar.number_input(
-        "Start A - Latitude",
-        min_value=HUE_LAT_RANGE[0],
-        max_value=HUE_LAT_RANGE[1],
-        step=0.0001,
-        format="%.6f",
-        key="route_start_lat",
-    )
-    st.sidebar.number_input(
-        "Start A - Longitude",
-        min_value=HUE_LON_RANGE[0],
-        max_value=HUE_LON_RANGE[1],
-        step=0.0001,
-        format="%.6f",
-        key="route_start_lon",
-    )
-    st.sidebar.number_input(
-        "Destination B - Latitude",
-        min_value=HUE_LAT_RANGE[0],
-        max_value=HUE_LAT_RANGE[1],
-        step=0.0001,
-        format="%.6f",
-        key="route_end_lat",
-    )
-    st.sidebar.number_input(
-        "Destination B - Longitude",
-        min_value=HUE_LON_RANGE[0],
-        max_value=HUE_LON_RANGE[1],
-        step=0.0001,
-        format="%.6f",
-        key="route_end_lon",
-    )
-
-    run_col, clear_col = st.sidebar.columns(2)
-    if run_col.button("Run Dijkstra Route", key="run_safe_route_button", use_container_width=True):
-        st.session_state["routing_enabled"] = True
-        st.session_state["routing_last_error"] = None
-        st.rerun()
-    if clear_col.button("Clear Route", key="clear_safe_route_button", use_container_width=True):
-        st.session_state["routing_enabled"] = False
-        st.session_state["routing_last_error"] = None
-        st.session_state["routing_last_summary"] = None
-        st.rerun()
-
-    if st.session_state.get("routing_enabled", False):
-        st.sidebar.info("Safe route đang được overlay bằng Polyline màu xanh dương.")
-    else:
-        st.sidebar.info("Bản đồ hiện hiển thị Visual Line với đường xanh lá và đỏ.")
-
-    if st.session_state.get("routing_last_error"):
-        st.sidebar.error(f"Routing error: {st.session_state['routing_last_error']}")
-    elif st.session_state.get("routing_last_summary"):
-        st.sidebar.success(st.session_state["routing_last_summary"])
 
 
 def render_model_metrics(evaluation_metrics, runtime_info):
@@ -1847,7 +1666,6 @@ def main():
     df_predictions = get_realtime_prediction(model, scaler)
     df_future = get_future_predictions(model, scaler, forecast_days=14)
     current_update_time = get_processing_timestamp_display()
-    initialize_routing_state()
     render_sidebar_info(model, scaler)
     render_tomorrow_nowcasting()
     render_stormglass_tide_sidebar()
@@ -1857,22 +1675,22 @@ def main():
 
     with map_col:
         st.subheader("🗺️ Bản đồ Rủi ro Ngập lụt")
-        st.caption(
-            f"🕒 Dữ liệu cập nhật lúc: {current_update_time} | "
-            "Click lên bản đồ để lấy tọa độ cho điểm A/B."
-        )
-        flood_map = render_boundary_map(df_predictions)
-        map_state = st_folium(
-            flood_map,
-            width=None,
-            height=560,
-            use_container_width=True,
-            returned_objects=["last_clicked"],
-            key="hue_visual_line_map",
-        )
-        update_routing_click_state(map_state)
+        st.caption(f"🕒 Dữ liệu cập nhật lúc: {current_update_time} | Chế độ bản đồ nhẹ")
+        if st.session_state.get("show_light_map", False):
+            flood_map = render_boundary_map(df_predictions)
+            st_folium(
+                flood_map,
+                width=None,
+                height=520,
+                use_container_width=True,
+                key="hue_light_map",
+            )
+        else:
+            st.info(
+                "Bản đồ đang được ẩn để giảm tải cho trình duyệt và ưu tiên hiệu năng huấn luyện ML/deep learning. "
+                "Bạn có thể bật lại trong sidebar bằng tùy chọn `Hiển thị bản đồ nhẹ`."
+            )
 
-    render_routing_sidebar()
     render_sidebar_controls(df_predictions, df_future)
 
     with table_col:
