@@ -2,6 +2,8 @@ import json
 import importlib.util
 import math
 import os
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -52,6 +54,10 @@ EXPECTED_HISTORICAL_FILES = {
 CTGAN_BEFORE_PATH = BASE_DIR / "data" / "data_before_ctgan.csv"
 CTGAN_AFTER_PATH = BASE_DIR / "data" / "data_after_ctgan.csv"
 CTGAN_DISTRIBUTION_PATH = BASE_DIR / "data" / "ctgan_class_distribution.json"
+CACHE_DIR = BASE_DIR / "cache"
+TRAINING_WORKER_PATH = BASE_DIR / "training_worker.py"
+TRAINING_STATUS_PATH = CACHE_DIR / "training_status.json"
+TRAINING_LOG_PATH = CACHE_DIR / "training_output.log"
 MENU_OPTIONS = [
     "🌊 Tổng quan dự báo",
     "📊 So sánh dữ liệu CTGAN",
@@ -224,7 +230,127 @@ def historical_data_missing() -> bool:
 
 def ensure_latest_models_dir() -> None:
     """Đảm bảo thư mục `models/latest/` luôn tồn tại cho frontend."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     LATEST_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def build_default_training_state() -> dict:
+    """Trạng thái mặc định của background training job."""
+    return {
+        "status": "idle",
+        "pid": None,
+        "selected_models": [],
+        "balancing_method": "auto",
+        "started_at": None,
+        "finished_at": None,
+        "best_model_name": None,
+        "run_dir": None,
+        "error": None,
+    }
+
+
+def write_training_state(state: dict) -> None:
+    """Lưu trạng thái train nền ra JSON để Streamlit và worker cùng đọc."""
+    ensure_latest_models_dir()
+    with TRAINING_STATUS_PATH.open("w", encoding="utf-8") as file:
+        json.dump(state, file, indent=2, ensure_ascii=False)
+
+
+def read_training_state() -> dict:
+    """Đọc trạng thái train nền hiện tại."""
+    ensure_latest_models_dir()
+    if not TRAINING_STATUS_PATH.exists():
+        return build_default_training_state()
+    with TRAINING_STATUS_PATH.open("r", encoding="utf-8") as file:
+        state = json.load(file)
+    default_state = build_default_training_state()
+    default_state.update(state)
+    return default_state
+
+
+def is_process_alive(pid: int | None) -> bool:
+    """Kiểm tra PID còn sống hay không mà không cần thư viện ngoài."""
+    if pid in (None, 0):
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def reconcile_training_state() -> dict:
+    """Đồng bộ trạng thái train với tình trạng process thực tế."""
+    state = read_training_state()
+    if state["status"] in {"starting", "running"} and not is_process_alive(state.get("pid")):
+        state["status"] = "failed"
+        state["finished_at"] = state.get("finished_at") or datetime.now().isoformat(timespec="seconds")
+        state["error"] = state.get("error") or "Background training process đã dừng ngoài dự kiến."
+        write_training_state(state)
+    return state
+
+
+def read_training_log_tail(max_lines: int = 80) -> str:
+    """Đọc phần cuối log train để hiển thị nhanh trên UI."""
+    ensure_latest_models_dir()
+    if not TRAINING_LOG_PATH.exists():
+        return ""
+    with TRAINING_LOG_PATH.open("r", encoding="utf-8", errors="replace") as file:
+        lines = file.readlines()
+    return "".join(lines[-max_lines:]).strip()
+
+
+def start_background_training(selected_models: list[str], balancing_method: str = "auto") -> dict:
+    """Khởi chạy worker train nền bằng process riêng, tách khỏi Streamlit session."""
+    ensure_latest_models_dir()
+    current_state = reconcile_training_state()
+    if current_state["status"] in {"starting", "running"} and is_process_alive(current_state.get("pid")):
+        raise RuntimeError("Đang có một tiến trình huấn luyện nền chạy sẵn. Hãy chờ tiến trình hiện tại hoàn tất.")
+
+    with TRAINING_LOG_PATH.open("w", encoding="utf-8") as log_file:
+        log_file.write(f"=== TRAINING JOB START REQUESTED AT {datetime.now().isoformat(timespec='seconds')} ===\n")
+        log_file.write(f"Selected models: {selected_models}\n")
+        log_file.write(f"Balancing method: {balancing_method}\n\n")
+
+    stdout_handle = TRAINING_LOG_PATH.open("a", encoding="utf-8")
+    command = [
+        sys.executable,
+        str(TRAINING_WORKER_PATH),
+        "--models-json",
+        json.dumps(selected_models, ensure_ascii=False),
+        "--balancing-method",
+        balancing_method,
+    ]
+    popen_kwargs = {
+        "cwd": str(BASE_DIR),
+        "stdout": stdout_handle,
+        "stderr": subprocess.STDOUT,
+        "env": {**os.environ, "PYTHONUNBUFFERED": "1"},
+    }
+    if os.name == "nt" and hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    process = subprocess.Popen(command, **popen_kwargs)
+    state = {
+        "status": "starting",
+        "pid": process.pid,
+        "selected_models": selected_models,
+        "balancing_method": balancing_method,
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "finished_at": None,
+        "best_model_name": None,
+        "run_dir": None,
+        "error": None,
+    }
+    write_training_state(state)
+    stdout_handle.close()
+    return state
 
 
 @st.cache_resource(show_spinner=False)
@@ -278,7 +404,7 @@ def initialize_system():
     """
     Khởi tạo hệ thống đúng một lần khi app bắt đầu:
     - Tự tải dữ liệu lịch sử nếu thiếu
-    - Tự huấn luyện mô hình nếu thiếu artifact
+    - Không tự train trong Streamlit nếu thiếu artifact
     """
     ensure_latest_models_dir()
 
@@ -290,11 +416,10 @@ def initialize_system():
             fetch_module.main()
 
     if training_artifacts_missing():
-        with st.spinner("🧠 Training multi-class ML models (SMOTE applied)..."):
-            train_module = get_train_module()
-            if not hasattr(train_module, "run_training_pipeline"):
-                raise AttributeError("`analyze_and_train.py` không có hàm `run_training_pipeline()`.")
-            train_module.run_training_pipeline(get_all_model_names())
+        raise FileNotFoundError(
+            "Chưa có artifact huấn luyện trong `models/latest/`. "
+            "Hãy khởi chạy background training từ sidebar để tạo model trước."
+        )
 
     if not PRIMARY_MODEL_PATH.exists():
         raise FileNotFoundError("Không tìm thấy `models/latest/best_model.pkl` sau khi huấn luyện.")
@@ -1476,11 +1601,7 @@ def render_training_controls():
     """Cụm điều khiển MLOps: chọn mô hình và chạy huấn luyện theo yêu cầu."""
     st.sidebar.markdown("---")
     with st.sidebar.expander("⚙️ Tùy chọn Huấn luyện AI (MLOps)", expanded=False):
-        if st.session_state.get("training_success_message"):
-            st.success(st.session_state["training_success_message"])
-        if st.session_state.get("training_warning_message"):
-            st.warning(st.session_state["training_warning_message"])
-
+        training_state = reconcile_training_state()
         available_models = get_all_model_names()
         selected_models = st.multiselect(
             "Chọn mô hình cần huấn luyện",
@@ -1488,36 +1609,63 @@ def render_training_controls():
             default=available_models,
             key="selected_training_models",
         )
+        balancing_method = st.selectbox(
+            "Phương pháp cân bằng dữ liệu",
+            options=["auto", "gan", "smote"],
+            index=0,
+            key="selected_balancing_method",
+        )
+
+        status_label_map = {
+            "idle": "Chưa chạy",
+            "starting": "Đang khởi tạo",
+            "running": "Đang huấn luyện",
+            "completed": "Hoàn tất",
+            "failed": "Thất bại",
+        }
+        st.caption(f"Trạng thái hiện tại: {status_label_map.get(training_state['status'], training_state['status'])}")
+        if training_state.get("selected_models"):
+            st.caption(f"Mô hình đã chọn: {', '.join(training_state['selected_models'])}")
+        if training_state.get("started_at"):
+            st.caption(f"Bắt đầu: {training_state['started_at']}")
+        if training_state.get("finished_at"):
+            st.caption(f"Kết thúc: {training_state['finished_at']}")
+        if training_state.get("best_model_name"):
+            st.success(f"Best model gần nhất: {training_state['best_model_name']}")
+        if training_state.get("error"):
+            st.error(training_state["error"])
 
         if st.button(
-            "⚠️ Bắt đầu Huấn luyện",
+            "⚠️ Bắt đầu Huấn luyện Nền",
             key="start_training_button",
             use_container_width=True,
+            disabled=training_state["status"] in {"starting", "running"},
         ):
             try:
                 if not selected_models:
                     st.warning("Vui lòng chọn ít nhất 1 mô hình trước khi huấn luyện.")
                 else:
-                    with st.spinner("🧠 Đang huấn luyện mô hình đã chọn và cập nhật `models/latest/`..."):
-                        train_module = get_train_module()
-                        if not hasattr(train_module, "run_training_pipeline"):
-                            raise AttributeError("`analyze_and_train.py` không có hàm `run_training_pipeline()`.")
-                        result = train_module.run_training_pipeline(selected_models)
-                    st.session_state["training_success_message"] = (
-                        f"Hoàn tất huấn luyện. Best model: {result['best_model_name']}"
-                    )
-                    if any(model_name in {"LSTM", "LSTM + XGBoost Hybrid"} for model_name in selected_models):
-                        st.session_state["training_warning_message"] = (
-                            "Đã huấn luyện xong nhóm deep learning. Nếu app đang chạy trên server yếu "
-                            "hoặc tab trình duyệt bị reload trong lúc train, Streamlit có thể không ổn định. "
-                            "Ưu tiên làm mới app thủ công sau khi train thay vì auto rerun."
-                        )
-                    else:
-                        st.session_state["training_warning_message"] = None
-                    st.cache_data.clear()
-                    st.cache_resource.clear()
+                    start_background_training(selected_models, balancing_method=balancing_method)
+                    st.success("Đã khởi chạy background training. Bạn có thể tiếp tục dùng app mà không làm dừng tiến trình train.")
             except Exception as exc:
                 st.error(str(exc))
+
+        action_col_1, action_col_2 = st.columns(2)
+        if action_col_1.button("Làm mới trạng thái", key="refresh_training_status_button", use_container_width=True):
+            st.rerun()
+        if action_col_2.button("Nạp artifact mới", key="reload_trained_artifacts_button", use_container_width=True):
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            st.rerun()
+
+        training_log_tail = read_training_log_tail()
+        if training_log_tail:
+            st.text_area(
+                "Log huấn luyện gần nhất",
+                value=training_log_tail,
+                height=220,
+                key="training_log_tail_view",
+            )
 
 
 def render_sidebar_controls(df_predictions: pd.DataFrame, df_future: pd.DataFrame):
@@ -1781,7 +1929,11 @@ def main():
     try:
         model, scaler, evaluation_metrics, runtime_info = load_runtime_artifacts()
     except Exception as exc:
-        st.error(f"❌ Không thể khởi tạo hệ thống tự động: {exc}")
+        render_training_controls()
+        st.warning(
+            f"❌ Chưa thể nạp artifact mô hình: {exc} "
+            "Bạn có thể khởi chạy background training từ sidebar rồi bấm `Nạp artifact mới` sau khi train xong."
+        )
         return
 
     df_predictions = get_realtime_prediction(model, scaler)
