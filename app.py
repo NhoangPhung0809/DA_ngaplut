@@ -2046,6 +2046,79 @@ def render_model_metrics(evaluation_metrics, runtime_info):
         f"Artifact dir: `{Path(runtime_info['latest_dir']).name}`"
     )
 
+    st.markdown("---")
+    st.subheader("📊 Phân tích Đường cong ROC-AUC (One-vs-Rest)")
+    roc_path = Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR))) / "roc_curve_data.json"
+    if not roc_path.exists():
+        st.info("Chưa có `roc_curve_data.json`. Hãy train lại mô hình để xuất ROC-AUC.")
+        return
+
+    try:
+        with roc_path.open("r", encoding="utf-8") as file:
+            roc_payload = json.load(file)
+    except Exception as exc:
+        st.error("Không thể đọc `roc_curve_data.json`.")
+        st.exception(exc)
+        return
+
+    if roc_payload.get("status") != "ok":
+        reason = roc_payload.get("reason", "unknown")
+        st.warning(f"ROC-AUC không khả dụng cho best model. Lý do: {reason}")
+        return
+
+    import plotly.graph_objects as go
+
+    class_name_map = roc_payload.get("class_names", {})
+    class_label_vi = {
+        "0": "Không ngập",
+        "1": "Ngập nhẹ",
+        "2": "Ngập nặng",
+    }
+    curves = roc_payload.get("curves", {})
+    model_name = roc_payload.get("model_name", "Best Model")
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=[0, 1],
+            y=[0, 1],
+            mode="lines",
+            name="Baseline (AUC = 0.5)",
+            line=dict(color="#94a3b8", width=2, dash="dot"),
+        )
+    )
+
+    colors = {"0": "#60a5fa", "1": "#f59e0b", "2": "#ef4444"}
+    for class_key in ["0", "1", "2"]:
+        curve = curves.get(class_key) or {}
+        fpr = curve.get("fpr") or []
+        tpr = curve.get("tpr") or []
+        auc_value = curve.get("auc")
+        if not fpr or not tpr:
+            continue
+        auc_text = "N/A" if auc_value is None else f"{float(auc_value):.4f}"
+        label_name = class_label_vi.get(class_key, class_name_map.get(class_key, f"Class {class_key}"))
+        fig.add_trace(
+            go.Scatter(
+                x=fpr,
+                y=tpr,
+                mode="lines",
+                name=f"Class {class_key} ({label_name}) - AUC: {auc_text}",
+                line=dict(color=colors.get(class_key, "#22c55e"), width=3),
+            )
+        )
+
+    fig.update_layout(
+        title=f"ROC-AUC OvR cho Best Model: {model_name}",
+        xaxis_title="False Positive Rate (FPR)",
+        yaxis_title="True Positive Rate (TPR)",
+        margin=dict(l=10, r=10, t=50, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    fig.update_xaxes(range=[0, 1])
+    fig.update_yaxes(range=[0, 1])
+    st.plotly_chart(fig, use_container_width=True)
+
 
 def main():
     """Điểm vào chính của ứng dụng."""

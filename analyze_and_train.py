@@ -23,6 +23,8 @@ from sklearn.metrics import (
     f1_score,
     precision_score,
     recall_score,
+    roc_auc_score,
+    roc_curve,
 )
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
@@ -30,6 +32,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
+from sklearn.preprocessing import label_binarize
 from xgboost import XGBClassifier
 
 try:
@@ -760,8 +763,129 @@ def evaluate_prediction_arrays(
         "precision_macro": float(precision_score(y_true, y_pred, average="macro", zero_division=0)),
         "recall_macro": float(recall_score(y_true, y_pred, average="macro", zero_division=0)),
         "f1_macro": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "roc_auc_ovr_macro": None,
         "classification_report": report,
     }
+
+
+def safe_compute_roc_auc_ovr_macro(y_true: np.ndarray, y_proba: np.ndarray) -> float | None:
+    y_true = np.asarray(y_true).astype(int)
+    y_proba = np.asarray(y_proba, dtype=float)
+    if y_proba.ndim != 2:
+        return None
+    if y_proba.shape[1] != len(CLASS_LABELS):
+        return None
+    try:
+        return float(
+            roc_auc_score(
+                y_true,
+                y_proba,
+                labels=CLASS_LABELS,
+                multi_class="ovr",
+                average="macro",
+            )
+        )
+    except Exception:
+        return None
+
+
+def export_multiclass_roc_curve_data(
+    best_model_name: str,
+    model,
+    X_test_scaled: pd.DataFrame,
+    y_test: pd.Series,
+    output_dir: Path,
+) -> Path:
+    """Xuất ROC curve data (OvR) cho 3 lớp của best model để frontend vẽ Plotly."""
+    output_path = output_dir / "roc_curve_data.json"
+    y_true = np.asarray(y_test).astype(int)
+
+    if not hasattr(model, "predict_proba"):
+        payload = {
+            "status": "unavailable",
+            "reason": "model_has_no_predict_proba",
+            "model_name": best_model_name,
+        }
+        with output_path.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, indent=2, ensure_ascii=False)
+        return output_path
+
+    try:
+        y_proba = model.predict_proba(X_test_scaled)
+    except Exception as exc:
+        payload = {
+            "status": "unavailable",
+            "reason": "predict_proba_failed",
+            "model_name": best_model_name,
+            "error": str(exc),
+        }
+        with output_path.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, indent=2, ensure_ascii=False)
+        return output_path
+
+    if y_proba is None:
+        payload = {
+            "status": "unavailable",
+            "reason": "predict_proba_returned_none",
+            "model_name": best_model_name,
+        }
+        with output_path.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, indent=2, ensure_ascii=False)
+        return output_path
+
+    y_proba = np.asarray(y_proba, dtype=float)
+    if y_proba.ndim != 2 or y_proba.shape[1] != len(CLASS_LABELS):
+        payload = {
+            "status": "unavailable",
+            "reason": "unexpected_proba_shape",
+            "model_name": best_model_name,
+            "proba_shape": list(y_proba.shape),
+        }
+        with output_path.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, indent=2, ensure_ascii=False)
+        return output_path
+
+    y_bin = label_binarize(y_true, classes=CLASS_LABELS)
+    if y_bin.shape[1] != len(CLASS_LABELS):
+        payload = {
+            "status": "unavailable",
+            "reason": "binarize_failed",
+            "model_name": best_model_name,
+        }
+        with output_path.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, indent=2, ensure_ascii=False)
+        return output_path
+
+    per_class = {}
+    for class_index, class_label in enumerate(CLASS_LABELS):
+        try:
+            fpr, tpr, _ = roc_curve(y_bin[:, class_index], y_proba[:, class_index])
+            auc_value = float(roc_auc_score(y_bin[:, class_index], y_proba[:, class_index]))
+            per_class[str(class_label)] = {
+                "fpr": [float(v) for v in fpr.tolist()],
+                "tpr": [float(v) for v in tpr.tolist()],
+                "auc": auc_value,
+            }
+        except Exception:
+            per_class[str(class_label)] = {
+                "fpr": [],
+                "tpr": [],
+                "auc": None,
+            }
+
+    macro_auc = safe_compute_roc_auc_ovr_macro(y_true, y_proba)
+    payload = {
+        "status": "ok",
+        "model_name": best_model_name,
+        "auc_ovr_macro": macro_auc,
+        "classes": [int(v) for v in CLASS_LABELS],
+        "class_names": {str(k): v for k, v in CLASS_NAME_MAP.items()},
+        "curves": per_class,
+    }
+    with output_path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2, ensure_ascii=False)
+    print(f"Saved ROC curve data to: {output_path}")
+    return output_path
 
 
 def build_sequence_datasets(
@@ -1496,6 +1620,12 @@ def train_and_evaluate_models(
                 deployment_compatible=deployment_compatible,
                 evaluation_scope="daily_t_plus_1_tabular",
             )
+            if hasattr(model, "predict_proba"):
+                try:
+                    proba = model.predict_proba(X_test_scaled)
+                    metrics["roc_auc_ovr_macro"] = safe_compute_roc_auc_ovr_macro(y_test, proba)
+                except Exception:
+                    metrics["roc_auc_ovr_macro"] = None
         elif model_kind == "tabular_regressor":
             model = model_config["model"]
             model.fit(X_train_balanced, y_train_balanced.astype(float))
@@ -1573,6 +1703,7 @@ def build_leaderboard_dataframe(evaluation_results: dict) -> pd.DataFrame:
                 "Precision(Macro)": metrics["precision_macro"],
                 "Recall(Macro)": metrics["recall_macro"],
                 "F1(Macro)": metrics["f1_macro"],
+                "ROC_AUC_OvR_Macro": metrics.get("roc_auc_ovr_macro"),
             }
         )
 
@@ -1820,6 +1951,7 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
     best_model_path, scaler_path = save_run_artifacts(best_model, scaler, run_dir)
     confusion_matrix_path = plot_confusion_matrix(best_model, X_test_scaled, y_test, run_dir)
     feature_importance_path = plot_feature_importance(best_model, X_test_scaled, y_test, run_dir)
+    roc_curve_path = export_multiclass_roc_curve_data(best_model_name, best_model, X_test_scaled, y_test, run_dir)
 
     latest_leaderboard_path = copy_artifact_to_latest(leaderboard_path, "leaderboard.csv")
     latest_metrics_path = copy_artifact_to_latest(metrics_path, "evaluation_metrics.json")
@@ -1827,6 +1959,7 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
     latest_scaler_path = copy_artifact_to_latest(scaler_path, "scaler.pkl")
     latest_confusion_path = copy_artifact_to_latest(confusion_matrix_path, "confusion_matrix.png")
     latest_feature_importance_path = copy_artifact_to_latest(feature_importance_path, "feature_importance.png")
+    latest_roc_curve_path = copy_artifact_to_latest(roc_curve_path, "roc_curve_data.json")
     copy_artifact_to_plots(latest_confusion_path, "confusion_matrix.png")
     copy_artifact_to_plots(latest_feature_importance_path, "feature_importance.png")
 
@@ -1842,6 +1975,7 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
         "scaler_latest_path": str(latest_scaler_path),
         "metrics_latest_path": str(latest_metrics_path),
         "leaderboard_latest_path": str(latest_leaderboard_path),
+        "roc_curve_latest_path": str(latest_roc_curve_path),
         "balancing_method_used": balancing_method_used,
         "leaderboard": leaderboard_df.to_dict(orient="records"),
     }
