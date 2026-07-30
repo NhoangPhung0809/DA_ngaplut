@@ -23,3 +23,6 @@ retry-requests
 python-dotenv
 geopandas
 osmnx
+torch
+transformers
+chronos-forecasting

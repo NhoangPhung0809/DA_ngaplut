@@ -61,6 +61,7 @@ TRAINING_LOG_PATH = CACHE_DIR / "training_output.log"
 MENU_OPTIONS = [
     "🌊 Tổng quan dự báo",
     "📊 So sánh dữ liệu CTGAN",
+    "🔮 Dự báo Nâng cao (Chronos LLM)",
 ]
 
 # Khởi tạo client Open-Meteo có cache và retry để hạn chế lỗi mạng tạm thời.
@@ -1797,6 +1798,125 @@ def render_ctgan_comparison_page() -> None:
             dataset_df=artifacts["after_df"],
         )
 
+
+@st.cache_data(show_spinner=False)
+def load_daily_rainfall_history(location_csv_name: str) -> pd.DataFrame:
+    file_path = HISTORICAL_DIR / location_csv_name
+    if not file_path.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(file_path)
+    if "Thời_gian" not in df.columns or "Lượng_mưa_mm" not in df.columns:
+        return pd.DataFrame()
+    df["Thời_gian"] = pd.to_datetime(df["Thời_gian"], errors="coerce")
+    df = df.dropna(subset=["Thời_gian"]).sort_values("Thời_gian")
+    df["date"] = df["Thời_gian"].dt.floor("D")
+    df["Lượng_mưa_mm"] = pd.to_numeric(df["Lượng_mưa_mm"], errors="coerce").fillna(0.0)
+    daily = df.groupby("date", as_index=False)["Lượng_mưa_mm"].sum().sort_values("date").reset_index(drop=True)
+    return daily
+
+
+@st.cache_resource(show_spinner=False)
+def get_chronos_module():
+    return dynamically_import_module("chronos_predictor_runtime", BASE_DIR / "chronos_predictor.py")
+
+
+def render_chronos_llm_page() -> None:
+    st.subheader("🔮 Dự báo Nâng cao (Chronos LLM)")
+    st.markdown(
+        "Trang này sử dụng Amazon Time Series Foundation Model `amazon/chronos-t5-mini` theo chế độ Zero-shot "
+        "(không fine-tune, không huấn luyện). Model chạy trên CPU nên thời gian suy luận có thể chậm hơn ML truyền thống."
+    )
+
+    location_options = {
+        "TP Huế": "TP_Hue_10years.csv",
+        "Hương Thủy": "Huong_Thuy_10years.csv",
+        "Phú Vang": "Phu_Vang_10years.csv",
+        "Hương Trà": "Huong_Tra_10years.csv",
+        "Quảng Điền": "Quang_Dien_10years.csv",
+    }
+    selected_location = st.selectbox(
+        "Chọn khu vực (dùng lịch sử mưa để dự báo)",
+        options=list(location_options.keys()),
+        index=0,
+        key="chronos_location_select",
+    )
+    prediction_length = st.slider("Số ngày dự báo", min_value=3, max_value=14, value=7, step=1)
+    light_threshold = st.number_input("Ngưỡng Ngập nhẹ (mm/ngày)", min_value=0.0, value=25.0, step=1.0)
+    heavy_threshold = st.number_input("Ngưỡng Ngập nặng (mm/ngày)", min_value=0.0, value=50.0, step=1.0)
+
+    daily_history = load_daily_rainfall_history(location_options[selected_location])
+    if daily_history.empty:
+        st.warning("Chưa có dữ liệu lịch sử để chạy Chronos. Hãy chạy `fetch_data.py` trước.")
+        return
+
+    st.caption(f"Dữ liệu lịch sử theo ngày: {len(daily_history)} dòng")
+    history_context_df = daily_history.tail(30).copy()
+
+    if st.button("Tạo dự báo 7 ngày tới" if prediction_length == 7 else f"Tạo dự báo {prediction_length} ngày tới", key="chronos_generate_button"):
+        try:
+            chronos_module = get_chronos_module()
+        except Exception as exc:
+            st.error(f"Không thể nạp Chronos module/dependencies: {exc}")
+            return
+
+        with st.spinner("Đang chạy Chronos Zero-shot inference trên CPU..."):
+            try:
+                raw_hourly = pd.read_csv(HISTORICAL_DIR / location_options[selected_location])
+                result = chronos_module.run_chronos_forecast(
+                    raw_hourly,
+                    prediction_length=int(prediction_length),
+                    value_column="Lượng_mưa_mm",
+                    time_column="Thời_gian",
+                    light_threshold=float(light_threshold),
+                    heavy_threshold=float(heavy_threshold),
+                )
+                plot_df = chronos_module.chronos_result_to_plotly_frame(result)
+            except Exception as exc:
+                st.error(f"Chronos inference thất bại: {exc}")
+                return
+
+        import plotly.graph_objects as go
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=plot_df.loc[plot_df["segment"] == "history", "date"],
+                y=plot_df.loc[plot_df["segment"] == "history", "value"],
+                mode="lines",
+                name="Lịch sử (30 ngày)",
+                line=dict(color="#60a5fa", width=3),
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=plot_df.loc[plot_df["segment"] == "forecast", "date"],
+                y=plot_df.loc[plot_df["segment"] == "forecast", "value"],
+                mode="lines+markers",
+                name="Dự báo (Chronos)",
+                line=dict(color="#f59e0b", width=3, dash="dash"),
+            )
+        )
+        fig.add_hline(y=float(light_threshold), line_width=2, line_dash="dot", line_color="#fb7185")
+        fig.add_hline(y=float(heavy_threshold), line_width=2, line_dash="dot", line_color="#ef4444")
+        fig.update_layout(
+            title=f"Chronos forecast - {selected_location}",
+            xaxis_title="Ngày",
+            yaxis_title="Lượng mưa (mm/ngày)",
+            margin=dict(l=10, r=10, t=50, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        forecast_table = pd.DataFrame(
+            {
+                "Ngày": result.forecast_dates,
+                "Mưa dự báo (mm)": result.forecast_values,
+                "Nhãn dự báo": result.forecast_labels,
+            }
+        )
+        st.dataframe(forecast_table, use_container_width=True, hide_index=True, height=260)
+
+
 def render_model_metrics(evaluation_metrics, runtime_info):
     """Hiển thị bảng số liệu, biểu đồ Plotly và ảnh artifact đánh giá mô hình."""
     st.subheader("Model Evaluation Metrics")
@@ -1923,6 +2043,10 @@ def main():
     if selected_menu == "📊 So sánh dữ liệu CTGAN":
         render_training_controls()
         render_ctgan_comparison_page()
+        return
+    if selected_menu == "🔮 Dự báo Nâng cao (Chronos LLM)":
+        render_training_controls()
+        render_chronos_llm_page()
         return
 
     try:
