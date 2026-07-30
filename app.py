@@ -1537,6 +1537,11 @@ def render_training_controls():
     """Cụm điều khiển MLOps: chọn mô hình và chạy huấn luyện theo yêu cầu."""
     st.sidebar.markdown("---")
     with st.sidebar.expander("⚙️ Tùy chọn Huấn luyện AI (MLOps)", expanded=False):
+        if st.session_state.get("training_success_message"):
+            st.success(st.session_state["training_success_message"])
+        if st.session_state.get("training_warning_message"):
+            st.warning(st.session_state["training_warning_message"])
+
         available_models = get_all_model_names()
         selected_models = st.multiselect(
             "Chọn mô hình cần huấn luyện",
@@ -1559,13 +1564,19 @@ def render_training_controls():
                         if not hasattr(train_module, "run_training_pipeline"):
                             raise AttributeError("`analyze_and_train.py` không có hàm `run_training_pipeline()`.")
                         result = train_module.run_training_pipeline(selected_models)
-                    st.toast(
-                        f"Hoàn tất huấn luyện. Best model: {result['best_model_name']}",
-                        icon="✅",
+                    st.session_state["training_success_message"] = (
+                        f"Hoàn tất huấn luyện. Best model: {result['best_model_name']}"
                     )
+                    if any(model_name in {"LSTM", "LSTM + XGBoost Hybrid"} for model_name in selected_models):
+                        st.session_state["training_warning_message"] = (
+                            "Đã huấn luyện xong nhóm deep learning. Nếu app đang chạy trên server yếu "
+                            "hoặc tab trình duyệt bị reload trong lúc train, Streamlit có thể không ổn định. "
+                            "Ưu tiên làm mới app thủ công sau khi train thay vì auto rerun."
+                        )
+                    else:
+                        st.session_state["training_warning_message"] = None
                     st.cache_data.clear()
                     st.cache_resource.clear()
-                    st.rerun()
             except Exception as exc:
                 st.error(str(exc))
 

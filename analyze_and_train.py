@@ -64,11 +64,13 @@ except ImportError:
 
 try:
     from tensorflow.keras import Model
+    from tensorflow.keras import backend as K
     from tensorflow.keras.callbacks import EarlyStopping
     from tensorflow.keras.layers import LSTM, Dense, Input
     from tensorflow.keras.models import Sequential
 except ImportError:
     Model = None
+    K = None
     EarlyStopping = None
     LSTM = None
     Dense = None
@@ -724,6 +726,13 @@ def build_lstm_classifier(input_shape):
     return model
 
 
+def clear_tensorflow_session() -> None:
+    """Giải phóng resource TensorFlow/Keras để tránh giữ session quá lâu trong Streamlit."""
+    if K is not None:
+        K.clear_session()
+    gc.collect()
+
+
 def train_arima_family_model(model_name: str, daily_df: pd.DataFrame, seasonal: bool) -> dict:
     """Huấn luyện ARIMA/SARIMA trên chuỗi nhãn theo ngày của từng địa phương."""
     y_true_all = []
@@ -773,79 +782,85 @@ def train_arima_family_model(model_name: str, daily_df: pd.DataFrame, seasonal: 
 
 def train_lstm_sequence_model(model_name: str, daily_df: pd.DataFrame) -> tuple[dict, object]:
     """Huấn luyện LSTM classifier trên sequence theo ngày."""
-    X_train_seq, y_train_seq, X_test_seq, y_test_seq, _ = build_sequence_datasets(daily_df)
-    lstm_model = build_lstm_classifier((X_train_seq.shape[1], X_train_seq.shape[2]))
-    callbacks = [EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)]
-    class_weights = build_class_weight_mapping(y_train_seq)
-    lstm_model.fit(
-        X_train_seq,
-        y_train_seq,
-        validation_split=0.2,
-        epochs=25,
-        batch_size=32,
-        callbacks=callbacks,
-        verbose=0,
-        class_weight=class_weights,
-    )
-    probabilities = lstm_model.predict(X_test_seq, verbose=0)
-    predictions = np.argmax(probabilities, axis=1)
-    metrics = evaluate_prediction_arrays(
-        model_name=model_name,
-        y_true=y_test_seq,
-        y_pred=predictions,
-        category="Deep Learning",
-        deployment_compatible=False,
-        evaluation_scope="daily_sequence",
-    )
-    return metrics, lstm_model
+    try:
+        X_train_seq, y_train_seq, X_test_seq, y_test_seq, _ = build_sequence_datasets(daily_df)
+        lstm_model = build_lstm_classifier((X_train_seq.shape[1], X_train_seq.shape[2]))
+        callbacks = [EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)]
+        class_weights = build_class_weight_mapping(y_train_seq)
+        lstm_model.fit(
+            X_train_seq,
+            y_train_seq,
+            validation_split=0.2,
+            epochs=25,
+            batch_size=32,
+            callbacks=callbacks,
+            verbose=0,
+            class_weight=class_weights,
+        )
+        probabilities = lstm_model.predict(X_test_seq, verbose=0)
+        predictions = np.argmax(probabilities, axis=1)
+        metrics = evaluate_prediction_arrays(
+            model_name=model_name,
+            y_true=y_test_seq,
+            y_pred=predictions,
+            category="Deep Learning",
+            deployment_compatible=False,
+            evaluation_scope="daily_sequence",
+        )
+        return metrics, lstm_model
+    finally:
+        clear_tensorflow_session()
 
 
 def train_lstm_xgboost_hybrid_model(model_name: str, daily_df: pd.DataFrame) -> dict:
     """Huấn luyện hybrid LSTM encoder + XGBoost classifier."""
-    X_train_seq, y_train_seq, X_test_seq, y_test_seq, _ = build_sequence_datasets(daily_df)
-    lstm_model = build_lstm_classifier((X_train_seq.shape[1], X_train_seq.shape[2]))
-    callbacks = [EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)]
-    class_weights = build_class_weight_mapping(y_train_seq)
-    lstm_model.fit(
-        X_train_seq,
-        y_train_seq,
-        validation_split=0.2,
-        epochs=20,
-        batch_size=32,
-        callbacks=callbacks,
-        verbose=0,
-        class_weight=class_weights,
-    )
+    try:
+        X_train_seq, y_train_seq, X_test_seq, y_test_seq, _ = build_sequence_datasets(daily_df)
+        lstm_model = build_lstm_classifier((X_train_seq.shape[1], X_train_seq.shape[2]))
+        callbacks = [EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)]
+        class_weights = build_class_weight_mapping(y_train_seq)
+        lstm_model.fit(
+            X_train_seq,
+            y_train_seq,
+            validation_split=0.2,
+            epochs=20,
+            batch_size=32,
+            callbacks=callbacks,
+            verbose=0,
+            class_weight=class_weights,
+        )
 
-    feature_extractor = Model(
-        inputs=lstm_model.input,
-        outputs=lstm_model.get_layer("dense_features").output,
-    )
-    train_embeddings = feature_extractor.predict(X_train_seq, verbose=0)
-    test_embeddings = feature_extractor.predict(X_test_seq, verbose=0)
+        feature_extractor = Model(
+            inputs=lstm_model.input,
+            outputs=lstm_model.get_layer("dense_features").output,
+        )
+        train_embeddings = feature_extractor.predict(X_train_seq, verbose=0)
+        test_embeddings = feature_extractor.predict(X_test_seq, verbose=0)
 
-    hybrid_classifier = XGBClassifier(
-        objective="multi:softprob",
-        num_class=3,
-        n_estimators=200,
-        max_depth=4,
-        learning_rate=0.05,
-        subsample=0.9,
-        colsample_bytree=0.9,
-        random_state=42,
-        eval_metric="mlogloss",
-        n_jobs=-1,
-    )
-    hybrid_classifier.fit(train_embeddings, y_train_seq)
-    hybrid_predictions = hybrid_classifier.predict(test_embeddings)
-    return evaluate_prediction_arrays(
-        model_name=model_name,
-        y_true=y_test_seq,
-        y_pred=hybrid_predictions,
-        category="Hybrid",
-        deployment_compatible=False,
-        evaluation_scope="daily_sequence",
-    )
+        hybrid_classifier = XGBClassifier(
+            objective="multi:softprob",
+            num_class=3,
+            n_estimators=200,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            random_state=42,
+            eval_metric="mlogloss",
+            n_jobs=-1,
+        )
+        hybrid_classifier.fit(train_embeddings, y_train_seq)
+        hybrid_predictions = hybrid_classifier.predict(test_embeddings)
+        return evaluate_prediction_arrays(
+            model_name=model_name,
+            y_true=y_test_seq,
+            y_pred=hybrid_predictions,
+            category="Hybrid",
+            deployment_compatible=False,
+            evaluation_scope="daily_sequence",
+        )
+    finally:
+        clear_tensorflow_session()
 
 
 def build_model_registry() -> dict:
