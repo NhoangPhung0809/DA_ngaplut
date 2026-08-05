@@ -19,6 +19,10 @@ from branca.colormap import LinearColormap
 from dotenv import load_dotenv
 from retry_requests import retry
 from streamlit_folium import st_folium
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ImportError:
+    st_autorefresh = None
 
 # Tải biến môi trường từ file .env nếu có.
 load_dotenv()
@@ -58,6 +62,10 @@ CACHE_DIR = BASE_DIR / "cache"
 TRAINING_WORKER_PATH = BASE_DIR / "training_worker.py"
 TRAINING_STATUS_PATH = CACHE_DIR / "training_status.json"
 TRAINING_LOG_PATH = CACHE_DIR / "training_output.log"
+REALTIME_LOG_PATH = BASE_DIR / "data" / "realtime_log.csv"
+REALTIME_WEATHER_API_URL = "https://apithoitiet.thuc.me/api/weather/hue"
+REALTIME_WEATHER_API_HEADERS = {"X-API-Key": "wt_GfkVa8SiMsD4fQ1lqUL8HYwUAoLPcsnG"}
+AUTO_REFRESH_INTERVAL_MS = 3_600_000
 MENU_OPTIONS = [
     "🌊 Tổng quan dự báo",
     "📊 So sánh dữ liệu CTGAN",
@@ -470,6 +478,83 @@ def calculate_synthetic_tide(target_time=None):
     return round(max(0.1, min(4.0, tide_value)), 2)
 
 
+def coerce_float(value, default: float = 0.0) -> float:
+    """Chuyển giá trị về số thực an toàn để dùng cho API và model."""
+    try:
+        if value in (None, ""):
+            return float(default)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def format_source_timestamp(value) -> str:
+    """Chuẩn hóa timestamp từ API để hiển thị trên dashboard."""
+    timestamp = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(timestamp):
+        return get_processing_timestamp_display()
+    return timestamp.tz_convert("Asia/Ho_Chi_Minh").strftime("%H:%M - %d/%m/%Y")
+
+
+@st.cache_data(show_spinner=False, ttl=AUTO_REFRESH_INTERVAL_MS // 1000)
+def fetch_hue_realtime_weather():
+    """
+    Lấy dữ liệu thời tiết realtime cho Huế từ API ngoài.
+    Hàm trả về dict có cờ success để UI không bị crash khi mạng/API lỗi.
+    """
+    try:
+        response = requests.get(
+            REALTIME_WEATHER_API_URL,
+            headers=REALTIME_WEATHER_API_HEADERS,
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if str(payload.get("status", "")).lower() not in {"", "success"}:
+            raise ValueError(f"API status không hợp lệ: {payload.get('status')}")
+
+        weather = payload.get("weather") or {}
+        province = payload.get("province") or {}
+        recorded_at = weather.get("recorded_at") or weather.get("updated_at") or datetime.now(timezone.utc).isoformat()
+        rain_value = coerce_float(
+            weather.get("rain"),
+            default=coerce_float(
+                weather.get("rainfall"),
+                default=coerce_float(
+                    weather.get("precipitation_mm"),
+                    default=coerce_float(weather.get("precipitation"), default=0.0),
+                ),
+            ),
+        )
+
+        realtime_weather = {
+            "Địa phương": province.get("name", "Huế"),
+            "Vĩ độ": coerce_float(province.get("lat"), default=LOCATIONS[0]["lat"]),
+            "Kinh độ": coerce_float(province.get("lon"), default=LOCATIONS[0]["lon"]),
+            "Thời_gian_nguồn": recorded_at,
+            "Nhiệt_độ_C": coerce_float(weather.get("temp")),
+            "Độ_ẩm_%": coerce_float(weather.get("humidity")),
+            "Lượng_mưa_mm": rain_value,
+            "Độ_ẩm_đất": coerce_float(weather.get("soil_moisture"), default=0.30),
+            "Chiều_cao_triều_m": calculate_synthetic_tide(),
+            "Mô_tả": str(weather.get("description", "Không rõ")),
+            "Áp_suất_hPa": coerce_float(weather.get("pressure")),
+            "Tốc_độ_gió_m_s": coerce_float(weather.get("wind_speed")),
+            "Payload_gốc": payload,
+        }
+        return {
+            "success": True,
+            "data": realtime_weather,
+            "error": None,
+        }
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        return {
+            "success": False,
+            "data": None,
+            "error": str(exc),
+        }
+
+
 def get_current_weather(location):
     """Lấy dữ liệu thời tiết hiện tại cho một địa phương."""
     weather_data = {
@@ -697,9 +782,13 @@ def get_expected_feature_columns(model, scaler):
     return DEFAULT_FEATURE_ORDER
 
 
-def build_feature_frame(weather, feature_columns):
+def build_feature_frame(weather, feature_columns, extra_values: dict | None = None):
     """Tạo DataFrame đầu vào đúng tên cột và đúng thứ tự."""
     row = {column: weather.get(column, 0.0) for column in feature_columns}
+    if extra_values:
+        for column, value in extra_values.items():
+            if column in row:
+                row[column] = value
     return pd.DataFrame([row], columns=feature_columns)
 
 
@@ -802,6 +891,133 @@ def get_realtime_prediction(model, scaler):
         )
 
     return pd.DataFrame(predictions)
+
+
+def append_realtime_log_row(log_row: dict) -> bool:
+    """Append realtime stream vào CSV và tránh ghi trùng cùng một timestamp nguồn."""
+    REALTIME_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    source_timestamp = str(log_row.get("Thời_gian_nguồn", "")).strip()
+
+    if REALTIME_LOG_PATH.exists():
+        try:
+            existing_df = pd.read_csv(REALTIME_LOG_PATH, usecols=["Thời_gian_nguồn"], encoding="utf-8-sig")
+            if not existing_df.empty:
+                last_timestamp = str(existing_df["Thời_gian_nguồn"].iloc[-1]).strip()
+                if last_timestamp == source_timestamp:
+                    return False
+        except Exception:
+            pass
+
+    log_df = pd.DataFrame([log_row])
+    if REALTIME_LOG_PATH.exists():
+        log_df.to_csv(REALTIME_LOG_PATH, mode="a", header=False, index=False, encoding="utf-8-sig")
+    else:
+        log_df.to_csv(REALTIME_LOG_PATH, index=False, encoding="utf-8-sig")
+    return True
+
+
+def run_realtime_flood_warning_inference(model, scaler) -> dict:
+    """Fetch dữ liệu Huế, format theo feature model, suy luận và ghi log stream."""
+    api_result = fetch_hue_realtime_weather()
+    if not api_result["success"]:
+        return {
+            "success": False,
+            "error": api_result["error"],
+        }
+
+    realtime_weather = api_result["data"]
+    feature_columns = get_expected_feature_columns(model, scaler)
+    feature_frame = build_feature_frame(
+        realtime_weather,
+        feature_columns,
+        extra_values={
+            "Vĩ độ": realtime_weather["Vĩ độ"],
+            "Kinh độ": realtime_weather["Kinh độ"],
+            "lat": realtime_weather["Vĩ độ"],
+            "lon": realtime_weather["Kinh độ"],
+        },
+    )
+    try:
+        scaled_features = scale_feature_frame_for_inference(scaler, feature_frame)
+        prediction, probability = get_prediction_and_flood_probability(model, scaled_features)
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": f"Không thể chạy inference realtime: {exc}",
+        }
+
+    log_row = {
+        "Thời_gian_xử_lý": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Thời_gian_nguồn": realtime_weather["Thời_gian_nguồn"],
+        "Địa_phương": realtime_weather["Địa phương"],
+        "Nhiệt_độ_C": round(float(realtime_weather["Nhiệt_độ_C"]), 2),
+        "Độ_ẩm_%": round(float(realtime_weather["Độ_ẩm_%"]), 2),
+        "Lượng_mưa_mm": round(float(realtime_weather["Lượng_mưa_mm"]), 2),
+        "Độ_ẩm_đất": round(float(realtime_weather["Độ_ẩm_đất"]), 2),
+        "Chiều_cao_triều_m": round(float(realtime_weather["Chiều_cao_triều_m"]), 2),
+        "Áp_suất_hPa": round(float(realtime_weather["Áp_suất_hPa"]), 2),
+        "Tốc_độ_gió_m_s": round(float(realtime_weather["Tốc_độ_gió_m_s"]), 2),
+        "Mô_tả": realtime_weather["Mô_tả"],
+        "Dự_báo": format_risk_label(prediction),
+        "Xác_suất_ngập_%": round(probability * 100, 2),
+    }
+    try:
+        appended = append_realtime_log_row(log_row)
+        log_error = None
+    except Exception as exc:
+        appended = False
+        log_error = str(exc)
+
+    return {
+        "success": True,
+        "weather": realtime_weather,
+        "feature_frame": feature_frame,
+        "prediction": prediction,
+        "probability": probability,
+        "risk_label": format_risk_label(prediction),
+        "last_updated_display": format_source_timestamp(realtime_weather["Thời_gian_nguồn"]),
+        "appended": appended,
+        "log_error": log_error,
+        "log_path": str(REALTIME_LOG_PATH),
+    }
+
+
+def render_realtime_flood_warning_section(model, scaler) -> None:
+    """Khối cảnh báo realtime nổi bật ở đầu dashboard."""
+    st.markdown("## Real-Time Flood Warning")
+    realtime_result = run_realtime_flood_warning_inference(model, scaler)
+
+    if not realtime_result["success"]:
+        st.warning(f"Không thể lấy dữ liệu realtime từ API Huế lúc này: {realtime_result['error']}")
+        st.caption("Last Updated Time: Chưa có | Next Auto-Update in 60 minutes")
+        st.markdown("---")
+        return
+
+    weather = realtime_result["weather"]
+    metric_columns = st.columns(3)
+    metric_columns[0].metric("Rainfall (mm)", f"{coerce_float(weather['Lượng_mưa_mm']):.2f}")
+    metric_columns[1].metric("Temp (°C)", f"{coerce_float(weather['Nhiệt_độ_C']):.2f}")
+    metric_columns[2].metric("Humidity (%)", f"{coerce_float(weather['Độ_ẩm_%']):.2f}")
+
+    alert_text = (
+        f"{realtime_result['risk_label']} | Xác suất ngập: {realtime_result['probability'] * 100:.2f}% "
+        f"| Khu vực: {weather['Địa phương']}"
+    )
+    if realtime_result["prediction"] > 0:
+        st.error(alert_text)
+    else:
+        st.success(alert_text)
+
+    if realtime_result.get("log_error"):
+        append_status = f"Lỗi ghi log CSV: {realtime_result['log_error']}"
+    else:
+        append_status = "Đã ghi log CSV mới." if realtime_result["appended"] else "Không ghi thêm vì timestamp nguồn trùng bản ghi gần nhất."
+    st.caption(
+        f"Last Updated Time: {realtime_result['last_updated_display']} | "
+        "Next Auto-Update in 60 minutes | "
+        f"{append_status} | Log file: {realtime_result['log_path']}"
+    )
+    st.markdown("---")
 
 
 def build_noaa_placeholder() -> dict:
@@ -2154,6 +2370,9 @@ def main():
     st.markdown("---")
     selected_menu = render_navigation_menu()
 
+    if selected_menu == "🌊 Tổng quan dự báo" and st_autorefresh is not None:
+        st_autorefresh(interval=AUTO_REFRESH_INTERVAL_MS, key="dashboard_autorefresh_60_minutes")
+
     if selected_menu == "📊 So sánh dữ liệu CTGAN":
         render_training_controls()
         render_ctgan_comparison_page()
@@ -2180,6 +2399,7 @@ def main():
     render_tomorrow_nowcasting()
     render_stormglass_tide_sidebar()
     render_training_controls()
+    render_realtime_flood_warning_section(model, scaler)
 
     map_col, table_col = st.columns([2.1, 1.2])
 
