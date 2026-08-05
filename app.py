@@ -1189,6 +1189,7 @@ def load_geojson_data():
     return geojson_data
 
 
+@st.cache_data(show_spinner=False)
 def build_risk_lookup(df_predictions):
     """Tạo dictionary lookup nhanh theo tên địa phương."""
     lookup = {}
@@ -1203,6 +1204,32 @@ def build_risk_lookup(df_predictions):
             "tide": row["Chiều cao triều (m)"],
         }
     return lookup
+
+
+_fragment_decorator = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+
+
+def _render_map_panel(df_predictions: pd.DataFrame, current_update_time: str) -> None:
+    st.subheader("🗺️ Bản đồ Rủi ro Ngập lụt")
+    st.caption(f"🕒 Dữ liệu cập nhật lúc: {current_update_time} | Chế độ bản đồ nhẹ")
+    if st.session_state.get("show_light_map", False):
+        flood_map = render_boundary_map(df_predictions)
+        st_folium(
+            flood_map,
+            width=None,
+            height=520,
+            use_container_width=True,
+            key="hue_light_map",
+            returned_objects=[],
+        )
+    else:
+        st.info(
+            "Bản đồ đang được ẩn để giảm tải cho trình duyệt và ưu tiên hiệu năng huấn luyện ML/deep learning. "
+            "Bạn có thể bật lại trong sidebar bằng tùy chọn `Hiển thị bản đồ nhẹ`."
+        )
+
+
+render_map_panel = _fragment_decorator(_render_map_panel) if _fragment_decorator else _render_map_panel
 
 
 def extract_coordinate_pairs(coordinates):
@@ -2157,22 +2184,7 @@ def main():
     map_col, table_col = st.columns([2.1, 1.2])
 
     with map_col:
-        st.subheader("🗺️ Bản đồ Rủi ro Ngập lụt")
-        st.caption(f"🕒 Dữ liệu cập nhật lúc: {current_update_time} | Chế độ bản đồ nhẹ")
-        if st.session_state.get("show_light_map", False):
-            flood_map = render_boundary_map(df_predictions)
-            st_folium(
-                flood_map,
-                width=None,
-                height=520,
-                use_container_width=True,
-                key="hue_light_map",
-            )
-        else:
-            st.info(
-                "Bản đồ đang được ẩn để giảm tải cho trình duyệt và ưu tiên hiệu năng huấn luyện ML/deep learning. "
-                "Bạn có thể bật lại trong sidebar bằng tùy chọn `Hiển thị bản đồ nhẹ`."
-            )
+        render_map_panel(df_predictions, current_update_time)
 
     render_sidebar_controls(df_predictions, df_future)
 
