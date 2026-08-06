@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 import folium
+import joblib
 import pandas as pd
 import plotly.express as px
 import requests
@@ -37,8 +38,12 @@ PLOTS_DIR = BASE_DIR / "plots"
 FETCH_SCRIPT_PATH = BASE_DIR / "fetch_data.py"
 TRAIN_SCRIPT_PATH = BASE_DIR / "analyze_and_train.py"
 EVALUATION_METRICS_PATH = LATEST_MODELS_DIR / "evaluation_metrics.json"
-SCALER_PATH = LATEST_MODELS_DIR / "scaler.pkl"
-PRIMARY_MODEL_PATH = LATEST_MODELS_DIR / "best_model.pkl"
+# `deployment_config.json` do `analyze_and_train.py` (hàm `save_deployment_config`) sinh ra sau mỗi
+# lần huấn luyện - đây là "bản đồ chỉ dẫn" DUY NHẤT mà app.py cần đọc để biết best model hiện tại
+# thuộc loại gì (sklearn_tabular / keras_sequence / hybrid_lstm_xgboost) và file artifact tương ứng
+# nằm ở đâu. KHÔNG còn giả định cứng tên file `best_model.pkl`/`scaler.pkl` như trước, vì tên file
+# thực tế phụ thuộc vào loại model thắng leaderboard (xem `load_deployment_model()` bên dưới).
+DEPLOYMENT_CONFIG_PATH = LATEST_MODELS_DIR / "deployment_config.json"
 EXPECTED_HISTORICAL_FILES = {
     "TP_Hue_10years.csv",
     "Huong_Thuy_10years.csv",
@@ -336,9 +341,16 @@ def get_all_model_names() -> list[str]:
 
 
 def training_artifacts_missing() -> bool:
-    """Kiểm tra các artifact tối thiểu trong `models/latest/` (dùng cho Tab Đánh giá)."""
+    """
+    Kiểm tra các artifact tối thiểu trong `models/latest/` (dùng cho Tab Đánh giá).
+    Chỉ cần `deployment_config.json` + `evaluation_metrics.json` tồn tại là đủ - KHÔNG kiểm tra cứng
+    sự tồn tại của `best_model.pkl`/`scaler.pkl` nữa, vì 2 file đó chỉ tồn tại khi best model là
+    sklearn_tabular; nếu best model là Deep Learning/Hybrid thì artifact thật sẽ có tên khác
+    (`best_model.keras`, `best_model_xgb_head.json`...) - `deployment_config.json` mới là nguồn xác
+    nhận đáng tin cậy rằng quá trình huấn luyện đã hoàn tất và có model sẵn sàng.
+    """
     ensure_latest_models_dir()
-    return not PRIMARY_MODEL_PATH.exists() or not SCALER_PATH.exists() or not EVALUATION_METRICS_PATH.exists()
+    return not DEPLOYMENT_CONFIG_PATH.exists() or not EVALUATION_METRICS_PATH.exists()
 
 
 @st.cache_resource(show_spinner=False)
@@ -365,8 +377,7 @@ def initialize_system():
         )
 
     return {
-        "model_path": str(PRIMARY_MODEL_PATH),
-        "scaler_path": str(SCALER_PATH),
+        "deployment_config_path": str(DEPLOYMENT_CONFIG_PATH),
         "metrics_path": str(EVALUATION_METRICS_PATH),
         "latest_dir": str(LATEST_MODELS_DIR),
     }
@@ -375,16 +386,100 @@ def initialize_system():
 @st.cache_resource(show_spinner=False)
 def load_evaluation_artifacts():
     """
-    Nạp `evaluation_metrics.json` + thông tin runtime cho Tab Đánh giá.
-    Lưu ý: skeleton này KHÔNG còn suy luận thời gian thực trên toàn app (đã được đơn giản hóa để tập
-    trung đúng vòng đời Data Science - EDA/Train/Eval), nên không cần joblib.load() mô hình/scaler
-    vào bộ nhớ chỉ để xem bảng chỉ số. Nếu bạn cần suy luận trực tiếp, hãy `joblib.load()` model/scaler
-    riêng trong Tab tương ứng khi thật sự cần.
+    Nạp `evaluation_metrics.json` + `deployment_config.json` + thông tin runtime cho Tab Đánh giá.
+    Lưu ý: hàm này chỉ đọc THÔNG TIN MÔ TẢ (JSON nhẹ), CHƯA nạp model thật vào bộ nhớ (không
+    joblib.load()/keras.load_model() ở đây) - việc nạp model thật chỉ nên thực hiện khi thật sự cần
+    suy luận, xem `load_deployment_model()` bên dưới, để tránh tốn RAM/thời gian tải chỉ để xem bảng
+    chỉ số.
     """
     runtime_info = initialize_system()
     with open(runtime_info["metrics_path"], "r", encoding="utf-8") as file:
         evaluation_metrics = json.load(file)
-    return evaluation_metrics, runtime_info
+    with open(runtime_info["deployment_config_path"], "r", encoding="utf-8") as file:
+        deployment_config = json.load(file)
+    return evaluation_metrics, deployment_config, runtime_info
+
+
+def load_deployment_model(deployment_config: dict, latest_dir: str | Path) -> dict:
+    """
+    NẠP LẠI BEST MODEL ĐÚNG CÁCH THEO `deployment_config.json` (universal loading mechanism).
+
+    ----------------------------------------------------------------------------------------------
+    TẠI SAO CẦN HÀM NÀY (thay vì luôn `joblib.load("best_model.pkl")` như code cũ)?
+    ----------------------------------------------------------------------------------------------
+    Sau khi sửa bug chọn best model trong `analyze_and_train.py`, best model của một lần huấn luyện
+    có thể là 1 trong 3 dạng hoàn toàn khác nhau về cách lưu/nạp:
+      - "sklearn_tabular": model + scaler đều là object Python thuần -> nạp bằng `joblib.load()`.
+      - "keras_sequence" (GRU/LSTM/1D-CNN/CNN-LSTM): model được lưu bằng định dạng Keras gốc
+        (`.keras`), BẮT BUỘC nạp lại bằng `tensorflow.keras.models.load_model()` - `joblib.load()`
+        sẽ LỖI hoặc nạp sai vì Keras model không phải object pickle thuần.
+      - "hybrid_lstm_xgboost": có 2 thành phần lưu riêng - LSTM feature-extractor (`.keras`, nạp
+        bằng `load_model()`) và đầu phân loại XGBoost (`.json`, nạp bằng `XGBClassifier().load_model()`
+        - định dạng native của XGBoost, KHÔNG phải joblib/pickle).
+
+    Hàm này đọc `model_type` trong `deployment_config.json` và tự động dùng ĐÚNG loader tương ứng,
+    để phần code gọi (ví dụ nút "Kiểm tra nạp model" ở Tab Đánh giá, hoặc sau này là tab suy luận
+    thời gian thực) không cần biết trước hôm nay best model là loại gì.
+
+    Trả về dict với khóa `model_type` luôn có mặt, cộng thêm các khóa object tương ứng
+    (`model`+`scaler` cho 2 loại đầu, hoặc `feature_extractor`+`classifier`+`scaler` cho hybrid).
+    """
+    latest_dir = Path(latest_dir)
+    model_type = deployment_config.get("model_type")
+    artifacts = deployment_config.get("artifacts", {})
+
+    missing_keys = [key for key in artifacts if not (latest_dir / artifacts[key]).exists()]
+    if missing_keys:
+        raise FileNotFoundError(
+            f"Thiếu file artifact khai báo trong deployment_config.json: {missing_keys} "
+            f"(thư mục: {latest_dir})"
+        )
+
+    if model_type == "sklearn_tabular":
+        model = joblib.load(latest_dir / artifacts["model_path"])
+        scaler = joblib.load(latest_dir / artifacts["scaler_path"])
+        return {"model_type": model_type, "model": model, "scaler": scaler}
+
+    if model_type == "keras_sequence":
+        try:
+            from tensorflow.keras.models import load_model as keras_load_model
+        except ImportError as exc:
+            raise ImportError(
+                "Best model hiện tại là Deep Learning (định dạng .keras) nhưng môi trường đang chạy "
+                "app.py chưa cài TensorFlow. Cài bằng: pip install tensorflow"
+            ) from exc
+        model = keras_load_model(str(latest_dir / artifacts["model_path"]))
+        scaler = joblib.load(latest_dir / artifacts["scaler_path"])
+        return {
+            "model_type": model_type,
+            "model": model,
+            "scaler": scaler,
+            "window_size": deployment_config.get("window_size"),
+        }
+
+    if model_type == "hybrid_lstm_xgboost":
+        try:
+            from tensorflow.keras.models import load_model as keras_load_model
+        except ImportError as exc:
+            raise ImportError(
+                "Best model hiện tại là Hybrid LSTM+XGBoost nhưng môi trường đang chạy app.py chưa "
+                "cài TensorFlow. Cài bằng: pip install tensorflow"
+            ) from exc
+        from xgboost import XGBClassifier
+
+        feature_extractor = keras_load_model(str(latest_dir / artifacts["feature_extractor_path"]))
+        classifier = XGBClassifier()
+        classifier.load_model(str(latest_dir / artifacts["classifier_path"]))
+        scaler = joblib.load(latest_dir / artifacts["scaler_path"])
+        return {
+            "model_type": model_type,
+            "feature_extractor": feature_extractor,
+            "classifier": classifier,
+            "scaler": scaler,
+            "window_size": deployment_config.get("window_size"),
+        }
+
+    raise ValueError(f"Không hỗ trợ nạp model_type='{model_type}'.")
 
 
 # ==================================================================================================
@@ -870,7 +965,7 @@ def render_preprocessing_training_tab() -> None:
 # ==================================================================================================
 # TAB 3 - 📈 ĐÁNH GIÁ MÔ HÌNH
 # ==================================================================================================
-def render_model_metrics(evaluation_metrics, runtime_info) -> None:
+def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) -> None:
     """Hiển thị bảng số liệu, biểu đồ Plotly và ảnh artifact đánh giá mô hình (Model Comparison Metrics)."""
     if not evaluation_metrics:
         st.info("Chưa có evaluation metrics để hiển thị.")
@@ -1005,11 +1100,44 @@ def render_model_metrics(evaluation_metrics, runtime_info) -> None:
             "nào (mưa, độ ẩm đất, triều cường...) đóng góp nhiều nhất vào quyết định của mô hình."
         )
 
+    model_type = deployment_config.get("model_type", "unknown")
+    model_type_label_map = {
+        "sklearn_tabular": "Machine Learning (sklearn/XGBoost - joblib)",
+        "keras_sequence": "Deep Learning (Keras .keras)",
+        "hybrid_lstm_xgboost": "Hybrid LSTM + XGBoost (Keras + XGBoost native)",
+    }
+    artifact_file_names = ", ".join(
+        f"`{name}`" for name in (deployment_config.get("artifacts") or {}).values()
+    )
     st.caption(
-        f"Model artifact đang được dùng: `{Path(runtime_info['model_path']).name}` | "
-        f"Metrics source: `{Path(runtime_info['metrics_path']).name}` | "
+        f"Best model: `{deployment_config.get('model_name')}` | "
+        f"Loại triển khai: {model_type_label_map.get(model_type, model_type)} | "
+        f"Artifact: {artifact_file_names or '—'} | "
         f"Artifact dir: `{Path(runtime_info['latest_dir']).name}`"
     )
+
+    # ---- Kiểm tra nạp lại model thật bằng đúng loader tương ứng model_type (load_deployment_model) ----
+    # Nút này giúp xác nhận NGAY TRÊN GIAO DIỆN rằng cơ chế lưu vạn năng ở `analyze_and_train.py` và
+    # cơ chế nạp vạn năng ở `app.py` khớp nhau - tức deployment_config.json không chỉ là văn bản mô tả
+    # suông mà thực sự dùng để nạp lại được model gốc, sẵn sàng cho bước suy luận sau này.
+    if st.button("🔧 Kiểm tra nạp model triển khai", key="test_load_deployment_model_button"):
+        try:
+            with st.spinner("Đang nạp model theo deployment_config.json..."):
+                loaded = load_deployment_model(deployment_config, runtime_info["latest_dir"])
+            if loaded["model_type"] == "hybrid_lstm_xgboost":
+                st.success(
+                    f"✅ Nạp thành công model_type=`{loaded['model_type']}`: "
+                    f"feature_extractor=`{type(loaded['feature_extractor']).__name__}`, "
+                    f"classifier=`{type(loaded['classifier']).__name__}`, "
+                    f"scaler=`{type(loaded['scaler']).__name__}`."
+                )
+            else:
+                st.success(
+                    f"✅ Nạp thành công model_type=`{loaded['model_type']}`: "
+                    f"model=`{type(loaded['model']).__name__}`, scaler=`{type(loaded['scaler']).__name__}`."
+                )
+        except Exception as exc:
+            st.error(f"❌ Nạp model thất bại: {exc}")
 
     st.markdown("---")
     st.subheader("📊 Phân tích Đường cong ROC-AUC (One-vs-Rest)")
@@ -1108,7 +1236,7 @@ def render_evaluation_tab() -> None:
     st.caption("Bước 3/4 của pipeline: so sánh hiệu năng các mô hình đã huấn luyện và rút ra khuyến nghị quản trị.")
 
     try:
-        evaluation_metrics, runtime_info = load_evaluation_artifacts()
+        evaluation_metrics, deployment_config, runtime_info = load_evaluation_artifacts()
     except Exception as exc:
         st.warning(
             f"❌ Chưa thể nạp evaluation metrics: {exc} "
@@ -1117,7 +1245,7 @@ def render_evaluation_tab() -> None:
         return
 
     with st.expander("📊 So sánh chỉ số mô hình (F1-Score / Precision / Recall)", expanded=True):
-        render_model_metrics(evaluation_metrics, runtime_info)
+        render_model_metrics(evaluation_metrics, deployment_config, runtime_info)
 
     with st.expander("🏛️ Nhận định & Kết luận quản trị (Managerial Insights)", expanded=True):
         # TODO: thay nội dung placeholder này bằng nhận định THẬT rút ra từ kết quả mô hình + EDA (Tab 1)

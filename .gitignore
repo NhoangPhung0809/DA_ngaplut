@@ -9,10 +9,6 @@ models/
 pm/
 *.pkl
 *.deb
-.venv/
 
-models/
-pm/
-*.pkl
-*.deb
-.venv/
+# Chứa API key thật (OPENWEATHER_API_KEY, STORMGLASS_API_KEY, NOAA_CDO_TOKEN, ...) - KHÔNG được commit.
+.env

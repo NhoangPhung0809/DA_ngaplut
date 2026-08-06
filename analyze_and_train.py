@@ -1532,8 +1532,18 @@ def train_sequence_deep_model(
     model_builder,
     epochs: int = 30,
     batch_size: int = 64,
-) -> dict:
-    X_train_seq, y_train_seq, X_test_seq, y_test_seq, _ = build_sequence_datasets(daily_df)
+) -> tuple[dict, object, StandardScaler, np.ndarray, np.ndarray]:
+    """
+    Huấn luyện 1 mô hình Deep Learning dạng sequence (GRU / 1D-CNN / CNN-LSTM).
+
+    QUAN TRỌNG (sửa bug so với bản trước): trước đây hàm này chỉ trả về `(metrics, y_test_seq,
+    probabilities)` - KHÔNG trả về model đã fit, nên dù model có thắng leaderboard cũng KHÔNG CÓ
+    OBJECT NÀO để lưu lại triển khai (bị "mất" ngay sau khi hàm return). Giờ hàm trả về thêm chính
+    `model` (Keras model đã huấn luyện) và `seq_scaler` (StandardScaler đã fit riêng cho input dạng
+    sequence), để tầng gọi (`train_and_evaluate_models`) có thể giữ lại trong `trained_models` và
+    dùng để export nếu model này thắng leaderboard tổng.
+    """
+    X_train_seq, y_train_seq, X_test_seq, y_test_seq, seq_scaler = build_sequence_datasets(daily_df)
     try:
         model = model_builder((X_train_seq.shape[1], X_train_seq.shape[2]))
         callbacks = [EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)]
@@ -1555,19 +1565,36 @@ def train_sequence_deep_model(
             y_true=y_test_seq,
             y_pred=predictions,
             category="Deep Learning",
+            # `deployment_compatible` vẫn được ghi lại làm THÔNG TIN MÔ TẢ (model cần loader Keras
+            # riêng, không thể joblib.load() như sklearn) - KHÔNG còn dùng để LOẠI TRỪ model này khỏi
+            # việc được chọn làm best model nữa (xem `select_best_model_overall` bên dưới).
             deployment_compatible=False,
             evaluation_scope="daily_sequence",
         )
         metrics["roc_auc_ovr_macro"] = safe_compute_roc_auc_ovr_macro(y_test_seq, probabilities)
-        return metrics, y_test_seq, probabilities
+        # Trả về `model` TRƯỚC khi `finally` gọi `clear_tensorflow_session()`. Lưu ý kỹ thuật: giá trị
+        # trả về đã được Python đánh giá xong (model đã là 1 object cụ thể với trọng số cụ thể) trước
+        # khi khối `finally` chạy, nên `K.clear_session()` (chỉ xóa graph/bộ đếm tên layer TOÀN CỤC
+        # của Keras) KHÔNG làm mất trọng số hay khả năng `.save()` của riêng object `model` này.
+        return metrics, model, seq_scaler, np.asarray(y_test_seq, dtype=int), np.asarray(probabilities, dtype=float)
     finally:
         clear_tensorflow_session()
 
 
-def train_lstm_xgboost_hybrid_model(model_name: str, daily_df: pd.DataFrame) -> dict:
-    """Huấn luyện hybrid LSTM encoder + XGBoost classifier."""
+def train_lstm_xgboost_hybrid_model(
+    model_name: str, daily_df: pd.DataFrame
+) -> tuple[dict, object, XGBClassifier, StandardScaler, np.ndarray, np.ndarray | None]:
+    """
+    Huấn luyện hybrid LSTM encoder + XGBoost classifier.
+
+    QUAN TRỌNG (sửa bug so với bản trước): trước đây hàm chỉ trả về `(metrics, y_test_seq,
+    hybrid_proba)` - hai thành phần đã huấn luyện là `feature_extractor` (LSTM encoder trích embedding)
+    và `hybrid_classifier` (XGBoost học trên embedding đó) đều bị "mất" ngay sau khi hàm return, dù
+    model hybrid có thắng leaderboard cũng không có gì để lưu. Giờ hàm trả về đầy đủ cả 2 thành phần
+    + `seq_scaler` để tầng gọi có thể lưu lại triển khai khi cần.
+    """
     try:
-        X_train_seq, y_train_seq, X_test_seq, y_test_seq, _ = build_sequence_datasets(daily_df)
+        X_train_seq, y_train_seq, X_test_seq, y_test_seq, seq_scaler = build_sequence_datasets(daily_df)
         lstm_model = build_lstm_classifier((X_train_seq.shape[1], X_train_seq.shape[2]))
         callbacks = [EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)]
         class_weights = build_class_weight_mapping(y_train_seq)
@@ -1617,7 +1644,17 @@ def train_lstm_xgboost_hybrid_model(model_name: str, daily_df: pd.DataFrame) -> 
         except Exception:
             hybrid_proba = None
             metrics["roc_auc_ovr_macro"] = None
-        return metrics, np.asarray(y_test_seq, dtype=int), hybrid_proba
+        # Trả về CẢ 2 thành phần đã fit (feature_extractor + hybrid_classifier) và seq_scaler - xem
+        # giải thích về `clear_tensorflow_session()` trong `finally` ở `train_sequence_deep_model()`,
+        # nguyên tắc tương tự áp dụng ở đây: object đã được return trước khi session bị clear.
+        return (
+            metrics,
+            feature_extractor,
+            hybrid_classifier,
+            seq_scaler,
+            np.asarray(y_test_seq, dtype=int),
+            hybrid_proba,
+        )
     finally:
         clear_tensorflow_session()
 
@@ -1840,34 +1877,55 @@ def train_and_evaluate_models(
             }
             roc_cache[model_name] = {"y_true": y_true_seq, "y_proba": y_proba_seq}
         elif model_kind == "gru_sequence":
-            metrics, y_true_seq, y_proba_seq = train_sequence_deep_model(
+            metrics, seq_model, seq_scaler, y_true_seq, y_proba_seq = train_sequence_deep_model(
                 model_name=model_name,
                 daily_df=daily_df,
                 model_builder=build_gru_classifier,
                 epochs=30,
                 batch_size=64,
             )
+            # Giữ lại model Keras + seq_scaler đã fit trong `trained_models`, CÙNG cấu trúc dict
+            # {"model":..., "seq_scaler":...} như "LSTM" (kind=lstm_sequence) đã dùng từ trước, để
+            # tầng export phía sau xử lý đồng nhất cho mọi model dạng sequence (LSTM/GRU/CNN...).
+            trained_models[model_name] = {"model": seq_model, "seq_scaler": seq_scaler}
             roc_cache[model_name] = {"y_true": y_true_seq, "y_proba": y_proba_seq}
         elif model_kind == "cnn1d_sequence":
-            metrics, y_true_seq, y_proba_seq = train_sequence_deep_model(
+            metrics, seq_model, seq_scaler, y_true_seq, y_proba_seq = train_sequence_deep_model(
                 model_name=model_name,
                 daily_df=daily_df,
                 model_builder=build_cnn1d_classifier,
                 epochs=30,
                 batch_size=64,
             )
+            trained_models[model_name] = {"model": seq_model, "seq_scaler": seq_scaler}
             roc_cache[model_name] = {"y_true": y_true_seq, "y_proba": y_proba_seq}
         elif model_kind == "cnn_lstm_sequence":
-            metrics, y_true_seq, y_proba_seq = train_sequence_deep_model(
+            metrics, seq_model, seq_scaler, y_true_seq, y_proba_seq = train_sequence_deep_model(
                 model_name=model_name,
                 daily_df=daily_df,
                 model_builder=build_cnn_lstm_classifier,
                 epochs=30,
                 batch_size=64,
             )
+            trained_models[model_name] = {"model": seq_model, "seq_scaler": seq_scaler}
             roc_cache[model_name] = {"y_true": y_true_seq, "y_proba": y_proba_seq}
         elif model_kind == "lstm_xgboost_hybrid":
-            metrics, y_true_seq, y_proba_seq = train_lstm_xgboost_hybrid_model(model_name, daily_df)
+            (
+                metrics,
+                feature_extractor,
+                hybrid_classifier,
+                hybrid_seq_scaler,
+                y_true_seq,
+                y_proba_seq,
+            ) = train_lstm_xgboost_hybrid_model(model_name, daily_df)
+            # Hybrid có 2 thành phần (LSTM feature_extractor + XGBoost classifier) nên cấu trúc dict
+            # lưu trong `trained_models` khác với sequence thuần - tầng export sẽ nhận diện qua các
+            # key "feature_extractor"/"classifier" để biết đây là hybrid, cần lưu 2 file riêng biệt.
+            trained_models[model_name] = {
+                "feature_extractor": feature_extractor,
+                "classifier": hybrid_classifier,
+                "seq_scaler": hybrid_seq_scaler,
+            }
             if y_proba_seq is not None:
                 roc_cache[model_name] = {"y_true": y_true_seq, "y_proba": np.asarray(y_proba_seq, dtype=float)}
         else:
@@ -1927,39 +1985,185 @@ def save_leaderboard_csv(leaderboard_df: pd.DataFrame, output_dir: Path) -> Path
     return output_path
 
 
-def select_best_model(evaluation_results: dict, trained_models: dict):
-    """Chọn mô hình deploy-compatible tốt nhất theo Macro F1-score."""
-    compatible_candidates = [
-        model_name
-        for model_name, metrics in evaluation_results.items()
-        if metrics.get("deployment_compatible", False) and model_name in trained_models
-    ]
-    if not compatible_candidates:
-        raise ValueError(
-            "Không có mô hình deploy-compatible nào được huấn luyện. "
-            "Vui lòng chọn ít nhất một mô hình tabular để dashboard có thể nạp."
+def classify_model_deployment_type(model_name: str, evaluation_results: dict, trained_models: dict) -> str:
+    """
+    Xác định "model_type" triển khai của 1 model dựa trên CẤU TRÚC OBJECT thực tế đã lưu trong
+    `trained_models`, KHÔNG dựa vào cờ `deployment_compatible` tĩnh khai báo sẵn trong registry nữa
+    (đó chính là nguồn gốc bug cũ: cờ tĩnh này được set cứng `False` cho mọi Deep Learning/Hybrid,
+    bất kể model thực tế mạnh hay yếu, khiến các model tốt nhất leaderboard không bao giờ được chọn).
+
+    Trả về một trong: "sklearn_tabular" | "keras_sequence" | "hybrid_lstm_xgboost" | "unsupported".
+    "unsupported" dùng cho các model không có MỘT object duy nhất để lưu triển khai (ví dụ ARIMA/
+    SARIMA - được fit RIÊNG cho từng địa phương/từng fold trong vòng lặp, không tồn tại "một model"
+    đại diện chung để đóng gói - đây là giới hạn KIẾN TRÚC thật sự, khác với bug lọc nhầm ở trên).
+    """
+    candidate = trained_models.get(model_name)
+    if isinstance(candidate, dict) and "feature_extractor" in candidate and "classifier" in candidate:
+        return "hybrid_lstm_xgboost"
+    if isinstance(candidate, dict) and "model" in candidate and "seq_scaler" in candidate:
+        return "keras_sequence"
+    if candidate is not None and hasattr(candidate, "predict"):
+        return "sklearn_tabular"
+    return "unsupported"
+
+
+def select_best_model_overall(evaluation_results: dict, trained_models: dict) -> tuple[str, str]:
+    """
+    Chọn model TỐT NHẤT TUYỆT ĐỐI theo leaderboard (Macro F1-score), KHÔNG loại trừ theo nhóm
+    phương pháp (Machine Learning / Deep Learning / Hybrid) - đúng yêu cầu: mô hình xếp Rank #1
+    trên leaderboard tổng phải luôn là mô hình được chọn triển khai, bất kể loại mô hình.
+
+    Ngoại lệ DUY NHẤT: nếu #1 leaderboard là một model KHÔNG THỂ đóng gói thành 1 artifact triển
+    khai được (ví dụ ARIMA/SARIMA - xem `classify_model_deployment_type`), hàm sẽ in cảnh báo rõ
+    ràng và lùi xuống ứng viên xếp hạng kế tiếp có thể triển khai được - đây là giới hạn kỹ thuật
+    khách quan (không có "một model" để lưu), khác hẳn với việc CỐ TÌNH lọc bỏ Deep Learning/Hybrid
+    như logic cũ.
+    """
+    ranked_model_names = sorted(
+        evaluation_results.keys(),
+        key=lambda name: float(evaluation_results[name].get("f1_macro", 0.0)),
+        reverse=True,
+    )
+    if not ranked_model_names:
+        raise ValueError("Không có mô hình nào được huấn luyện để chọn best model.")
+
+    for rank, model_name in enumerate(ranked_model_names, start=1):
+        deployment_type = classify_model_deployment_type(model_name, evaluation_results, trained_models)
+        if deployment_type != "unsupported":
+            if rank > 1:
+                print(
+                    f"\n⚠️ Lưu ý: Rank #1 leaderboard là "
+                    f"'{ranked_model_names[0]}' nhưng không thể đóng gói thành 1 artifact triển khai "
+                    f"(model dạng {evaluation_results[ranked_model_names[0]].get('category')} được "
+                    "fit riêng theo từng địa phương/fold, không có object đại diện chung). "
+                    f"-> Chọn Rank #{rank}: '{model_name}' (F1-Macro="
+                    f"{evaluation_results[model_name]['f1_macro']:.4f}) làm best model triển khai."
+                )
+            print(
+                f"\n✅ Best model được chọn triển khai: '{model_name}' "
+                f"(Rank #{rank}/{len(ranked_model_names)} | Category="
+                f"{evaluation_results[model_name].get('category')} | F1-Macro="
+                f"{evaluation_results[model_name]['f1_macro']:.4f} | model_type={deployment_type})"
+            )
+            return model_name, deployment_type
+
+    raise ValueError(
+        "Không có model nào trong leaderboard có thể đóng gói thành artifact triển khai được "
+        "(toàn bộ đều thuộc nhóm không hỗ trợ export như ARIMA/SARIMA)."
+    )
+
+
+def export_deployment_artifacts(
+    best_model_name: str,
+    deployment_type: str,
+    trained_models: dict,
+    evaluation_results: dict,
+    tabular_scaler: StandardScaler,
+    run_dir: Path,
+) -> dict:
+    """
+    CƠ CHẾ LƯU VẠN NĂNG (Universal Saving Mechanism): đóng gói best model theo ĐÚNG định dạng gốc
+    của từng loại mô hình, thay vì ép mọi loại model đều phải là 1 file `best_model.pkl` bằng joblib
+    (joblib/pickle CHỈ phù hợp cho object Python thuần như sklearn/XGBoost - Keras model KHÔNG nên
+    pickle trực tiếp, phải dùng `model.save()` định dạng `.keras` gốc của TensorFlow để đảm bảo nạp
+    lại đúng kiến trúc + trọng số + optimizer state).
+
+    3 nhánh lưu tương ứng 3 model_type:
+      - "sklearn_tabular": joblib.dump() -> best_model.pkl (như cũ, không đổi hành vi cho nhóm này).
+      - "keras_sequence" (LSTM/GRU/1D-CNN/CNN-LSTM): model.save() -> best_model.keras (định dạng
+        Keras v3 gốc, tự chứa kiến trúc mạng, gọi lại bằng `tensorflow.keras.models.load_model()`).
+      - "hybrid_lstm_xgboost": lưu RIÊNG 2 file cho 2 thành phần: LSTM feature_extractor ->
+        best_model_feature_extractor.keras, và đầu phân loại XGBoost -> best_model_xgb_head.json
+        (dùng `.save_model()` gốc của XGBoost, KHÔNG joblib, để tương thích ngược version-safe hơn).
+
+    Mỗi nhánh cũng lưu kèm 1 scaler RIÊNG khớp đúng loại input mà model đó cần (scaler tabular
+    theo dòng-ngày-đơn cho sklearn, seq_scaler theo sliding-window cho sequence/hybrid) - vì 2 loại
+    scaler này được fit trên 2 kiểu dữ liệu khác nhau, KHÔNG được dùng lẫn cho nhau.
+
+    Trả về dict `artifacts` (tên file -> Path) để hàm gọi ghi tiếp vào `deployment_config.json`.
+    """
+    artifacts: dict[str, Path] = {}
+
+    if deployment_type == "sklearn_tabular":
+        model = trained_models[best_model_name]
+        model_path = run_dir / "best_model.pkl"
+        scaler_path = run_dir / "scaler.pkl"
+        joblib.dump(model, model_path)
+        joblib.dump(tabular_scaler, scaler_path)
+        artifacts["model_path"] = model_path
+        artifacts["scaler_path"] = scaler_path
+        print(f"[Universal Save] sklearn_tabular -> {model_path.name} (joblib)")
+
+    elif deployment_type == "keras_sequence":
+        bundle = trained_models[best_model_name]
+        model_path = run_dir / "best_model.keras"
+        scaler_path = run_dir / "scaler.pkl"
+        bundle["model"].save(str(model_path))
+        joblib.dump(bundle["seq_scaler"], scaler_path)
+        artifacts["model_path"] = model_path
+        artifacts["scaler_path"] = scaler_path
+        print(f"[Universal Save] keras_sequence -> {model_path.name} (Keras native .save())")
+
+    elif deployment_type == "hybrid_lstm_xgboost":
+        bundle = trained_models[best_model_name]
+        feature_extractor_path = run_dir / "best_model_feature_extractor.keras"
+        classifier_path = run_dir / "best_model_xgb_head.json"
+        scaler_path = run_dir / "scaler.pkl"
+        bundle["feature_extractor"].save(str(feature_extractor_path))
+        bundle["classifier"].save_model(str(classifier_path))
+        joblib.dump(bundle["seq_scaler"], scaler_path)
+        artifacts["feature_extractor_path"] = feature_extractor_path
+        artifacts["classifier_path"] = classifier_path
+        artifacts["scaler_path"] = scaler_path
+        print(
+            f"[Universal Save] hybrid_lstm_xgboost -> {feature_extractor_path.name} + "
+            f"{classifier_path.name} (Keras + XGBoost native save)"
         )
 
-    best_model_name = max(
-        compatible_candidates,
-        key=lambda model_name: evaluation_results[model_name]["f1_macro"],
-    )
-    best_model = trained_models[best_model_name]
-    print(f"\nBest deploy-compatible model selected: {best_model_name}")
-    return best_model_name, best_model
+    else:
+        raise ValueError(f"Không hỗ trợ export cho deployment_type='{deployment_type}'.")
+
+    return artifacts
 
 
-def save_run_artifacts(best_model, scaler: StandardScaler, run_dir: Path) -> tuple[Path, Path]:
-    """Lưu scaler và best model của một lần huấn luyện vào thư mục versioned."""
-    best_model_path = run_dir / "best_model.pkl"
-    scaler_path = run_dir / "scaler.pkl"
+def save_deployment_config(
+    best_model_name: str,
+    deployment_type: str,
+    evaluation_results: dict,
+    artifacts: dict,
+    output_dir: Path,
+) -> Path:
+    """
+    Sinh file `deployment_config.json` - "bản đồ chỉ dẫn" để `app.py` biết CHÍNH XÁC cách nạp lại
+    best model của lần huấn luyện này, KHÔNG cần đoán hay hardcode theo tên file cố định như trước
+    (trước đây app.py luôn giả định `best_model.pkl` tồn tại và nạp bằng joblib - giả định này SAI
+    ngay khi best model là Deep Learning/Hybrid). App.py chỉ cần đọc đúng 1 file JSON này để biết:
+    (1) model tên gì, (2) thuộc model_type nào -> dùng loader tương ứng (joblib / Keras load_model /
+    cả hai cho hybrid), (3) đường dẫn chính xác tới từng file artifact liên quan.
+    """
+    metrics = evaluation_results[best_model_name]
+    config = {
+        "model_name": best_model_name,
+        "model_type": deployment_type,
+        "category": metrics.get("category"),
+        "f1_macro": metrics.get("f1_macro"),
+        "accuracy": metrics.get("accuracy"),
+        "window_size": SEQUENCE_WINDOW if deployment_type in {"keras_sequence", "hybrid_lstm_xgboost"} else None,
+        "feature_cols": FEATURE_COLS,
+        "class_labels": CLASS_LABELS,
+        "class_name_map": CLASS_NAME_MAP,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        # File name tương đối trong CÙNG thư mục (models/latest/ hoặc models/run_<ts>/) - app.py chỉ
+        # cần nối với thư mục đang đọc, không phụ thuộc đường dẫn tuyệt đối lúc train.
+        "artifacts": {key: Path(value).name for key, value in artifacts.items()},
+    }
 
-    joblib.dump(best_model, best_model_path)
-    joblib.dump(scaler, scaler_path)
+    config_path = output_dir / "deployment_config.json"
+    with config_path.open("w", encoding="utf-8") as file:
+        json.dump(config, file, indent=4, ensure_ascii=False)
 
-    print(f"Saved best model to: {best_model_path}")
-    print(f"Saved scaler to    : {scaler_path}")
-    return best_model_path, scaler_path
+    print(f"Saved deployment config to: {config_path}")
+    return config_path
 
 
 def save_incremental_candidate_artifacts(trained_models: dict, run_dir: Path) -> None:
@@ -1981,10 +2185,16 @@ def save_incremental_candidate_artifacts(trained_models: dict, run_dir: Path) ->
                 print(f"Friendly warning: Không thể lưu LSTM incremental artifact ({exc}).")
 
 
-def plot_confusion_matrix(best_model, X_test_scaled: pd.DataFrame, y_test: pd.Series, output_dir: Path) -> Path:
-    """Vẽ và lưu confusion matrix cho mô hình tốt nhất của lần chạy hiện tại."""
-    y_pred = best_model.predict(X_test_scaled)
-    cm = confusion_matrix(y_test, y_pred, labels=CLASS_LABELS)
+def build_confusion_matrix_from_labels(y_true, y_pred, output_dir: Path) -> Path:
+    """
+    Vẽ confusion matrix trực tiếp từ cặp (y_true, y_pred) - dùng CHUNG được cho MỌI loại best model
+    (sklearn_tabular / keras_sequence / hybrid_lstm_xgboost), vì dù kiến trúc model khác nhau, kết
+    quả cuối cùng luôn quy về 1 cặp nhãn thật/nhãn dự đoán trên cùng thang 3 lớp (0/1/2). Nhờ vậy
+    hàm vẽ confusion matrix KHÔNG còn phụ thuộc vào việc gọi `model.predict(X_test_scaled_dataframe)`
+    (chỉ đúng cho sklearn) - tránh crash khi best model là Deep Learning/Hybrid (input của chúng là
+    sequence 3 chiều, không phải DataFrame 2 chiều như X_test_scaled của nhánh tabular).
+    """
+    cm = confusion_matrix(y_true, y_pred, labels=CLASS_LABELS)
 
     plt.figure(figsize=(8, 6))
     sns.heatmap(
@@ -2005,6 +2215,12 @@ def plot_confusion_matrix(best_model, X_test_scaled: pd.DataFrame, y_test: pd.Se
     plt.close()
     print(f"Saved confusion matrix to: {output_path}")
     return output_path
+
+
+def plot_confusion_matrix(best_model, X_test_scaled: pd.DataFrame, y_test: pd.Series, output_dir: Path) -> Path:
+    """Vẽ confusion matrix cho best model dạng sklearn_tabular (giữ nguyên hành vi cũ)."""
+    y_pred = best_model.predict(X_test_scaled)
+    return build_confusion_matrix_from_labels(y_test, y_pred, output_dir)
 
 
 def extract_feature_importance(best_model, X_test_scaled: pd.DataFrame, y_test: pd.Series) -> pd.DataFrame:
@@ -2136,34 +2352,78 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
     save_incremental_candidate_artifacts(trained_models, run_dir=run_dir)
 
     leaderboard_df = build_leaderboard_dataframe(evaluation_results)
-    best_model_name, best_model = select_best_model(evaluation_results, trained_models)
-    best_overall_model_name = max(
-        evaluation_results.keys(),
-        key=lambda candidate: float(evaluation_results[candidate].get("f1_macro", 0.0)),
-    )
+
+    # ============================================================================================
+    # MODEL SELECTION AND EXPORT (ĐÃ SỬA BUG "ưu tiên ngầm cho model tabular")
+    # ============================================================================================
+    # TRƯỚC ĐÂY: `select_best_model()` chỉ xét các model có cờ tĩnh `deployment_compatible=True`
+    # (luôn là False cho MỌI Deep Learning/Hybrid trong `build_model_registry()`), nên dù GRU/Hybrid
+    # đạt F1-Macro > 0.92 (hạng #1 thật sự trên leaderboard), pipeline vẫn luôn chọn model tabular
+    # yếu hơn nhiều (vd. Random Forest F1=0.50) làm "best model" triển khai - đây chính là bug logic
+    # đã báo cáo. BÂY GIỜ: `select_best_model_overall()` LUÔN chọn đúng Rank #1 theo leaderboard tổng,
+    # bất kể model đó thuộc nhóm nào - chỉ lùi hạng khi #1 tuyệt đối KHÔNG THỂ đóng gói triển khai
+    # được về mặt kỹ thuật (ARIMA/SARIMA, xem `classify_model_deployment_type`), và luôn IN RÕ lý do
+    # ra log khi việc lùi hạng xảy ra, thay vì âm thầm lọc bỏ như logic cũ.
+    best_model_name, deployment_type = select_best_model_overall(evaluation_results, trained_models)
 
     print_leaderboard(leaderboard_df)
     leaderboard_path = save_leaderboard_csv(leaderboard_df, run_dir)
     metrics_path = save_evaluation_metrics(evaluation_results, run_dir)
-    best_model_path, scaler_path = save_run_artifacts(best_model, scaler, run_dir)
-    confusion_matrix_path = plot_confusion_matrix(best_model, X_test_scaled, y_test, run_dir)
-    feature_importance_path = plot_feature_importance(best_model, X_test_scaled, y_test, run_dir)
-    if best_overall_model_name in roc_cache:
-        roc_curve_path = export_multiclass_roc_curve_from_proba(
-            best_overall_model_name,
-            roc_cache[best_overall_model_name]["y_true"],
-            roc_cache[best_overall_model_name]["y_proba"],
-            run_dir,
+
+    # CƠ CHẾ LƯU VẠN NĂNG: dispatch theo đúng model_type thực tế (sklearn_tabular / keras_sequence /
+    # hybrid_lstm_xgboost) - xem docstring chi tiết trong `export_deployment_artifacts()`.
+    artifacts = export_deployment_artifacts(
+        best_model_name=best_model_name,
+        deployment_type=deployment_type,
+        trained_models=trained_models,
+        evaluation_results=evaluation_results,
+        tabular_scaler=scaler,
+        run_dir=run_dir,
+    )
+    deployment_config_path = save_deployment_config(
+        best_model_name=best_model_name,
+        deployment_type=deployment_type,
+        evaluation_results=evaluation_results,
+        artifacts=artifacts,
+        output_dir=run_dir,
+    )
+
+    # ---- Confusion matrix: dùng chung 1 hàm cho mọi loại model (xem build_confusion_matrix_from_labels) ----
+    if deployment_type == "sklearn_tabular":
+        confusion_matrix_path = plot_confusion_matrix(trained_models[best_model_name], X_test_scaled, y_test, run_dir)
+        feature_importance_path = plot_feature_importance(trained_models[best_model_name], X_test_scaled, y_test, run_dir)
+    elif best_model_name in roc_cache:
+        # keras_sequence / hybrid_lstm_xgboost: không có DataFrame tabular để `.predict()` trực tiếp,
+        # nhưng đã có sẵn (y_true, y_proba) từ lúc đánh giá trên tập test dạng sequence -> suy ra
+        # y_pred = argmax(y_proba) để vẽ confusion matrix, tái sử dụng đúng số liệu đã đánh giá,
+        # không cần chạy suy luận lại lần 2.
+        y_true_for_cm = roc_cache[best_model_name]["y_true"]
+        y_pred_for_cm = np.argmax(roc_cache[best_model_name]["y_proba"], axis=1)
+        confusion_matrix_path = build_confusion_matrix_from_labels(y_true_for_cm, y_pred_for_cm, run_dir)
+        # Feature importance kiểu "tabular" (feature_importances_/coef_/permutation) không có ý nghĩa
+        # trực tiếp cho input dạng sequence (mỗi feature xuất hiện lặp lại qua nhiều bước thời gian
+        # trong sliding window) - bỏ qua thay vì tính sai, và ghi rõ lý do ra log/artifact.
+        feature_importance_path = None
+        print(
+            f"[Info] Bỏ qua feature_importance.png cho model_type='{deployment_type}' - biểu đồ "
+            "feature importance kiểu tabular không áp dụng trực tiếp cho input dạng sequence."
         )
     else:
-        model_for_roc = trained_models.get(best_overall_model_name)
-        if isinstance(model_for_roc, dict) and "model" in model_for_roc:
-            model_for_roc = model_for_roc["model"]
-        if model_for_roc is None:
-            model_for_roc = object()
+        confusion_matrix_path = None
+        feature_importance_path = None
+
+    roc_curve_path = None
+    if best_model_name in roc_cache:
+        roc_curve_path = export_multiclass_roc_curve_from_proba(
+            best_model_name,
+            roc_cache[best_model_name]["y_true"],
+            roc_cache[best_model_name]["y_proba"],
+            run_dir,
+        )
+    elif deployment_type == "sklearn_tabular":
         roc_curve_path = export_multiclass_roc_curve_data(
-            best_overall_model_name,
-            model_for_roc,
+            best_model_name,
+            trained_models[best_model_name],
             X_test_scaled,
             y_test,
             run_dir,
@@ -2171,30 +2431,46 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
 
     latest_leaderboard_path = copy_artifact_to_latest(leaderboard_path, "leaderboard.csv")
     latest_metrics_path = copy_artifact_to_latest(metrics_path, "evaluation_metrics.json")
-    latest_model_path = copy_artifact_to_latest(best_model_path, "best_model.pkl")
-    latest_scaler_path = copy_artifact_to_latest(scaler_path, "scaler.pkl")
-    latest_confusion_path = copy_artifact_to_latest(confusion_matrix_path, "confusion_matrix.png")
-    latest_feature_importance_path = copy_artifact_to_latest(feature_importance_path, "feature_importance.png")
-    latest_roc_curve_path = copy_artifact_to_latest(roc_curve_path, "roc_curve_data.json")
-    copy_artifact_to_plots(latest_confusion_path, "confusion_matrix.png")
-    copy_artifact_to_plots(latest_feature_importance_path, "feature_importance.png")
+    latest_deployment_config_path = copy_artifact_to_latest(deployment_config_path, "deployment_config.json")
+
+    # Đồng bộ TOÀN BỘ artifact model (tên file có thể khác nhau tùy model_type - xem `artifacts` trả
+    # về từ `export_deployment_artifacts`) sang `models/latest/`, giữ NGUYÊN tên file gốc (không ép
+    # về "best_model.pkl" cứng như trước) để khớp đúng với những gì `deployment_config.json` khai báo.
+    latest_artifact_paths = {
+        key: copy_artifact_to_latest(path, Path(path).name) for key, path in artifacts.items()
+    }
+
+    latest_confusion_path = (
+        copy_artifact_to_latest(confusion_matrix_path, "confusion_matrix.png") if confusion_matrix_path else None
+    )
+    latest_feature_importance_path = (
+        copy_artifact_to_latest(feature_importance_path, "feature_importance.png")
+        if feature_importance_path
+        else None
+    )
+    latest_roc_curve_path = copy_artifact_to_latest(roc_curve_path, "roc_curve_data.json") if roc_curve_path else None
+    if latest_confusion_path:
+        copy_artifact_to_plots(latest_confusion_path, "confusion_matrix.png")
+    if latest_feature_importance_path:
+        copy_artifact_to_plots(latest_feature_importance_path, "feature_importance.png")
 
     print("\n=== PIPELINE COMPLETED SUCCESSFULLY ===")
+    print(f"Best model triển khai: {best_model_name} (model_type={deployment_type})")
     print("If needed, install extra libraries with: pip install lightgbm catboost statsmodels tensorflow ctgan")
     return {
         "timestamp": ts,
         "run_dir": str(run_dir),
         "selected_models": list(selected_models.keys()),
         "best_model_name": best_model_name,
-        "best_model_run_path": str(best_model_path),
-        "best_model_latest_path": str(latest_model_path),
-        "scaler_latest_path": str(latest_scaler_path),
+        "best_model_type": deployment_type,
+        "deployment_config_path": str(latest_deployment_config_path),
+        "best_model_artifacts": {key: str(path) for key, path in latest_artifact_paths.items()},
         "metrics_latest_path": str(latest_metrics_path),
         "leaderboard_latest_path": str(latest_leaderboard_path),
-        "roc_curve_latest_path": str(latest_roc_curve_path),
+        "roc_curve_latest_path": str(latest_roc_curve_path) if latest_roc_curve_path else None,
         "balancing_method_used": balancing_method_used,
         "leaderboard": leaderboard_df.to_dict(orient="records"),
-        "best_overall_model_name": best_overall_model_name,
+        "best_overall_model_name": best_model_name,
     }
 
 

@@ -1,0 +1,38 @@
+# Chuẩn hóa line-ending: repo này deploy lên server Ubuntu, nên luôn ép LF trong git repository
+# bất kể máy dev đang dùng hệ điều hành/cấu hình core.autocrlf nào (Windows/macOS/Linux).
+# Không dùng "* text=auto" đơn thuần vì để tường minh, chỉ áp dụng cho các loại file text đã biết,
+# tránh việc git tự đoán nhầm với file nhị phân.
+
+* text=auto eol=lf
+
+# Mã nguồn
+*.py text eol=lf
+*.sh text eol=lf
+*.txt text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.cfg text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+
+# Dữ liệu dạng text
+*.csv text eol=lf
+*.tsv text eol=lf
+*.geojson text eol=lf
+
+# File nhị phân - KHÔNG được đụng vào line-ending, phải khai báo rõ để git không cố "sửa"
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.pkl binary
+*.keras binary
+*.h5 binary
+*.pt binary
+*.sqlite binary
+*.db binary
+*.zip binary
+*.tar.gz binary
+*.deb binary

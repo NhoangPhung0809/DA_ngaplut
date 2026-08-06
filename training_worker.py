@@ -82,10 +82,18 @@ def main() -> int:
                 "status": "completed",
                 "finished_at": datetime.now().isoformat(timespec="seconds"),
                 "best_model_name": result.get("best_model_name"),
+                # `best_model_type` cho biết model thắng leaderboard thuộc nhóm nào (sklearn_tabular /
+                # keras_sequence / hybrid_lstm_xgboost) - xem `select_best_model_overall()` trong
+                # `analyze_and_train.py`. Từ khi sửa bug chọn best model, artifact không còn cố định
+                # là 1 file `best_model.pkl` duy nhất nữa, nên đường dẫn cụ thể nằm trong
+                # `best_model_artifacts` (dict) thay vì 2 khóa `best_model_latest_path`/
+                # `scaler_latest_path` cố định như trước - `deployment_config.json` mới là nguồn
+                # thông tin đầy đủ và chính xác nhất để app.py biết cách nạp lại model.
+                "best_model_type": result.get("best_model_type"),
                 "run_dir": result.get("run_dir"),
                 "metrics_latest_path": result.get("metrics_latest_path"),
-                "best_model_latest_path": result.get("best_model_latest_path"),
-                "scaler_latest_path": result.get("scaler_latest_path"),
+                "deployment_config_path": result.get("deployment_config_path"),
+                "best_model_artifacts": result.get("best_model_artifacts"),
             }
         write_training_state(completed_state)
         return 0
