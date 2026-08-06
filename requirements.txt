@@ -8,6 +8,7 @@ python-dotenv
 joblib
 scikit-learn
 imbalanced-learn
+optuna
 xgboost
 lightgbm
 catboost
