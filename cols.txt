@@ -1,0 +1,1 @@
+['Thời_gian', 'Nhiệt_độ_C', 'Độ_ẩm_%', 'Lượng_mưa_mm', 'Độ_ẩm_đất', 'Chiều_cao_triều_m', 'Nguy_cơ_ngập']

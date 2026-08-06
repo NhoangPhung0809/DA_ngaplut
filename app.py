@@ -1425,6 +1425,29 @@ def build_risk_lookup(df_predictions):
 _fragment_decorator = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
 
 
+def build_map_panel_discussion(df_predictions: pd.DataFrame) -> str:
+    """Sinh nhận xét động cho bản đồ rủi ro dựa trên số địa phương theo từng mức cảnh báo."""
+    if df_predictions.empty:
+        return "Chưa có dữ liệu dự báo để tổng hợp cho bản đồ rủi ro."
+
+    risk_counts = df_predictions["Nguy cơ"].value_counts()
+    safe_count = int(risk_counts.get("🟢 An toàn", 0))
+    light_count = int(risk_counts.get("🟠 Ngập nhẹ", 0))
+    heavy_count = int(risk_counts.get("🔴 Ngập nặng", 0))
+    total = len(df_predictions)
+
+    return (
+        f"Trên bản đồ, hiện có {safe_count}/{total} địa phương ở mức an toàn, {light_count}/{total} địa phương "
+        f"ở mức ngập nhẹ và {heavy_count}/{total} địa phương ở mức ngập nặng. "
+        + (
+            "Không có khu vực nào ở mức cảnh báo cao, tình hình tổng thể tương đối ổn định."
+            if light_count == 0 and heavy_count == 0
+            else "Các khu vực tô màu cảnh báo (cam/đỏ) cần được ưu tiên giám sát và bố trí lực lượng ứng trực trước, "
+            "đặc biệt nếu các khu vực này liền kề nhau vì rủi ro ngập có thể lan rộng theo hệ thống sông/kênh chung."
+        )
+    )
+
+
 def _render_map_panel(df_predictions: pd.DataFrame, current_update_time: str) -> None:
     st.subheader("🗺️ Bản đồ Rủi ro Ngập lụt")
     st.caption(f"🕒 Dữ liệu cập nhật lúc: {current_update_time} | Chế độ bản đồ nhẹ")
@@ -1443,6 +1466,7 @@ def _render_map_panel(df_predictions: pd.DataFrame, current_update_time: str) ->
             "Bản đồ đang được ẩn để giảm tải cho trình duyệt và ưu tiên hiệu năng huấn luyện ML/deep learning. "
             "Bạn có thể bật lại trong sidebar bằng tùy chọn `Hiển thị bản đồ nhẹ`."
         )
+    render_chart_discussion(build_map_panel_discussion(df_predictions))
 
 
 render_map_panel = _fragment_decorator(_render_map_panel) if _fragment_decorator else _render_map_panel
@@ -1754,6 +1778,11 @@ def build_contrast_styler(
     return styled_df
 
 
+def render_chart_discussion(text: str) -> None:
+    """Hiển thị đoạn nhận xét/diễn giải ngay bên dưới một bảng hoặc biểu đồ."""
+    st.info(text)
+
+
 def render_styled_table(styler, height: int = 360):
     """Render bảng trực tiếp trong layout Streamlit để tránh khung iframe bị lệch."""
     st.dataframe(
@@ -1761,6 +1790,23 @@ def render_styled_table(styler, height: int = 360):
         use_container_width=True,
         hide_index=True,
         height=height,
+    )
+
+
+def build_prediction_table_discussion(df_predictions: pd.DataFrame) -> str:
+    """Sinh nhận xét động cho bảng dự báo hiện tại dựa trên dữ liệu vừa suy luận."""
+    if df_predictions.empty:
+        return "Chưa có dữ liệu dự báo hiện tại để đưa ra nhận xét."
+
+    top_row = df_predictions.loc[df_predictions["Xác suất ngập (%)"].idxmax()]
+    at_risk_df = df_predictions[df_predictions["Nguy cơ"] != "🟢 An toàn"]
+
+    return (
+        f"Tại thời điểm cập nhật, **{top_row['Địa phương']}** đang có xác suất ngập cao nhất "
+        f"({top_row['Xác suất ngập (%)']:.2f}%), tương ứng mức cảnh báo `{top_row['Nguy cơ']}`. "
+        f"Hiện có {len(at_risk_df)}/{len(df_predictions)} địa phương đang ở mức cảnh báo (ngập nhẹ/ngập nặng). "
+        "Ban chỉ đạo phòng chống thiên tai nên ưu tiên theo dõi sát các khu vực này, sẵn sàng phương án "
+        "ứng phó nếu xác suất tiếp tục tăng ở các lần cập nhật kế tiếp."
     )
 
 
@@ -1776,6 +1822,25 @@ def render_prediction_table(df_predictions):
             risk_column="Nguy cơ",
         ),
         height=320,
+    )
+    render_chart_discussion(build_prediction_table_discussion(df_predictions))
+
+
+def build_future_forecast_discussion(display_df: pd.DataFrame) -> str:
+    """Sinh nhận xét động cho bảng dự báo N ngày tới."""
+    if display_df.empty or "Xác suất ngập (%)" not in display_df.columns:
+        return "Chưa có dữ liệu forecast hợp lệ để đưa ra nhận xét."
+
+    top_row = display_df.loc[display_df["Xác suất ngập (%)"].idxmax()]
+    high_risk_days = display_df[display_df["Nguy cơ"] != "🟢 An toàn"]["Ngày"].nunique()
+    total_days = display_df["Ngày"].nunique()
+
+    return (
+        f"Trong giai đoạn dự báo này, nguy cơ ngập cao nhất được ghi nhận vào ngày **{top_row['Ngày']}** "
+        f"tại **{top_row['Địa phương']}**, với xác suất khoảng {top_row['Xác suất ngập (%)']:.2f}% "
+        f"(mức `{top_row['Nguy cơ']}`). Có {high_risk_days}/{total_days} ngày trong khung dự báo xuất hiện "
+        "ít nhất một địa phương ở mức cảnh báo. Đây là cơ sở để đơn vị quản lý bố trí lịch trực và chuẩn bị "
+        "vật tư phòng chống ngập theo đúng thời điểm rủi ro cao thay vì dàn trải nguồn lực."
     )
 
 
@@ -1796,6 +1861,7 @@ def render_future_forecast_table(df_future, days):
         ),
         height=430,
     )
+    render_chart_discussion(build_future_forecast_discussion(display_df))
 
 def render_future_forecast_sections(df_future):
     """Hiển thị dự báo 7 ngày và 14 ngày tiếp theo."""
@@ -1981,6 +2047,22 @@ def build_ctgan_distribution_dataframe(section_summary: dict | None) -> pd.DataF
     return pd.DataFrame(rows)
 
 
+def build_ctgan_distribution_discussion(distribution_df: pd.DataFrame, title: str) -> str:
+    """Sinh nhận xét động về mức độ mất cân bằng lớp cho một bảng phân phối CTGAN."""
+    if distribution_df.empty:
+        return "Chưa có đủ dữ liệu phân phối lớp để đánh giá mức độ cân bằng."
+
+    max_row = distribution_df.loc[distribution_df["Số lượng"].idxmax()]
+    min_row = distribution_df.loc[distribution_df["Số lượng"].idxmin()]
+    imbalance_ratio = max_row["Số lượng"] / max(min_row["Số lượng"], 1)
+
+    return (
+        f"Ở bộ dữ liệu **{title}**, lớp `{max_row['Lớp']}` có {int(max_row['Số lượng']):,} quan sát trong khi lớp "
+        f"`{min_row['Lớp']}` chỉ có {int(min_row['Số lượng']):,} quan sát — tỷ lệ mất cân bằng khoảng "
+        f"{imbalance_ratio:.1f} lần. Tỷ lệ này càng gần 1 thì mô hình càng ít bị thiên lệch về lớp đa số khi huấn luyện."
+    )
+
+
 def render_ctgan_dataset_panel(
     title: str,
     subtitle: str,
@@ -2001,11 +2083,17 @@ def render_ctgan_dataset_panel(
         st.info("Chưa có thống kê phân phối lớp.")
     else:
         st.dataframe(distribution_df, use_container_width=True, hide_index=True, height=160)
+        render_chart_discussion(build_ctgan_distribution_discussion(distribution_df, title))
 
     if dataset_df.empty:
         st.info("Chưa có file dữ liệu để hiển thị.")
     else:
         st.dataframe(dataset_df, use_container_width=True, hide_index=True, height=420)
+        render_chart_discussion(
+            f"Bảng trên hiển thị {len(dataset_df):,} dòng mẫu trong tập **{title.lower()}**, dùng để đối chiếu "
+            "trực quan cấu trúc và giá trị đặc trưng trước/sau khi áp dụng augmentation, hỗ trợ kiểm tra dữ liệu "
+            "tổng hợp có còn hợp lý về mặt vật lý (ví dụ độ ẩm đất, lượng mưa không âm) hay không."
+        )
 
 
 def render_ctgan_comparison_page() -> None:
@@ -2164,6 +2252,19 @@ def render_chronos_llm_page() -> None:
         )
         st.plotly_chart(fig, use_container_width=True)
 
+        max_forecast_index = int(pd.Series(result.forecast_values).idxmax())
+        peak_day = result.forecast_dates[max_forecast_index]
+        peak_value = float(result.forecast_values[max_forecast_index])
+        risk_days = sum(1 for label in result.forecast_labels if int(label) > 0)
+        render_chart_discussion(
+            f"Theo dự báo Zero-shot của Chronos, lượng mưa cao nhất trong {prediction_length} ngày tới tại "
+            f"**{selected_location}** rơi vào ngày **{peak_day}** với khoảng {peak_value:.2f} mm/ngày. "
+            f"Có {risk_days}/{prediction_length} ngày được gắn nhãn cảnh báo (vượt ngưỡng ngập nhẹ/nặng đã thiết lập). "
+            "Do đây là mô hình foundation model chạy zero-shot (không huấn luyện lại trên dữ liệu Huế), kết quả nên "
+            "được dùng như tín hiệu tham khảo bổ sung, đối chiếu với mô hình ML chính ở trang Tổng quan trước khi "
+            "ra quyết định vận hành."
+        )
+
         forecast_table = pd.DataFrame(
             {
                 "Ngày": result.forecast_dates,
@@ -2172,6 +2273,11 @@ def render_chronos_llm_page() -> None:
             }
         )
         st.dataframe(forecast_table, use_container_width=True, hide_index=True, height=260)
+        render_chart_discussion(
+            f"Bảng chi tiết cho thấy đầy đủ {len(forecast_table)} ngày dự báo cùng lượng mưa và nhãn cảnh báo tương ứng "
+            "(so với hai ngưỡng Ngập nhẹ/Ngập nặng đã cấu hình phía trên), phục vụ việc tra cứu số liệu chính xác cho "
+            "từng ngày thay vì chỉ đọc xu hướng trên biểu đồ."
+        )
 
 
 def render_model_metrics(evaluation_metrics, runtime_info):
@@ -2216,6 +2322,15 @@ def render_model_metrics(evaluation_metrics, runtime_info):
         ),
         height=420,
     )
+    best_metrics_row = metrics_df.iloc[0]
+    worst_metrics_row = metrics_df.iloc[-1]
+    render_chart_discussion(
+        f"Xét theo F1-Score (macro), **{best_metrics_row['Model']}** đang là mô hình tốt nhất "
+        f"({best_metrics_row['F1 (Macro)']:.4f}), trong khi **{worst_metrics_row['Model']}** có kết quả thấp nhất "
+        f"({worst_metrics_row['F1 (Macro)']:.4f}) trong số các mô hình đã huấn luyện. Chênh lệch F1 giữa hai mô hình "
+        f"khoảng {(best_metrics_row['F1 (Macro)'] - worst_metrics_row['F1 (Macro)']):.4f} điểm, cho thấy việc lựa chọn "
+        "đúng thuật toán có tác động đáng kể đến chất lượng cảnh báo ngập trước khi đưa vào vận hành thực tế."
+    )
 
     st.markdown("### So sánh F1-Score của toàn bộ mô hình")
     f1_chart_df = metrics_df.sort_values(by="F1 (Macro)", ascending=False).copy()
@@ -2237,6 +2352,12 @@ def render_model_metrics(evaluation_metrics, runtime_info):
     )
     fig_f1.update_traces(texttemplate="%{text:.4f}", textposition="outside")
     st.plotly_chart(fig_f1, use_container_width=True)
+    render_chart_discussion(
+        f"Biểu đồ xếp hạng toàn bộ mô hình theo F1-Score cho thấy nhóm mô hình dẫn đầu tách biệt khá rõ so với "
+        f"nhóm cuối bảng. Mô hình `{best_metrics_row['Model']}` hiện đang được chọn làm mô hình phục vụ dự báo "
+        "thời gian thực trên dashboard, đảm bảo cân bằng tốt nhất giữa khả năng phát hiện đúng các trường hợp "
+        "ngập (Recall) và hạn chế cảnh báo sai (Precision)."
+    )
 
     st.markdown("### Top 5 mô hình: Accuracy / Precision / Recall")
     top5_df = metrics_df.head(5).copy()
@@ -2263,6 +2384,14 @@ def render_model_metrics(evaluation_metrics, runtime_info):
     )
     fig_top5.update_traces(texttemplate="%{text:.4f}", textposition="outside")
     st.plotly_chart(fig_top5, use_container_width=True)
+    top5_best_precision = top5_df.loc[top5_df["Precision (Macro)"].idxmax(), "Model"]
+    top5_best_recall = top5_df.loc[top5_df["Recall (Macro)"].idxmax(), "Model"]
+    render_chart_discussion(
+        f"Trong Top 5 mô hình, `{top5_best_precision}` đạt Precision cao nhất (ít cảnh báo giả nhất), còn "
+        f"`{top5_best_recall}` đạt Recall cao nhất (bỏ sót ít trường hợp ngập nhất). Với bài toán cảnh báo thiên tai, "
+        "Recall thường quan trọng hơn Precision vì bỏ sót một đợt ngập thực tế gây hậu quả nghiêm trọng hơn một lần "
+        "cảnh báo dư thừa — đây là yếu tố cần cân nhắc khi lựa chọn mô hình triển khai chính thức."
+    )
 
     st.markdown("### Artifact trực quan")
     image_col_1, image_col_2 = st.columns(2)
@@ -2282,6 +2411,15 @@ def render_model_metrics(evaluation_metrics, runtime_info):
             st.image(str(feature_importance_path), use_container_width=True)
         else:
             st.info("Chưa có ảnh `feature_importance.png` trong `models/latest/`.")
+
+    if confusion_matrix_path.exists() or feature_importance_path.exists():
+        render_chart_discussion(
+            "Confusion Matrix cho biết mô hình đang nhầm lẫn giữa lớp nào với lớp nào nhiều nhất — cần đặc biệt "
+            "lưu ý nếu các trường hợp `Ngập nặng` bị dự đoán nhầm thành `An toàn` hoặc `Ngập nhẹ`, vì đây là loại "
+            "sai số nguy hiểm nhất trong bài toán cảnh báo. Feature Importance cho thấy biến khí tượng - thủy văn "
+            "nào (mưa, độ ẩm đất, triều cường...) đóng góp nhiều nhất vào quyết định của mô hình; những biến có "
+            "trọng số cao nên được ưu tiên thu thập chính xác và giám sát liên tục để đảm bảo chất lượng dự báo."
+        )
 
     st.caption(
         f"Model artifact đang được dùng: `{Path(runtime_info['model_path']).name}` | "
@@ -2362,6 +2500,24 @@ def render_model_metrics(evaluation_metrics, runtime_info):
     fig.update_yaxes(range=[0, 1])
     st.plotly_chart(fig, use_container_width=True)
 
+    auc_by_class = {
+        class_key: curves.get(class_key, {}).get("auc")
+        for class_key in ["0", "1", "2"]
+        if curves.get(class_key, {}).get("auc") is not None
+    }
+    if auc_by_class:
+        best_class_key = max(auc_by_class, key=auc_by_class.get)
+        worst_class_key = min(auc_by_class, key=auc_by_class.get)
+        best_class_label = class_label_vi.get(best_class_key, best_class_key)
+        worst_class_label = class_label_vi.get(worst_class_key, worst_class_key)
+        render_chart_discussion(
+            f"Đường cong ROC cho thấy mô hình phân biệt tốt nhất lớp `{best_class_label}` với AUC = "
+            f"{auc_by_class[best_class_key]:.4f} (càng gần 1 càng tốt), trong khi lớp `{worst_class_label}` có AUC "
+            f"thấp nhất, khoảng {auc_by_class[worst_class_key]:.4f}. Nếu lớp `Ngập nặng` có AUC thấp, đây là tín hiệu "
+            "cần bổ sung thêm dữ liệu ngập nặng (qua CTGAN/SMOTE) hoặc tinh chỉnh ngưỡng cảnh báo, vì đây là lớp có "
+            "hậu quả nghiêm trọng nhất nếu bị bỏ sót."
+        )
+
 
 def main():
     """Điểm vào chính của ứng dụng."""
@@ -2433,13 +2589,25 @@ def main():
                     st.session_state["run_noaa_validation"] = False
 
             if "noaa_validation_df" in st.session_state:
+                noaa_validation_df = st.session_state["noaa_validation_df"]
                 render_styled_table(
                     build_contrast_styler(
-                        st.session_state["noaa_validation_df"],
+                        noaa_validation_df,
                         confidence_column="Độ tin cậy",
                     ),
                     height=280,
                 )
+                if not noaa_validation_df.empty:
+                    low_confidence_df = noaa_validation_df[
+                        noaa_validation_df["Độ tin cậy"] == "🔴 Thấp"
+                    ]
+                    render_chart_discussion(
+                        f"Có {len(low_confidence_df)}/{len(noaa_validation_df)} địa phương đang có độ tin cậy "
+                        "`🔴 Thấp` khi đối chiếu số liệu Open-Meteo với NOAA CDO (chênh lệch nhiệt độ > 2°C hoặc "
+                        "lượng mưa > 10mm). Nếu số lượng này tăng cao trong nhiều lần kiểm tra liên tiếp, cần xem xét "
+                        "bổ sung nguồn dữ liệu quan trắc mặt đất tại các khu vực đó để tránh mô hình dự báo bị lệch "
+                        "do nhiễu từ nguồn vệ tinh/tái phân tích."
+                    )
 
     st.markdown("---")
     render_future_forecast_sections(df_future)

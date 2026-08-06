@@ -371,11 +371,134 @@ Bảng thống kê mô tả:
 """.strip()
 
 
+def derive_location_name(source_stem: str) -> str:
+    """Suy ra tên địa phương dễ đọc từ tên file CSV nguồn (ví dụ TP_Hue_10years -> TP Hue)."""
+    return source_stem.replace("_10years", "").replace("_", " ").strip()
+
+
+def save_monthly_trend_plot(df: pd.DataFrame) -> tuple[Path, pd.DataFrame]:
+    """Vẽ và lưu line chart xu hướng lượng mưa trung bình & tỷ lệ ngập theo tháng."""
+    output_path = PLOTS_DIR / "monthly_trend.png"
+    monthly_df = df.copy()
+    monthly_df["Tháng"] = monthly_df[TIME_COL].dt.month
+
+    monthly_stats = (
+        monthly_df.groupby("Tháng")
+        .agg(
+            Lượng_mưa_TB=("Lượng_mưa_mm", "mean"),
+            Tỷ_lệ_ngập=(TARGET_COL, lambda values: (values > 0).mean() * 100),
+        )
+        .reindex(range(1, 13))
+    )
+
+    fig, rain_axis = plt.subplots(figsize=(11, 6))
+    rain_axis.plot(
+        monthly_stats.index,
+        monthly_stats["Lượng_mưa_TB"],
+        color="#4C78A8",
+        marker="o",
+        linewidth=2.2,
+        label="Lượng mưa TB (mm)",
+    )
+    rain_axis.set_xlabel("Tháng")
+    rain_axis.set_ylabel("Lượng mưa trung bình (mm)", color="#4C78A8")
+    rain_axis.tick_params(axis="y", labelcolor="#4C78A8")
+    rain_axis.set_xticks(range(1, 13))
+
+    flood_axis = rain_axis.twinx()
+    flood_axis.plot(
+        monthly_stats.index,
+        monthly_stats["Tỷ_lệ_ngập"],
+        color="#E45756",
+        marker="s",
+        linestyle="--",
+        linewidth=2.2,
+        label="Tỷ lệ ngập (%)",
+    )
+    flood_axis.set_ylabel("Tỷ lệ ngập (%)", color="#E45756")
+    flood_axis.tick_params(axis="y", labelcolor="#E45756")
+
+    lines_rain, labels_rain = rain_axis.get_legend_handles_labels()
+    lines_flood, labels_flood = flood_axis.get_legend_handles_labels()
+    rain_axis.legend(lines_rain + lines_flood, labels_rain + labels_flood, loc="upper left")
+
+    plt.title("Xu hướng lượng mưa trung bình và tỷ lệ ngập theo tháng (gộp 5 địa phương, 10 năm)")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    return output_path, monthly_stats
+
+
+def save_flood_share_by_location_plot(df: pd.DataFrame) -> tuple[Path, pd.Series]:
+    """Vẽ và lưu pie chart tỷ lệ số lần ghi nhận ngập theo từng địa phương."""
+    output_path = PLOTS_DIR / "flood_share_by_location.png"
+    flood_df = df[df[TARGET_COL] > 0].copy()
+    flood_df["Địa phương"] = flood_df["Nguồn_dữ_liệu"].map(derive_location_name)
+    location_counts = flood_df["Địa phương"].value_counts()
+
+    plt.figure(figsize=(8, 8))
+    palette = sns.color_palette("Set2", n_colors=len(location_counts))
+    plt.pie(
+        location_counts.values,
+        labels=location_counts.index,
+        autopct="%1.1f%%",
+        startangle=90,
+        colors=palette,
+        wedgeprops={"edgecolor": "#1F1F1F", "linewidth": 1},
+    )
+    plt.title("Tỷ lệ số lần ghi nhận ngập (nhẹ + nặng) theo địa phương")
+    plt.axis("equal")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    return output_path, location_counts
+
+
+def build_monthly_trend_analysis(monthly_stats: pd.DataFrame) -> str:
+    """Sinh đoạn phân tích luận văn cho line chart xu hướng theo tháng."""
+    peak_rain_month = int(monthly_stats["Lượng_mưa_TB"].idxmax())
+    peak_rain_value = float(monthly_stats["Lượng_mưa_TB"].max())
+    peak_flood_month = int(monthly_stats["Tỷ_lệ_ngập"].idxmax())
+    peak_flood_value = float(monthly_stats["Tỷ_lệ_ngập"].max())
+    low_flood_month = int(monthly_stats["Tỷ_lệ_ngập"].idxmin())
+    low_flood_value = float(monthly_stats["Tỷ_lệ_ngập"].min())
+
+    return f"""
+THESIS ANALYSIS 5. MONTHLY RAINFALL & FLOOD RATE TREND (LINE CHART)
+
+Biểu đồ đường cho thấy tháng {peak_rain_month} có lượng mưa trung bình cao nhất trong năm, đạt khoảng {peak_rain_value:.2f} mm, gần trùng với tháng có tỷ lệ ngập cao nhất là tháng {peak_flood_month} (khoảng {peak_flood_value:.2f}% số quan sát trong tháng được gắn nhãn ngập). Ngược lại, tháng {low_flood_month} có tỷ lệ ngập thấp nhất, chỉ khoảng {low_flood_value:.2f}%, phản ánh giai đoạn mùa khô ít mưa trong năm tại khu vực Thừa Thiên Huế.
+
+Về góc độ quản trị, kết quả này cho thấy chính quyền địa phương nên tập trung nguồn lực phòng chống ngập (nhân sự trực ban, vật tư dự phòng, phương án sơ tán) vào giai đoạn cao điểm quanh tháng {peak_flood_month}, thay vì phân bổ đều cho cả năm. Công tác duy tu, nạo vét hệ thống thoát nước cũng nên hoàn tất trước thời điểm này để giảm thiểu rủi ro ngập úng đô thị khi mùa mưa lũ đến.
+""".strip()
+
+
+def build_location_share_analysis(location_counts: pd.Series) -> str:
+    """Sinh đoạn phân tích luận văn cho pie chart tỷ lệ ngập theo địa phương."""
+    total_flood_records = int(location_counts.sum())
+    top_location = str(location_counts.idxmax())
+    top_count = int(location_counts.max())
+    top_ratio = top_count / total_flood_records * 100
+    lowest_location = str(location_counts.idxmin())
+    lowest_ratio = int(location_counts.min()) / total_flood_records * 100
+
+    return f"""
+THESIS ANALYSIS 6. FLOOD SHARE BY LOCATION (PIE CHART)
+
+Biểu đồ tròn cho thấy trong tổng số {total_flood_records:,} bản ghi được gắn nhãn ngập (nhẹ hoặc nặng) trên toàn bộ 5 địa phương, khu vực `{top_location}` chiếm tỷ trọng cao nhất với khoảng {top_ratio:.2f}% ({top_count:,} bản ghi). Trong khi đó, khu vực `{lowest_location}` có tỷ trọng thấp nhất, chỉ khoảng {lowest_ratio:.2f}%.
+
+Từ góc độ quản trị rủi ro thiên tai, kết quả này gợi ý rằng `{top_location}` nên được ưu tiên đầu tư hệ thống cảnh báo sớm, bổ sung trạm quan trắc và xây dựng phương án ứng phó khẩn cấp riêng, vì đây là khu vực có tần suất ghi nhận ngập cao nhất trong dữ liệu lịch sử 10 năm. Các địa phương còn lại vẫn cần được giám sát nhưng có thể ưu tiên nguồn lực thấp hơn dựa trên tần suất rủi ro thực tế này.
+""".strip()
+
+
 def build_word_ready_report(
     heatmap_analysis: str,
     class_analysis: str,
     rain_analysis: str,
     tide_analysis: str,
+    monthly_trend_analysis: str,
+    location_share_analysis: str,
 ) -> str:
     """Ghép toàn bộ nội dung phân tích thành báo cáo hoàn chỉnh."""
     return "\n\n".join(
@@ -390,6 +513,8 @@ def build_word_ready_report(
             class_analysis,
             rain_analysis,
             tide_analysis,
+            monthly_trend_analysis,
+            location_share_analysis,
         ]
     )
 
@@ -428,17 +553,23 @@ def main() -> None:
         chart_title="Phân bố chiều cao triều theo lớp nguy cơ ngập",
         x_label="Chiều cao triều (m)",
     )
+    monthly_trend_path, monthly_stats = save_monthly_trend_plot(df)
+    location_share_path, location_counts = save_flood_share_by_location_plot(df)
 
     heatmap_analysis = build_heatmap_analysis(correlation_df)
     class_analysis = build_class_distribution_analysis(class_counts, total_rows=len(df))
     rain_analysis = build_rainfall_distribution_analysis(rain_stats)
     tide_analysis = build_tide_distribution_analysis(tide_stats)
+    monthly_trend_analysis = build_monthly_trend_analysis(monthly_stats)
+    location_share_analysis = build_location_share_analysis(location_counts)
 
     report_text = build_word_ready_report(
         heatmap_analysis=heatmap_analysis,
         class_analysis=class_analysis,
         rain_analysis=rain_analysis,
         tide_analysis=tide_analysis,
+        monthly_trend_analysis=monthly_trend_analysis,
+        location_share_analysis=location_share_analysis,
     )
     report_path = save_text_report(report_text)
 
@@ -447,6 +578,8 @@ def main() -> None:
     print(f"- Class distribution        : {class_plot_path}")
     print(f"- Rain distribution         : {rain_plot_path}")
     print(f"- Tide distribution         : {tide_plot_path}")
+    print(f"- Monthly trend (line chart): {monthly_trend_path}")
+    print(f"- Flood share by location   : {location_share_path}")
     print(f"- Thesis analysis report    : {report_path}")
     print(f"- EDA metadata              : {metadata_path}")
     if synced_artifacts:
