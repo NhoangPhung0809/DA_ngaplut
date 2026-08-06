@@ -198,6 +198,17 @@ def append_or_create_historical_csv(save_path: Path, existing_df: pd.DataFrame, 
     resolved_path = save_path.resolve()
     rows_to_save = new_rows.copy()
     rows_to_save["Thời_gian"] = rows_to_save["Thời_gian"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Cột "Địa phương" chỉ cần thiết cho cache/new_historical_rows.csv (gộp nhiều địa phương trong
+    # 1 file, dùng cho incremental_train trong analyze_and_train.py) - KHÔNG được lưu vào file lịch sử
+    # theo từng địa phương, vì địa phương đã được suy ra từ TÊN FILE ở mọi nơi đọc lại dữ liệu này
+    # (load_and_concatenate_csvs trong analyze_and_train.py, load_and_combine_historical_data trong
+    # eda_analysis.py). Nếu vẫn ghi cột này vào đây, file sẽ có số cột không khớp với header gốc
+    # (7 cột) mỗi khi append, khiến pandas.read_csv() báo lỗi "Expected N fields, saw N+1" ở các lần
+    # đọc sau - đây chính là nguyên nhân gây lỗi ParserError đã gặp trong `analyze_and_train.py`.
+    if "Địa phương" in rows_to_save.columns:
+        rows_to_save = rows_to_save.drop(columns=["Địa phương"])
+
     print(f"[DEBUG] Writing {len(rows_to_save)} rows to historical CSV: {resolved_path}")
 
     try:
