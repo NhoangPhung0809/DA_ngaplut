@@ -4,45 +4,36 @@ import math
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 
 import folium
-import joblib
-import openmeteo_requests
 import pandas as pd
 import plotly.express as px
 import requests
-import requests_cache
 import streamlit as st
-from branca.colormap import LinearColormap
 from dotenv import load_dotenv
-from retry_requests import retry
 from streamlit_folium import st_folium
-try:
-    from streamlit_autorefresh import st_autorefresh
-except ImportError:
-    st_autorefresh = None
 
-# Tải biến môi trường từ file .env nếu có.
+# Tải biến môi trường từ file .env nếu có (ví dụ TOMTOM_API_KEY).
 load_dotenv()
 
 # Cấu hình giao diện trang Streamlit.
 st.set_page_config(
-    page_title="Dự báo Ngập lụt TP Huế",
+    page_title="Dự báo Ngập lụt Thừa Thiên Huế",
     page_icon="🌊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+# ==================================================================================================
+# ĐƯỜNG DẪN & HẰNG SỐ DÙNG CHUNG
+# ==================================================================================================
 BASE_DIR = Path(__file__).resolve().parent
 HISTORICAL_DIR = BASE_DIR / "data" / "historical"
 MODELS_DIR = BASE_DIR / "models"
 LATEST_MODELS_DIR = MODELS_DIR / "latest"
 PLOTS_DIR = BASE_DIR / "plots"
-GEOJSON_PATH = BASE_DIR / "data" / "geo" / "thuathienhue_districts.geojson"
-RAW_OSM_PATH = BASE_DIR / "data" / "geo" / "map"
-STORMGLASS_CACHE_PATH = BASE_DIR / "data" / "stormglass_cache.json"
 FETCH_SCRIPT_PATH = BASE_DIR / "fetch_data.py"
 TRAIN_SCRIPT_PATH = BASE_DIR / "analyze_and_train.py"
 EVALUATION_METRICS_PATH = LATEST_MODELS_DIR / "evaluation_metrics.json"
@@ -62,18 +53,9 @@ CACHE_DIR = BASE_DIR / "cache"
 TRAINING_WORKER_PATH = BASE_DIR / "training_worker.py"
 TRAINING_STATUS_PATH = CACHE_DIR / "training_status.json"
 TRAINING_LOG_PATH = CACHE_DIR / "training_output.log"
-REALTIME_LOG_PATH = BASE_DIR / "data" / "realtime_log.csv"
-REALTIME_WEATHER_API_URL = "https://apithoitiet.thuc.me/api/weather/hue"
-REALTIME_WEATHER_API_HEADERS = {"X-API-Key": "wt_GfkVa8SiMsD4fQ1lqUL8HYwUAoLPcsnG"}
-AUTO_REFRESH_INTERVAL_MS = 3_600_000
-MENU_OPTIONS = [
-    "🌊 Tổng quan dự báo",
-    "📊 So sánh dữ liệu CTGAN",
-    "🔮 Dự báo Nâng cao (Chronos LLM)",
-]
 
 # ------------------------------------------------------------------------------------------------
-# CẤU HÌNH SMART ROUTING (TomTom Routing API) - dùng cho tab "🗺️ Bản đồ Chỉ đường Tránh ngập".
+# CẤU HÌNH SMART ROUTING (TomTom Routing API) - dùng cho tab "🗺️ Bản đồ Tránh ngập".
 # LƯU Ý BẢO MẬT: key được hardcode trực tiếp theo yêu cầu để chạy nhanh cho đồ án; `os.getenv(...)`
 # vẫn được ưu tiên đọc trước nếu bạn khai báo TOMTOM_API_KEY trong file `.env` (đã có sẵn cơ chế
 # `load_dotenv()` ở đầu file). Trước khi đẩy code lên GitHub public, nên XÓA key hardcode và chỉ
@@ -83,7 +65,7 @@ TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY", "opH6G1fIc4yptvSrCqQ6iZI5yaifz1Je")
 TOMTOM_ROUTING_BASE_URL = "https://api.tomtom.com/routing/1/calculateRoute"
 
 # Dữ liệu giả lập (dummy) để demo tính năng chỉ đường mà không cần chờ có dữ liệu ngập thời gian thực.
-# Điểm đi/đến lấy ngẫu nhiên 2 địa phương trong danh sách LOCATIONS phía trên (TP Huế -> Phú Vang).
+# Điểm đi/đến ví dụ: TP Huế -> Phú Vang.
 DUMMY_START_POINT = (16.4637, 107.5909)  # TP Huế
 DUMMY_END_POINT = (16.4706, 107.7148)  # Phú Vang
 # Mỗi polygon là 1 danh sách điểm (lat, lon) khoanh vùng khu vực đang ngập, đặt chắn ngang giữa
@@ -97,81 +79,9 @@ DUMMY_FLOODED_POLYGONS = [
     ],
 ]
 
-# Khởi tạo client Open-Meteo có cache và retry để hạn chế lỗi mạng tạm thời.
-cache_session = requests_cache.CachedSession(".cache", expire_after=3600)
-retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
-openmeteo = openmeteo_requests.Client(session=retry_session)
-
-# Dữ liệu gốc cho các địa phương cần theo dõi.
-LOCATIONS = [
-    {
-        "name": "TP Huế",
-        "aliases": ["Huế", "Thành phố Huế", "TP Huế"],
-        "lat": 16.4637,
-        "lon": 107.5909,
-        "coast_lat": 16.4300,
-        "coast_lon": 107.7600,
-    },
-    {
-        "name": "Hương Thủy",
-        "aliases": ["Hương Thủy", "Phường Hương Thủy", "Thị xã Hương Thủy"],
-        "lat": 16.3382,
-        "lon": 107.6742,
-        "coast_lat": 16.3300,
-        "coast_lon": 107.7800,
-    },
-    {
-        "name": "Phú Vang",
-        "aliases": ["Phú Vang", "Huyện Phú Vang"],
-        "lat": 16.4706,
-        "lon": 107.7148,
-        "coast_lat": 16.4400,
-        "coast_lon": 107.8400,
-    },
-    {
-        "name": "Hương Trà",
-        "aliases": ["Hương Trà", "Thị xã Hương Trà"],
-        "lat": 16.5181,
-        "lon": 107.4747,
-        "coast_lat": 16.5200,
-        "coast_lon": 107.6200,
-    },
-    {
-        "name": "Quảng Điền",
-        "aliases": ["Quảng Điền", "Huyện Quảng Điền"],
-        "lat": 16.5798,
-        "lon": 107.4930,
-        "coast_lat": 16.6100,
-        "coast_lon": 107.5600,
-    },
-]
-
-DEFAULT_FEATURE_ORDER = [
-    "Nhiệt_độ_C",
-    "Độ_ẩm_%",
-    "Lượng_mưa_mm",
-    "Độ_ẩm_đất",
-    "Chiều_cao_triều_m",
-]
-
-MAP_NAME_NORMALIZATION = {
-    "Huế": "TP Huế",
-    "Thành phố Huế": "TP Huế",
-    "TP Huế": "TP Huế",
-    "Hương Thủy": "Hương Thủy",
-    "Phường Hương Thủy": "Hương Thủy",
-    "Thị xã Hương Thủy": "Hương Thủy",
-    "Phú Vang": "Phú Vang",
-    "Huyện Phú Vang": "Phú Vang",
-    "Hương Trà": "Hương Trà",
-    "Thị xã Hương Trà": "Hương Trà",
-    "Quảng Điền": "Quảng Điền",
-    "Huyện Quảng Điền": "Quảng Điền",
-}
-
 
 def apply_global_ui_theme():
-    """Tăng độ tương phản tổng thể cho giao diện Streamlit."""
+    """Tăng độ tương phản tổng thể cho giao diện Streamlit, style riêng cho st.tabs."""
     st.markdown(
         """
         <style>
@@ -242,8 +152,11 @@ def apply_global_ui_theme():
     )
 
 
+# ==================================================================================================
+# HẠ TẦNG DÙNG CHUNG: khởi tạo hệ thống, quản lý trạng thái huấn luyện nền (MLOps)
+# ==================================================================================================
 def dynamically_import_module(module_name: str, module_path: Path):
-    """Import module động từ đường dẫn file Python."""
+    """Import module động từ đường dẫn file Python (dùng để gọi lại fetch_data.py / analyze_and_train.py)."""
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Không thể tạo spec cho module: {module_path}")
@@ -254,7 +167,7 @@ def dynamically_import_module(module_name: str, module_path: Path):
 
 
 def historical_data_missing() -> bool:
-    """Kiểm tra bộ dữ liệu lịch sử 10 năm có đầy đủ hay chưa."""
+    """Kiểm tra bộ dữ liệu lịch sử 10 năm có đầy đủ hay chưa (dùng cho Tab EDA và bước khởi tạo)."""
     if not HISTORICAL_DIR.exists():
         return True
 
@@ -263,7 +176,7 @@ def historical_data_missing() -> bool:
 
 
 def ensure_latest_models_dir() -> None:
-    """Đảm bảo thư mục `models/latest/` luôn tồn tại cho frontend."""
+    """Đảm bảo thư mục `models/latest/` và `cache/` luôn tồn tại cho frontend."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     LATEST_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -329,7 +242,7 @@ def reconcile_training_state() -> dict:
 
 
 def read_training_log_tail(max_lines: int = 80) -> str:
-    """Đọc phần cuối log train để hiển thị nhanh trên UI."""
+    """Đọc phần cuối log train/tuning để hiển thị nhanh trên UI."""
     ensure_latest_models_dir()
     if not TRAINING_LOG_PATH.exists():
         return ""
@@ -339,7 +252,7 @@ def read_training_log_tail(max_lines: int = 80) -> str:
 
 
 def start_background_training(selected_models: list[str], balancing_method: str = "auto") -> dict:
-    """Khởi chạy worker train nền bằng process riêng, tách khỏi Streamlit session."""
+    """Khởi chạy worker train nền (`training_worker.py`) bằng process riêng, tách khỏi Streamlit session."""
     ensure_latest_models_dir()
     current_state = reconcile_training_state()
     if current_state["status"] in {"starting", "running"} and is_process_alive(current_state.get("pid")):
@@ -389,7 +302,7 @@ def start_background_training(selected_models: list[str], balancing_method: str 
 
 @st.cache_resource(show_spinner=False)
 def get_train_module():
-    """Nạp module huấn luyện để tái sử dụng cho init và thao tác từ sidebar."""
+    """Nạp module huấn luyện (`analyze_and_train.py`) để tái sử dụng danh sách model."""
     return dynamically_import_module("analyze_and_train_runtime", TRAIN_SCRIPT_PATH)
 
 
@@ -422,19 +335,8 @@ def get_all_model_names() -> list[str]:
     return fallback_names
 
 
-def render_navigation_menu() -> str:
-    """Điều hướng nhanh giữa dashboard chính và màn hình so sánh CTGAN."""
-    st.sidebar.markdown("## Menu")
-    return st.sidebar.radio(
-        "Chọn màn hình",
-        options=MENU_OPTIONS,
-        key="app_menu_selection",
-        label_visibility="collapsed",
-    )
-
-
 def training_artifacts_missing() -> bool:
-    """Kiểm tra các artifact tối thiểu trong `models/latest/`."""
+    """Kiểm tra các artifact tối thiểu trong `models/latest/` (dùng cho Tab Đánh giá)."""
     ensure_latest_models_dir()
     return not PRIMARY_MODEL_PATH.exists() or not SCALER_PATH.exists() or not EVALUATION_METRICS_PATH.exists()
 
@@ -443,13 +345,14 @@ def training_artifacts_missing() -> bool:
 def initialize_system():
     """
     Khởi tạo hệ thống đúng một lần khi app bắt đầu:
-    - Tự tải dữ liệu lịch sử nếu thiếu
-    - Không tự train trong Streamlit nếu thiếu artifact
+    - Tự tải dữ liệu lịch sử nếu thiếu (gọi lại `fetch_data.py`)
+    - KHÔNG tự huấn luyện trong Streamlit nếu thiếu artifact - việc train phải được kích hoạt tường
+      minh từ Tab "⚙️ Tiền xử lý & Huấn luyện" để tránh block giao diện.
     """
     ensure_latest_models_dir()
 
     if historical_data_missing():
-        with st.spinner("📥 Downloading 10-year historical data..."):
+        with st.spinner("📥 Đang tải dữ liệu lịch sử 10 năm..."):
             fetch_module = dynamically_import_module("fetch_data_runtime", FETCH_SCRIPT_PATH)
             if not hasattr(fetch_module, "main"):
                 raise AttributeError("`fetch_data.py` không có hàm `main()` để thực thi.")
@@ -458,15 +361,8 @@ def initialize_system():
     if training_artifacts_missing():
         raise FileNotFoundError(
             "Chưa có artifact huấn luyện trong `models/latest/`. "
-            "Hãy khởi chạy background training từ sidebar để tạo model trước."
+            "Hãy khởi chạy background training ở Tab 2 để tạo model trước."
         )
-
-    if not PRIMARY_MODEL_PATH.exists():
-        raise FileNotFoundError("Không tìm thấy `models/latest/best_model.pkl` sau khi huấn luyện.")
-    if not SCALER_PATH.exists():
-        raise FileNotFoundError("Không tìm thấy `models/latest/scaler.pkl` sau khi huấn luyện.")
-    if not EVALUATION_METRICS_PATH.exists():
-        raise FileNotFoundError("Không tìm thấy `models/latest/evaluation_metrics.json` sau khi huấn luyện.")
 
     return {
         "model_path": str(PRIMARY_MODEL_PATH),
@@ -477,1267 +373,31 @@ def initialize_system():
 
 
 @st.cache_resource(show_spinner=False)
-def load_runtime_artifacts():
-    """Nạp model, scaler và metrics sau khi hệ thống đã khởi tạo xong."""
+def load_evaluation_artifacts():
+    """
+    Nạp `evaluation_metrics.json` + thông tin runtime cho Tab Đánh giá.
+    Lưu ý: skeleton này KHÔNG còn suy luận thời gian thực trên toàn app (đã được đơn giản hóa để tập
+    trung đúng vòng đời Data Science - EDA/Train/Eval), nên không cần joblib.load() mô hình/scaler
+    vào bộ nhớ chỉ để xem bảng chỉ số. Nếu bạn cần suy luận trực tiếp, hãy `joblib.load()` model/scaler
+    riêng trong Tab tương ứng khi thật sự cần.
+    """
     runtime_info = initialize_system()
-    model = joblib.load(runtime_info["model_path"])
-    scaler = joblib.load(runtime_info["scaler_path"])
     with open(runtime_info["metrics_path"], "r", encoding="utf-8") as file:
         evaluation_metrics = json.load(file)
-    return model, scaler, evaluation_metrics, runtime_info
+    return evaluation_metrics, runtime_info
 
 
-def calculate_synthetic_tide(target_time=None):
-    """Sinh giá trị triều cường gần đúng khi API biển không trả dữ liệu."""
-    if target_time is None:
-        target_time = datetime.now()
+# ==================================================================================================
+# TIỆN ÍCH HIỂN THỊ BẢNG & NHẬN XÉT (dùng chung cho nhiều tab)
+# ==================================================================================================
+def render_chart_discussion(text: str) -> None:
+    """Hiển thị đoạn nhận xét/diễn giải ngay bên dưới một bảng hoặc biểu đồ - áp dụng cho MỌI
+    bảng/biểu đồ trong app để giảng viên thấy được phần "đọc số liệu", không chỉ số liệu thô."""
+    st.info(text)
 
-    lunar_cycle_days = 29.53
-    semi_daily_hours = 12.42
-    elapsed_seconds = (target_time - datetime(2000, 1, 1)).total_seconds()
 
-    lunar_phase = 2 * math.pi * elapsed_seconds / (lunar_cycle_days * 86400)
-    semi_daily_phase = 2 * math.pi * elapsed_seconds / (semi_daily_hours * 3600)
-    tide_value = 1.0 + 0.45 * math.sin(lunar_phase) + 0.75 * math.sin(semi_daily_phase)
-
-    return round(max(0.1, min(4.0, tide_value)), 2)
-
-
-def coerce_float(value, default: float = 0.0) -> float:
-    """Chuyển giá trị về số thực an toàn để dùng cho API và model."""
-    try:
-        if value in (None, ""):
-            return float(default)
-        return float(value)
-    except (TypeError, ValueError):
-        return float(default)
-
-
-def format_source_timestamp(value) -> str:
-    """Chuẩn hóa timestamp từ API để hiển thị trên dashboard."""
-    timestamp = pd.to_datetime(value, errors="coerce", utc=True)
-    if pd.isna(timestamp):
-        return get_processing_timestamp_display()
-    return timestamp.tz_convert("Asia/Ho_Chi_Minh").strftime("%H:%M - %d/%m/%Y")
-
-
-@st.cache_data(show_spinner=False, ttl=AUTO_REFRESH_INTERVAL_MS // 1000)
-def fetch_hue_realtime_weather():
-    """
-    Lấy dữ liệu thời tiết realtime cho Huế từ API ngoài.
-    Hàm trả về dict có cờ success để UI không bị crash khi mạng/API lỗi.
-    """
-    try:
-        response = requests.get(
-            REALTIME_WEATHER_API_URL,
-            headers=REALTIME_WEATHER_API_HEADERS,
-            timeout=20,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if str(payload.get("status", "")).lower() not in {"", "success"}:
-            raise ValueError(f"API status không hợp lệ: {payload.get('status')}")
-
-        weather = payload.get("weather") or {}
-        province = payload.get("province") or {}
-        recorded_at = weather.get("recorded_at") or weather.get("updated_at") or datetime.now(timezone.utc).isoformat()
-        rain_value = coerce_float(
-            weather.get("rain"),
-            default=coerce_float(
-                weather.get("rainfall"),
-                default=coerce_float(
-                    weather.get("precipitation_mm"),
-                    default=coerce_float(weather.get("precipitation"), default=0.0),
-                ),
-            ),
-        )
-
-        realtime_weather = {
-            "Địa phương": province.get("name", "Huế"),
-            "Vĩ độ": coerce_float(province.get("lat"), default=LOCATIONS[0]["lat"]),
-            "Kinh độ": coerce_float(province.get("lon"), default=LOCATIONS[0]["lon"]),
-            "Thời_gian_nguồn": recorded_at,
-            "Nhiệt_độ_C": coerce_float(weather.get("temp")),
-            "Độ_ẩm_%": coerce_float(weather.get("humidity")),
-            "Lượng_mưa_mm": rain_value,
-            "Độ_ẩm_đất": coerce_float(weather.get("soil_moisture"), default=0.30),
-            "Chiều_cao_triều_m": calculate_synthetic_tide(),
-            "Mô_tả": str(weather.get("description", "Không rõ")),
-            "Áp_suất_hPa": coerce_float(weather.get("pressure")),
-            "Tốc_độ_gió_m_s": coerce_float(weather.get("wind_speed")),
-            "Payload_gốc": payload,
-        }
-        return {
-            "success": True,
-            "data": realtime_weather,
-            "error": None,
-        }
-    except (requests.RequestException, ValueError, TypeError) as exc:
-        return {
-            "success": False,
-            "data": None,
-            "error": str(exc),
-        }
-
-
-def get_current_weather(location):
-    """Lấy dữ liệu thời tiết hiện tại cho một địa phương."""
-    weather_data = {
-        "Nhiệt_độ_C": 25.0,
-        "Độ_ẩm_%": 70.0,
-        "Lượng_mưa_mm": 0.0,
-        "Độ_ẩm_đất": 0.30,
-        "Chiều_cao_triều_m": calculate_synthetic_tide(),
-    }
-
-    try:
-        weather_responses = openmeteo.weather_api(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": location["lat"],
-                "longitude": location["lon"],
-                "current": [
-                    "temperature_2m",
-                    "relative_humidity_2m",
-                    "rain",
-                    "soil_moisture_0_to_7cm",
-                ],
-                "timezone": "auto",
-            },
-        )
-        current = weather_responses[0].Current()
-        weather_data["Nhiệt_độ_C"] = current.Variables(0).Value()
-        weather_data["Độ_ẩm_%"] = current.Variables(1).Value()
-        weather_data["Lượng_mưa_mm"] = current.Variables(2).Value()
-        weather_data["Độ_ẩm_đất"] = current.Variables(3).Value()
-    except Exception:
-        # Nếu API thời tiết lỗi thì giữ giá trị fallback đã khai báo phía trên.
-        pass
-
-    try:
-        marine_responses = openmeteo.weather_api(
-            "https://marine-api.open-meteo.com/v1/marine",
-            params={
-                "latitude": location["coast_lat"],
-                "longitude": location["coast_lon"],
-                "current": "wave_height",
-                "timezone": "auto",
-            },
-        )
-        current_marine = marine_responses[0].Current()
-        marine_value = current_marine.Variables(0).Value()
-        if marine_value is not None:
-            weather_data["Chiều_cao_triều_m"] = max(0.1, round(float(marine_value), 2))
-    except Exception:
-        # Giữ giá trị tổng hợp nếu không lấy được từ nguồn biển.
-        pass
-
-    return weather_data
-
-
-def build_hourly_time_index(hourly_block):
-    """Tạo trục thời gian từ block dữ liệu theo giờ của Open-Meteo."""
-    hourly_index = pd.date_range(
-        start=pd.to_datetime(hourly_block.Time(), unit="s", utc=True),
-        end=pd.to_datetime(hourly_block.TimeEnd(), unit="s", utc=True),
-        freq=pd.Timedelta(seconds=hourly_block.Interval()),
-        inclusive="left",
-    )
-    return hourly_index.tz_localize(None)
-
-
-def fetch_daily_forecast_features(location, forecast_days=14):
-    """Lấy dữ liệu forecast theo ngày bằng cách tổng hợp từ dữ liệu theo giờ."""
-    weather_columns = [
-        "temperature_2m",
-        "relative_humidity_2m",
-        "rain",
-        "soil_moisture_0_to_7cm",
-    ]
-    forecast_df = pd.DataFrame()
-
-    try:
-        weather_responses = openmeteo.weather_api(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": location["lat"],
-                "longitude": location["lon"],
-                "hourly": weather_columns,
-                "forecast_days": forecast_days,
-                "timezone": "auto",
-            },
-        )
-        hourly = weather_responses[0].Hourly()
-        forecast_df = pd.DataFrame(
-            {
-                "Thời_gian": build_hourly_time_index(hourly),
-                "Nhiệt_độ_C": hourly.Variables(0).ValuesAsNumpy(),
-                "Độ_ẩm_%": hourly.Variables(1).ValuesAsNumpy(),
-                "Lượng_mưa_mm": hourly.Variables(2).ValuesAsNumpy(),
-                "Độ_ẩm_đất": hourly.Variables(3).ValuesAsNumpy(),
-            }
-        )
-    except Exception:
-        return pd.DataFrame()
-
-    marine_daily = None
-    try:
-        marine_responses = openmeteo.weather_api(
-            "https://marine-api.open-meteo.com/v1/marine",
-            params={
-                "latitude": location["coast_lat"],
-                "longitude": location["coast_lon"],
-                "hourly": "wave_height",
-                "forecast_days": forecast_days,
-                "timezone": "auto",
-            },
-        )
-        marine_hourly = marine_responses[0].Hourly()
-        marine_df = pd.DataFrame(
-            {
-                "Thời_gian": build_hourly_time_index(marine_hourly),
-                "Chiều_cao_triều_m": marine_hourly.Variables(0).ValuesAsNumpy(),
-            }
-        )
-        marine_df["Ngày"] = marine_df["Thời_gian"].dt.date
-        marine_daily = (
-            marine_df.groupby("Ngày", as_index=False)["Chiều_cao_triều_m"]
-            .mean()
-            .assign(Chiều_cao_triều_m=lambda df: df["Chiều_cao_triều_m"].clip(0.1, 5.0))
-        )
-    except Exception:
-        marine_daily = None
-
-    forecast_df["Ngày"] = forecast_df["Thời_gian"].dt.date
-    daily_weather = (
-        forecast_df.groupby("Ngày", as_index=False)
-        .agg(
-            {
-                "Nhiệt_độ_C": "mean",
-                "Độ_ẩm_%": "mean",
-                "Lượng_mưa_mm": "sum",
-                "Độ_ẩm_đất": "mean",
-            }
-        )
-    )
-
-    if marine_daily is not None and not marine_daily.empty:
-        daily_forecast = daily_weather.merge(marine_daily, on="Ngày", how="left")
-    else:
-        daily_forecast = daily_weather.copy()
-        daily_forecast["Chiều_cao_triều_m"] = pd.NA
-
-    daily_forecast["Chiều_cao_triều_m"] = daily_forecast.apply(
-        lambda row: (
-            float(row["Chiều_cao_triều_m"])
-            if pd.notna(row["Chiều_cao_triều_m"])
-            else calculate_synthetic_tide(pd.to_datetime(row["Ngày"]) + pd.Timedelta(hours=12))
-        ),
-        axis=1,
-    )
-    daily_forecast["Địa phương"] = location["name"]
-    return daily_forecast
-
-
-def get_future_predictions(model, scaler, forecast_days=14):
-    """Dự báo nguy cơ ngập cho các ngày sắp tới bằng mô hình ML đã huấn luyện."""
-    feature_columns = get_expected_feature_columns(model, scaler)
-    all_predictions = []
-
-    for location in LOCATIONS:
-        location_forecast = fetch_daily_forecast_features(location, forecast_days=forecast_days)
-        if location_forecast.empty:
-            continue
-
-        feature_frame = location_forecast[feature_columns].copy()
-        scaled_features = scale_feature_frame_for_inference(scaler, feature_frame)
-        predictions = model.predict(scaled_features)
-        if hasattr(model, "predict_proba"):
-            proba_matrix = model.predict_proba(scaled_features)
-            if proba_matrix.shape[1] >= 3:
-                probabilities = proba_matrix[:, 1:].sum(axis=1)
-            elif proba_matrix.shape[1] == 2:
-                probabilities = proba_matrix[:, 1]
-            else:
-                probabilities = proba_matrix[:, 0]
-        else:
-            probabilities = (predictions > 0).astype(float)
-
-        location_forecast["Xác suất ngập (%)"] = (probabilities * 100).round(2)
-        location_forecast["Nguy cơ"] = [format_risk_label(int(value)) for value in predictions]
-        location_forecast["Mưa dự báo (mm)"] = location_forecast["Lượng_mưa_mm"]
-        location_forecast["Ngày"] = pd.to_datetime(location_forecast["Ngày"])
-        all_predictions.append(location_forecast)
-
-    if not all_predictions:
-        return pd.DataFrame()
-
-    future_df = pd.concat(all_predictions, ignore_index=True)
-    future_df = future_df.rename(
-        columns={
-            "Nhiệt_độ_C": "Nhiệt độ (°C)",
-            "Độ_ẩm_%": "Độ ẩm (%)",
-            "Độ_ẩm_đất": "Độ ẩm đất",
-            "Chiều_cao_triều_m": "Chiều cao triều (m)",
-        }
-    )
-    future_df = future_df.sort_values(["Ngày", "Địa phương"]).reset_index(drop=True)
-    future_df["Ngày"] = future_df["Ngày"].dt.strftime("%Y-%m-%d")
-    return future_df[
-        [
-            "Ngày",
-            "Địa phương",
-            "Nhiệt độ (°C)",
-            "Độ ẩm (%)",
-            "Mưa dự báo (mm)",
-            "Độ ẩm đất",
-            "Chiều cao triều (m)",
-            "Xác suất ngập (%)",
-            "Nguy cơ",
-        ]
-    ]
-
-
-def get_expected_feature_columns(model, scaler):
-    """Xác định đúng thứ tự feature mà scaler/mô hình đang mong đợi."""
-    if hasattr(scaler, "feature_names_in_"):
-        return list(scaler.feature_names_in_)
-    if hasattr(model, "feature_names_in_"):
-        return list(model.feature_names_in_)
-    return DEFAULT_FEATURE_ORDER
-
-
-def build_feature_frame(weather, feature_columns, extra_values: dict | None = None):
-    """Tạo DataFrame đầu vào đúng tên cột và đúng thứ tự."""
-    row = {column: weather.get(column, 0.0) for column in feature_columns}
-    if extra_values:
-        for column, value in extra_values.items():
-            if column in row:
-                row[column] = value
-    return pd.DataFrame([row], columns=feature_columns)
-
-
-def scale_feature_frame_for_inference(scaler, feature_frame: pd.DataFrame) -> pd.DataFrame:
-    """Scale dữ liệu nhưng vẫn giữ nguyên DataFrame và tên cột cho sklearn."""
-    scaled_values = scaler.transform(feature_frame)
-    return pd.DataFrame(
-        scaled_values,
-        columns=feature_frame.columns,
-        index=feature_frame.index,
-    )
-
-
-def get_prediction_and_flood_probability(model, features_scaled: pd.DataFrame):
-    """
-    Trả về:
-    - nhãn dự đoán
-    - xác suất có nguy cơ ngập
-
-    Hỗ trợ cả mô hình nhị phân lẫn đa lớp.
-    Với bài toán đa lớp 0/1/2:
-    - Xác suất ngập = P(class 1) + P(class 2)
-    """
-    prediction = int(model.predict(features_scaled)[0])
-
-    if hasattr(model, "predict_proba"):
-        probabilities = model.predict_proba(features_scaled)[0]
-        if len(probabilities) >= 3:
-            flood_probability = float(probabilities[1:].sum())
-        elif len(probabilities) == 2:
-            flood_probability = float(probabilities[1])
-        else:
-            flood_probability = float(probabilities[0])
-    else:
-        flood_probability = float(prediction > 0)
-
-    return prediction, flood_probability
-
-
-def format_risk_label(prediction: int) -> str:
-    """Chuẩn hóa nhãn hiển thị cho dashboard."""
-    if prediction <= 0:
-        return "🟢 An toàn"
-    if prediction == 1:
-        return "🟠 Ngập nhẹ"
-    return "🔴 Ngập nặng"
-
-
-def get_processing_timestamp_display() -> str:
-    """Trả về thời gian xử lý hiện tại theo định dạng dễ đọc cho dashboard."""
-    return datetime.now().strftime("%H:%M - %d/%m/%Y")
-
-
-@st.cache_data(show_spinner=False)
-def load_ctgan_comparison_artifacts():
-    """Đọc dữ liệu export trước/sau CTGAN để hiển thị nhanh trên Streamlit."""
-    if not CTGAN_DISTRIBUTION_PATH.exists():
-        return None
-
-    with CTGAN_DISTRIBUTION_PATH.open("r", encoding="utf-8") as file:
-        summary = json.load(file)
-
-    before_df = pd.read_csv(CTGAN_BEFORE_PATH) if CTGAN_BEFORE_PATH.exists() else pd.DataFrame()
-    after_df = pd.read_csv(CTGAN_AFTER_PATH) if CTGAN_AFTER_PATH.exists() else pd.DataFrame()
-
-    return {
-        "summary": summary,
-        "before_df": before_df,
-        "after_df": after_df,
-    }
-
-
-def get_realtime_prediction(model, scaler):
-    """Dự báo realtime cho tất cả địa phương trong danh sách."""
-    feature_columns = get_expected_feature_columns(model, scaler)
-    predictions = []
-    processing_time_display = get_processing_timestamp_display()
-
-    for location in LOCATIONS:
-        weather = get_current_weather(location)
-        feature_frame = build_feature_frame(weather, feature_columns)
-        scaled_features = scale_feature_frame_for_inference(scaler, feature_frame)
-
-        prediction, probability = get_prediction_and_flood_probability(model, scaled_features)
-
-        predictions.append(
-            {
-                "Thời gian": processing_time_display,
-                "Địa phương": location["name"],
-                "Vĩ độ": location["lat"],
-                "Kinh độ": location["lon"],
-                "Nhiệt độ (°C)": round(float(weather["Nhiệt_độ_C"]), 2),
-                "Độ ẩm (%)": round(float(weather["Độ_ẩm_%"]), 2),
-                "Lượng mưa (mm)": round(float(weather["Lượng_mưa_mm"]), 2),
-                "Độ ẩm đất": round(float(weather["Độ_ẩm_đất"]), 2),
-                "Chiều cao triều (m)": round(float(weather["Chiều_cao_triều_m"]), 2),
-                "Xác suất ngập (%)": round(probability * 100, 2),
-                "Nguy cơ": format_risk_label(prediction),
-            }
-        )
-
-    return pd.DataFrame(predictions)
-
-
-def append_realtime_log_row(log_row: dict) -> bool:
-    """Append realtime stream vào CSV và tránh ghi trùng cùng một timestamp nguồn."""
-    REALTIME_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    source_timestamp = str(log_row.get("Thời_gian_nguồn", "")).strip()
-
-    if REALTIME_LOG_PATH.exists():
-        try:
-            existing_df = pd.read_csv(REALTIME_LOG_PATH, usecols=["Thời_gian_nguồn"], encoding="utf-8-sig")
-            if not existing_df.empty:
-                last_timestamp = str(existing_df["Thời_gian_nguồn"].iloc[-1]).strip()
-                if last_timestamp == source_timestamp:
-                    return False
-        except Exception:
-            pass
-
-    log_df = pd.DataFrame([log_row])
-    if REALTIME_LOG_PATH.exists():
-        log_df.to_csv(REALTIME_LOG_PATH, mode="a", header=False, index=False, encoding="utf-8-sig")
-    else:
-        log_df.to_csv(REALTIME_LOG_PATH, index=False, encoding="utf-8-sig")
-    return True
-
-
-def run_realtime_flood_warning_inference(model, scaler) -> dict:
-    """Fetch dữ liệu Huế, format theo feature model, suy luận và ghi log stream."""
-    api_result = fetch_hue_realtime_weather()
-    if not api_result["success"]:
-        return {
-            "success": False,
-            "error": api_result["error"],
-        }
-
-    realtime_weather = api_result["data"]
-    feature_columns = get_expected_feature_columns(model, scaler)
-    feature_frame = build_feature_frame(
-        realtime_weather,
-        feature_columns,
-        extra_values={
-            "Vĩ độ": realtime_weather["Vĩ độ"],
-            "Kinh độ": realtime_weather["Kinh độ"],
-            "lat": realtime_weather["Vĩ độ"],
-            "lon": realtime_weather["Kinh độ"],
-        },
-    )
-    try:
-        scaled_features = scale_feature_frame_for_inference(scaler, feature_frame)
-        prediction, probability = get_prediction_and_flood_probability(model, scaled_features)
-    except Exception as exc:
-        return {
-            "success": False,
-            "error": f"Không thể chạy inference realtime: {exc}",
-        }
-
-    log_row = {
-        "Thời_gian_xử_lý": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Thời_gian_nguồn": realtime_weather["Thời_gian_nguồn"],
-        "Địa_phương": realtime_weather["Địa phương"],
-        "Nhiệt_độ_C": round(float(realtime_weather["Nhiệt_độ_C"]), 2),
-        "Độ_ẩm_%": round(float(realtime_weather["Độ_ẩm_%"]), 2),
-        "Lượng_mưa_mm": round(float(realtime_weather["Lượng_mưa_mm"]), 2),
-        "Độ_ẩm_đất": round(float(realtime_weather["Độ_ẩm_đất"]), 2),
-        "Chiều_cao_triều_m": round(float(realtime_weather["Chiều_cao_triều_m"]), 2),
-        "Áp_suất_hPa": round(float(realtime_weather["Áp_suất_hPa"]), 2),
-        "Tốc_độ_gió_m_s": round(float(realtime_weather["Tốc_độ_gió_m_s"]), 2),
-        "Mô_tả": realtime_weather["Mô_tả"],
-        "Dự_báo": format_risk_label(prediction),
-        "Xác_suất_ngập_%": round(probability * 100, 2),
-    }
-    try:
-        appended = append_realtime_log_row(log_row)
-        log_error = None
-    except Exception as exc:
-        appended = False
-        log_error = str(exc)
-
-    return {
-        "success": True,
-        "weather": realtime_weather,
-        "feature_frame": feature_frame,
-        "prediction": prediction,
-        "probability": probability,
-        "risk_label": format_risk_label(prediction),
-        "last_updated_display": format_source_timestamp(realtime_weather["Thời_gian_nguồn"]),
-        "appended": appended,
-        "log_error": log_error,
-        "log_path": str(REALTIME_LOG_PATH),
-    }
-
-
-def render_realtime_flood_warning_section(model, scaler) -> None:
-    """Khối cảnh báo realtime nổi bật ở đầu dashboard."""
-    st.markdown("## Real-Time Flood Warning")
-    realtime_result = run_realtime_flood_warning_inference(model, scaler)
-
-    if not realtime_result["success"]:
-        st.warning(f"Không thể lấy dữ liệu realtime từ API Huế lúc này: {realtime_result['error']}")
-        st.caption("Last Updated Time: Chưa có | Next Auto-Update in 60 minutes")
-        st.markdown("---")
-        return
-
-    weather = realtime_result["weather"]
-    metric_columns = st.columns(3)
-    metric_columns[0].metric("Rainfall (mm)", f"{coerce_float(weather['Lượng_mưa_mm']):.2f}")
-    metric_columns[1].metric("Temp (°C)", f"{coerce_float(weather['Nhiệt_độ_C']):.2f}")
-    metric_columns[2].metric("Humidity (%)", f"{coerce_float(weather['Độ_ẩm_%']):.2f}")
-
-    alert_text = (
-        f"{realtime_result['risk_label']} | Xác suất ngập: {realtime_result['probability'] * 100:.2f}% "
-        f"| Khu vực: {weather['Địa phương']}"
-    )
-    if realtime_result["prediction"] > 0:
-        st.error(alert_text)
-    else:
-        st.success(alert_text)
-
-    if realtime_result.get("log_error"):
-        append_status = f"Lỗi ghi log CSV: {realtime_result['log_error']}"
-    else:
-        append_status = "Đã ghi log CSV mới." if realtime_result["appended"] else "Không ghi thêm vì timestamp nguồn trùng bản ghi gần nhất."
-    st.caption(
-        f"Last Updated Time: {realtime_result['last_updated_display']} | "
-        "Next Auto-Update in 60 minutes | "
-        f"{append_status} | Log file: {realtime_result['log_path']}"
-    )
-    st.markdown("---")
-
-
-def build_noaa_placeholder() -> dict:
-    """Giá trị mặc định khi NOAA chưa đồng bộ hoặc không tìm thấy dữ liệu."""
-    return {
-        "Nhiệt độ (NOAA)": "N/A (Chờ vệ tinh)",
-        "Mưa (NOAA)": "N/A",
-    }
-
-
-def is_numeric_value(value) -> bool:
-    """Kiểm tra giá trị có phải số hợp lệ hay không."""
-    return isinstance(value, (int, float)) and not pd.isna(value)
-
-
-def format_table_value(value):
-    """Chuẩn hóa giá trị hiển thị trong bảng đối chiếu."""
-    if is_numeric_value(value):
-        return round(float(value), 2)
-    return value
-
-
-def derive_confidence_label(meteo_temp, noaa_temp, meteo_rain, noaa_rain) -> str:
-    """Đánh giá mức độ tin cậy dựa trên sai lệch giữa Open-Meteo và NOAA."""
-    temp_diff = None
-    rain_diff = None
-
-    if is_numeric_value(meteo_temp) and is_numeric_value(noaa_temp):
-        temp_diff = abs(float(meteo_temp) - float(noaa_temp))
-    if is_numeric_value(meteo_rain) and is_numeric_value(noaa_rain):
-        rain_diff = abs(float(meteo_rain) - float(noaa_rain))
-
-    if temp_diff is None and rain_diff is None:
-        return "⚪ Chờ đồng bộ"
-
-    if temp_diff is not None and rain_diff is not None:
-        return "🟢 Cao" if temp_diff <= 2.0 and rain_diff <= 10.0 else "🔴 Thấp"
-
-    if temp_diff is not None:
-        return "🟢 Cao" if temp_diff <= 2.0 else "🔴 Thấp"
-
-    return "🟢 Cao" if rain_diff is not None and rain_diff <= 10.0 else "🔴 Thấp"
-
-
-@st.cache_data(show_spinner=False, ttl=21600)
-def fetch_noaa_cdo_data(lat, lon):
-    """
-    Lấy daily summary từ NOAA CDO cho 2 ngày gần nhất.
-
-    NOAA có thể trễ đồng bộ nên nếu không có dữ liệu phù hợp sẽ trả về placeholder.
-    """
-    token = os.getenv("NOAA_CDO_TOKEN")
-    headers = {
-        "token": token,
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/91.0.4472.124 Safari/537.36"
-        ),
-    }
-    placeholder = build_noaa_placeholder()
-    if not token:
-        return placeholder
-
-    try:
-        end_date = datetime.now(timezone.utc).date() - timedelta(days=1)
-        start_date = end_date - timedelta(days=1)
-        bbox_delta = 0.75
-
-        stations_url = "https://www.ncei.noaa.gov/cdo-web/api/v2/stations"
-        station_params = {
-            "datasetid": "GHCND",
-            "extent": f"{lat - bbox_delta},{lon - bbox_delta},{lat + bbox_delta},{lon + bbox_delta}",
-            "startdate": start_date.isoformat(),
-            "enddate": end_date.isoformat(),
-            "limit": 10,
-            "sortfield": "maxdate",
-            "sortorder": "desc",
-        }
-        station_response = requests.get(
-            stations_url,
-            headers=headers,
-            params=station_params,
-            timeout=20,
-        )
-        station_response.raise_for_status()
-        stations = station_response.json().get("results", [])
-        if not stations:
-            return placeholder
-
-        selected_station = min(
-            stations,
-            key=lambda station: (
-                (float(station.get("latitude", lat)) - lat) ** 2
-                + (float(station.get("longitude", lon)) - lon) ** 2
-            ),
-        )
-        station_id = selected_station.get("id")
-        if not station_id:
-            return placeholder
-
-        data_url = "https://www.ncei.noaa.gov/cdo-web/api/v2/data"
-        data_params = {
-            "datasetid": "GHCND",
-            "stationid": station_id,
-            "startdate": start_date.isoformat(),
-            "enddate": end_date.isoformat(),
-            "datatypeid": ["TAVG", "TMAX", "TMIN", "PRCP"],
-            "units": "metric",
-            "limit": 1000,
-            "sortfield": "date",
-            "sortorder": "desc",
-        }
-        data_response = requests.get(
-            data_url,
-            headers=headers,
-            params=data_params,
-            timeout=20,
-        )
-        data_response.raise_for_status()
-        results = data_response.json().get("results", [])
-        if not results:
-            return placeholder
-
-        latest_date = max(str(item.get("date", ""))[:10] for item in results if item.get("date"))
-        latest_results = [
-            item for item in results if str(item.get("date", "")).startswith(latest_date)
-        ]
-        if not latest_results:
-            return placeholder
-
-        datatype_map = {}
-        for item in latest_results:
-            datatype = item.get("datatype")
-            value = item.get("value")
-            if datatype and value is not None:
-                datatype_map[datatype] = float(value)
-
-        noaa_temp = datatype_map.get("TAVG")
-        if noaa_temp is None:
-            tmax = datatype_map.get("TMAX")
-            tmin = datatype_map.get("TMIN")
-            if tmax is not None and tmin is not None:
-                noaa_temp = (tmax + tmin) / 2
-            elif tmax is not None:
-                noaa_temp = tmax
-            elif tmin is not None:
-                noaa_temp = tmin
-
-        noaa_rain = datatype_map.get("PRCP")
-        if noaa_temp is None and noaa_rain is None:
-            return placeholder
-
-        return {
-            "Nhiệt độ (NOAA)": format_table_value(noaa_temp)
-            if noaa_temp is not None
-            else placeholder["Nhiệt độ (NOAA)"],
-            "Mưa (NOAA)": format_table_value(noaa_rain)
-            if noaa_rain is not None
-            else placeholder["Mưa (NOAA)"],
-        }
-    except Exception:
-        return placeholder
-
-
-@st.cache_data(show_spinner=False, ttl=60)
-def fetch_tomorrow_realtime(lat: float, lon: float):
-    api_key = os.getenv("TOMORROW_API_KEY")
-    if not api_key:
-        return None
-
-    url = "https://api.tomorrow.io/v4/weather/realtime"
-    headers = {"accept-encoding": "deflate, gzip, br", "accept": "application/json"}
-    params = {
-        "location": f"{lat},{lon}",
-        "apikey": api_key,
-        "units": "metric",
-    }
-
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-        if response.status_code in {401, 403, 429}:
-            return None
-        response.raise_for_status()
-        payload = response.json()
-        values = payload.get("data", {}).get("values", {})
-        if not isinstance(values, dict) or not values:
-            return None
-
-        return {
-            "time": payload.get("data", {}).get("time"),
-            "temperature": values.get("temperature"),
-            "humidity": values.get("humidity"),
-            "precipitationIntensity": values.get("precipitationIntensity"),
-            "windSpeed": values.get("windSpeed"),
-        }
-    except Exception:
-        return None
-
-
-def render_tomorrow_nowcasting():
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📡 Thời tiết Hiện tại (Nowcasting - Tomorrow.io)")
-
-    location = LOCATIONS[0] if LOCATIONS else None
-    if location is None:
-        st.sidebar.info("Không có tọa độ để hiển thị Nowcasting.")
-        return
-
-    nowcast = fetch_tomorrow_realtime(location["lat"], location["lon"])
-    if nowcast is None:
-        st.sidebar.info("Chưa cấu hình TOMORROW_API_KEY hoặc không lấy được dữ liệu Tomorrow.io.")
-        return
-
-    time_value = nowcast.get("time")
-    if time_value:
-        st.sidebar.caption(f"Vị trí: {location['name']} | {time_value}")
-    else:
-        st.sidebar.caption(f"Vị trí: {location['name']}")
-
-    def format_metric(value, suffix: str, decimals: int = 2) -> str:
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            return "N/A"
-        try:
-            return f"{float(value):.{decimals}f}{suffix}"
-        except Exception:
-            return "N/A"
-
-    col_1, col_2 = st.sidebar.columns(2)
-    col_1.metric("Nhiệt độ", format_metric(nowcast.get("temperature"), " °C"))
-    col_2.metric("Độ ẩm", format_metric(nowcast.get("humidity"), " %"))
-
-    col_3, col_4 = st.sidebar.columns(2)
-    col_3.metric("Mưa (cường độ)", format_metric(nowcast.get("precipitationIntensity"), " mm/h"))
-    col_4.metric("Gió", format_metric(nowcast.get("windSpeed"), " m/s"))
-
-
-def load_stormglass_cache():
-    """Đọc cache JSON Stormglass từ đĩa, lỗi thì trả về None."""
-    try:
-        if not STORMGLASS_CACHE_PATH.exists():
-            return None
-        with STORMGLASS_CACHE_PATH.open("r", encoding="utf-8") as file:
-            return json.load(file)
-    except Exception:
-        return None
-
-
-def extract_next_high_tide(stormglass_payload):
-    """Lấy đợt triều cao kế tiếp từ JSON Stormglass."""
-    if not isinstance(stormglass_payload, dict):
-        return None
-
-    tide_items = stormglass_payload.get("data", [])
-    if not isinstance(tide_items, list):
-        return None
-
-    now_utc = datetime.now(timezone.utc)
-    next_high_tide = None
-
-    for item in tide_items:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("type", "")).lower() != "high":
-            continue
-
-        raw_time = item.get("time")
-        raw_height = item.get("height")
-        if raw_time is None or raw_height is None:
-            continue
-
-        try:
-            tide_time = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00"))
-            tide_height = float(raw_height)
-        except Exception:
-            continue
-
-        if tide_time < now_utc:
-            continue
-
-        if next_high_tide is None or tide_time < next_high_tide["time"]:
-            next_high_tide = {"time": tide_time, "height": tide_height}
-
-    return next_high_tide
-
-
-def render_stormglass_tide_sidebar():
-    """Hiển thị mục thủy triều từ cache JSON Stormglass ở sidebar."""
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🌊 Thủy triều Stormglass")
-
-    stormglass_payload = load_stormglass_cache()
-    next_high_tide = extract_next_high_tide(stormglass_payload)
-
-    if next_high_tide is None:
-        st.sidebar.info("Chưa có dữ liệu Thủy triều")
-        return
-
-    local_time = next_high_tide["time"].astimezone()
-    st.sidebar.caption(f"Triều cao kế tiếp lúc: {local_time.strftime('%H:%M - %d/%m/%Y')}")
-
-    metric_col_1, metric_col_2 = st.sidebar.columns(2)
-    metric_col_1.metric("Chiều cao", f"{next_high_tide['height']:.2f} m")
-    metric_col_2.metric("Loại", "Triều cao")
-
-
-def render_cross_validation_table(df_open_meteo: pd.DataFrame) -> pd.DataFrame:
-    """Tạo bảng đối chiếu Open-Meteo với NOAA CDO cho từng địa phương."""
-    comparison_rows = []
-
-    for _, row in df_open_meteo.iterrows():
-        noaa_data = fetch_noaa_cdo_data(
-            lat=float(row["Vĩ độ"]),
-            lon=float(row["Kinh độ"]),
-        )
-
-        meteo_temp = row.get("Nhiệt độ (°C)")
-        meteo_rain = row.get("Lượng mưa (mm)")
-        noaa_temp = noaa_data.get("Nhiệt độ (NOAA)")
-        noaa_rain = noaa_data.get("Mưa (NOAA)")
-
-        comparison_rows.append(
-            {
-                "Địa phương": row.get("Địa phương"),
-                "Nhiệt độ (Meteo)": format_table_value(meteo_temp),
-                "Nhiệt độ (NOAA)": format_table_value(noaa_temp),
-                "Mưa (Meteo)": format_table_value(meteo_rain),
-                "Mưa (NOAA)": format_table_value(noaa_rain),
-                "Độ tin cậy": derive_confidence_label(
-                    meteo_temp=meteo_temp,
-                    noaa_temp=noaa_temp,
-                    meteo_rain=meteo_rain,
-                    noaa_rain=noaa_rain,
-                ),
-            }
-        )
-
-    return pd.DataFrame(
-        comparison_rows,
-        columns=[
-            "Địa phương",
-            "Nhiệt độ (Meteo)",
-            "Nhiệt độ (NOAA)",
-            "Mưa (Meteo)",
-            "Mưa (NOAA)",
-            "Độ tin cậy",
-        ],
-    )
-
-
-def normalize_location_name(name):
-    """Chuẩn hóa tên địa phương để ghép dữ liệu dự báo với dữ liệu bản đồ."""
-    if not name:
-        return None
-    return MAP_NAME_NORMALIZATION.get(str(name).strip(), str(name).strip())
-
-
-@st.cache_data
-def load_geojson_data():
-    """Đọc dữ liệu GeoJSON và chuẩn hóa tên địa phương."""
-    if not GEOJSON_PATH.exists():
-        return None
-
-    with GEOJSON_PATH.open("r", encoding="utf-8") as file:
-        geojson_data = json.load(file)
-
-    features = geojson_data.get("features", [])
-    normalized_features = []
-    for feature in features:
-        properties = feature.get("properties", {})
-        raw_name = (
-            properties.get("name")
-            or properties.get("NAME_2")
-            or properties.get("ten")
-            or properties.get("district")
-        )
-        normalized_name = normalize_location_name(raw_name)
-        if not normalized_name:
-            continue
-
-        feature["properties"]["name"] = normalized_name
-        normalized_features.append(feature)
-
-    geojson_data["features"] = normalized_features
-    return geojson_data
-
-
-@st.cache_data(show_spinner=False)
-def build_risk_lookup(df_predictions):
-    """Tạo dictionary lookup nhanh theo tên địa phương."""
-    lookup = {}
-    for _, row in df_predictions.iterrows():
-        lookup[row["Địa phương"]] = {
-            "risk": row["Nguy cơ"],
-            "prob": row["Xác suất ngập (%)"],
-            "temp": row["Nhiệt độ (°C)"],
-            "humidity": row["Độ ẩm (%)"],
-            "rain": row["Lượng mưa (mm)"],
-            "soil": row["Độ ẩm đất"],
-            "tide": row["Chiều cao triều (m)"],
-        }
-    return lookup
-
-
-_fragment_decorator = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
-
-
-def build_map_panel_discussion(df_predictions: pd.DataFrame) -> str:
-    """Sinh nhận xét động cho bản đồ rủi ro dựa trên số địa phương theo từng mức cảnh báo."""
-    if df_predictions.empty:
-        return "Chưa có dữ liệu dự báo để tổng hợp cho bản đồ rủi ro."
-
-    risk_counts = df_predictions["Nguy cơ"].value_counts()
-    safe_count = int(risk_counts.get("🟢 An toàn", 0))
-    light_count = int(risk_counts.get("🟠 Ngập nhẹ", 0))
-    heavy_count = int(risk_counts.get("🔴 Ngập nặng", 0))
-    total = len(df_predictions)
-
-    return (
-        f"Trên bản đồ, hiện có {safe_count}/{total} địa phương ở mức an toàn, {light_count}/{total} địa phương "
-        f"ở mức ngập nhẹ và {heavy_count}/{total} địa phương ở mức ngập nặng. "
-        + (
-            "Không có khu vực nào ở mức cảnh báo cao, tình hình tổng thể tương đối ổn định."
-            if light_count == 0 and heavy_count == 0
-            else "Các khu vực tô màu cảnh báo (cam/đỏ) cần được ưu tiên giám sát và bố trí lực lượng ứng trực trước, "
-            "đặc biệt nếu các khu vực này liền kề nhau vì rủi ro ngập có thể lan rộng theo hệ thống sông/kênh chung."
-        )
-    )
-
-
-def _render_map_panel(df_predictions: pd.DataFrame, current_update_time: str) -> None:
-    st.subheader("🗺️ Bản đồ Rủi ro Ngập lụt")
-    st.caption(f"🕒 Dữ liệu cập nhật lúc: {current_update_time} | Chế độ bản đồ nhẹ")
-    if st.session_state.get("show_light_map", False):
-        flood_map = render_boundary_map(df_predictions)
-        st_folium(
-            flood_map,
-            width=None,
-            height=520,
-            use_container_width=True,
-            key="hue_light_map",
-            returned_objects=[],
-        )
-    else:
-        st.info(
-            "Bản đồ đang được ẩn để giảm tải cho trình duyệt và ưu tiên hiệu năng huấn luyện ML/deep learning. "
-            "Bạn có thể bật lại trong sidebar bằng tùy chọn `Hiển thị bản đồ nhẹ`."
-        )
-    render_chart_discussion(build_map_panel_discussion(df_predictions))
-
-
-render_map_panel = _fragment_decorator(_render_map_panel) if _fragment_decorator else _render_map_panel
-
-
-def extract_coordinate_pairs(coordinates):
-    """Lấy toàn bộ cặp lon/lat từ Polygon hoặc MultiPolygon."""
-    points = []
-    if not isinstance(coordinates, list):
-        return points
-
-    if coordinates and isinstance(coordinates[0], (int, float)) and len(coordinates) >= 2:
-        return [(coordinates[0], coordinates[1])]
-
-    for item in coordinates:
-        points.extend(extract_coordinate_pairs(item))
-    return points
-
-
-def estimate_feature_center(feature):
-    """Ước lượng tâm polygon để đặt nhãn tên địa phương."""
-    geometry = feature.get("geometry", {})
-    points = extract_coordinate_pairs(geometry.get("coordinates", []))
-    if not points:
-        return None
-
-    avg_lon = sum(point[0] for point in points) / len(points)
-    avg_lat = sum(point[1] for point in points) / len(points)
-    return avg_lat, avg_lon
-
-
-def geojson_is_in_target_region(geojson_data):
-    """Kiểm tra GeoJSON có thực sự nằm trong vùng Huế hay không."""
-    all_points = []
-    for feature in geojson_data.get("features", []):
-        geometry = feature.get("geometry", {})
-        all_points.extend(extract_coordinate_pairs(geometry.get("coordinates", [])))
-
-    if not all_points:
-        return False
-
-    longitudes = [point[0] for point in all_points]
-    latitudes = [point[1] for point in all_points]
-
-    min_lon, max_lon = min(longitudes), max(longitudes)
-    min_lat, max_lat = min(latitudes), max(latitudes)
-
-    return (
-        106.5 <= min_lon <= 108.5
-        and 106.5 <= max_lon <= 108.8
-        and 15.5 <= min_lat <= 17.5
-        and 15.5 <= max_lat <= 17.8
-    )
-
-
-def add_map_tiles(base_map):
-    """Thêm nền bản đồ OpenStreetMap làm bản đồ nền mặc định."""
-    folium.TileLayer(
-        tiles="OpenStreetMap",
-        attr="© OpenStreetMap",
-        name="OpenStreetMap",
-        overlay=False,
-        control=True,
-    ).add_to(base_map)
-
-
-def add_boundary_labels(base_map, geojson_data):
-    """Thêm nhãn tên địa phương lên bản đồ."""
-    for feature in geojson_data.get("features", []):
-        center = estimate_feature_center(feature)
-        if center is None:
-            continue
-
-        name = feature.get("properties", {}).get("name", "")
-        folium.Marker(
-            location=center,
-            icon=folium.DivIcon(
-                html=(
-                    "<div style='font-size: 12px; font-weight: 700; color: white; "
-                    "text-shadow: 0 0 4px black, 0 0 8px black; white-space: nowrap;'>"
-                    f"{name}</div>"
-                )
-            ),
-        ).add_to(base_map)
-
-
-def render_boundary_map(df_predictions):
-    """Render bản đồ nhẹ để ưu tiên hiệu năng cho phần ML/deep learning."""
-    risk_lookup = build_risk_lookup(df_predictions)
-    base_map = folium.Map(location=[16.47, 107.63], zoom_start=10, tiles=None)
-    add_map_tiles(base_map)
-    heat_colormap = LinearColormap(
-        colors=["#11c26d", "#ffe082", "#ff8f00", "#d50000"],
-        vmin=0,
-        vmax=100,
-    )
-    heat_colormap.caption = "Xác suất ngập (%)"
-
-    geojson_data = load_geojson_data()
-
-    if geojson_data and geojson_data.get("features") and geojson_is_in_target_region(geojson_data):
-        def style_function(feature):
-            name = feature["properties"].get("name")
-            info = risk_lookup.get(name, {})
-            probability = float(info.get("prob", 0))
-            fill_color = heat_colormap(probability)
-            return {
-                "fillColor": fill_color,
-                "color": "#80ffff",
-                "weight": 3,
-                "fillOpacity": 0.45,
-            }
-
-        def highlight_function(feature):
-            _ = feature
-            return {
-                "color": "#fff176",
-                "weight": 4,
-                "fillOpacity": 0.5,
-            }
-
-        folium.GeoJson(
-            geojson_data,
-            name="Ranh giới hành chính",
-            style_function=style_function,
-            highlight_function=highlight_function,
-            tooltip=folium.GeoJsonTooltip(
-                fields=["name"],
-                aliases=["Địa phương"],
-                localize=True,
-                sticky=False,
-            ),
-        ).add_to(base_map)
-        add_boundary_labels(base_map, geojson_data)
-    else:
-        for _, row in df_predictions.iterrows():
-            probability = float(row["Xác suất ngập (%)"])
-            color = heat_colormap(probability)
-            folium.CircleMarker(
-                location=[row["Vĩ độ"], row["Kinh độ"]],
-                radius=10,
-                color="#ffffff",
-                weight=2,
-                fill=True,
-                fill_color=color,
-                fill_opacity=0.88,
-                tooltip=f"{row['Địa phương']} - {row['Xác suất ngập (%)']}%",
-                popup=folium.Popup(
-                    build_map_popup_html(row),
-                    max_width=260,
-                ),
-            ).add_to(base_map)
-
-        bounds = [
-            [float(row["Vĩ độ"]), float(row["Kinh độ"])]
-            for _, row in df_predictions.iterrows()
-        ]
-        if bounds:
-            base_map.fit_bounds(bounds, padding=(30, 30))
-
-    heat_colormap.add_to(base_map)
-    folium.LayerControl().add_to(base_map)
-    return base_map
-
-
-def build_map_popup_html(row) -> str:
-    """Tạo popup dạng thẻ vuông, gọn và dễ đọc cho marker bản đồ."""
-    risk_text = str(row["Nguy cơ"])
-    if "Ngập nặng" in risk_text:
-        badge_bg = "#7f1d1d"
-        badge_fg = "#fff1f2"
-    elif "Ngập nhẹ" in risk_text:
-        badge_bg = "#92400e"
-        badge_fg = "#fffbeb"
-    else:
-        badge_bg = "#166534"
-        badge_fg = "#f0fdf4"
-
-    return f"""
-    <div style="
-        width: 220px;
-        background: #f8fafc;
-        color: #0f172a;
-        border-radius: 12px;
-        padding: 12px 14px;
-        border: 1px solid #cbd5e1;
-        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
-        font-family: Arial, sans-serif;
-        line-height: 1.45;
-    ">
-        <div style="font-size: 20px; font-weight: 800; margin-bottom: 8px; color: #1e293b;">
-            {row["Địa phương"]}
-        </div>
-        <div style="
-            display: inline-block;
-            padding: 4px 10px;
-            border-radius: 999px;
-            background: {badge_bg};
-            color: {badge_fg};
-            font-size: 12px;
-            font-weight: 700;
-            margin-bottom: 10px;
-        ">
-            {risk_text}
-        </div>
-        <div style="display: grid; grid-template-columns: 1fr; gap: 4px; font-size: 14px;">
-            <div><b>Xác suất ngập:</b> {row["Xác suất ngập (%)"]}%</div>
-            <div><b>Nhiệt độ:</b> {row["Nhiệt độ (°C)"]} °C</div>
-            <div><b>Độ ẩm:</b> {row["Độ ẩm (%)"]}%</div>
-            <div><b>Lượng mưa:</b> {row["Lượng mưa (mm)"]} mm</div>
-            <div><b>Độ ẩm đất:</b> {row["Độ ẩm đất"]}</div>
-            <div><b>Chiều cao triều:</b> {row["Chiều cao triều (m)"]} m</div>
-        </div>
-    </div>
-    """.strip()
-
-
-def risk_cell_style(value: str) -> str:
-    """Tạo style đậm và dễ nhìn cho cột mức nguy cơ."""
-    value = str(value)
-    if "Ngập nặng" in value:
-        return "background-color: #7f1d1d; color: #fff1f2; font-weight: 700;"
-    if "Ngập nhẹ" in value:
-        return "background-color: #92400e; color: #fffbeb; font-weight: 700;"
-    if "An toàn" in value:
-        return "background-color: #166534; color: #f0fdf4; font-weight: 700;"
-    return "background-color: #1f2937; color: #f8fafc; font-weight: 600;"
-
-
-def confidence_cell_style(value: str) -> str:
-    """Tô màu cho cột độ tin cậy NOAA."""
-    value = str(value)
-    if "Cao" in value:
-        return "background-color: #14532d; color: #ecfdf5; font-weight: 700;"
-    if "Thấp" in value:
-        return "background-color: #7f1d1d; color: #fff1f2; font-weight: 700;"
-    return "background-color: #334155; color: #f8fafc; font-weight: 700;"
-
-
-def build_contrast_styler(
-    df: pd.DataFrame,
-    numeric_formats: dict | None = None,
-    risk_column: str | None = None,
-    confidence_column: str | None = None,
-):
-    """Tạo Styler có độ tương phản cao để bảng web dễ đọc hơn."""
+def build_contrast_styler(df: pd.DataFrame, numeric_formats: dict | None = None):
+    """Tạo Styler có độ tương phản cao (nền tối, chữ sáng, sọc ngựa vằn) để bảng web dễ đọc hơn."""
     styled_df = df.style
 
     if numeric_formats:
@@ -1789,23 +449,12 @@ def build_contrast_styler(
         ]
     )
 
-    if risk_column and risk_column in df.columns:
-        styled_df = styled_df.map(risk_cell_style, subset=[risk_column])
-
-    if confidence_column and confidence_column in df.columns:
-        styled_df = styled_df.map(confidence_cell_style, subset=[confidence_column])
-
     try:
         styled_df = styled_df.hide(axis="index")
     except Exception:
         pass
 
     return styled_df
-
-
-def render_chart_discussion(text: str) -> None:
-    """Hiển thị đoạn nhận xét/diễn giải ngay bên dưới một bảng hoặc biểu đồ."""
-    st.info(text)
 
 
 def render_styled_table(styler, height: int = 360):
@@ -1818,248 +467,141 @@ def render_styled_table(styler, height: int = 360):
     )
 
 
-def build_prediction_table_discussion(df_predictions: pd.DataFrame) -> str:
-    """Sinh nhận xét động cho bảng dự báo hiện tại dựa trên dữ liệu vừa suy luận."""
-    if df_predictions.empty:
-        return "Chưa có dữ liệu dự báo hiện tại để đưa ra nhận xét."
+# ==================================================================================================
+# TAB 1 - 📊 KHÁM PHÁ DỮ LIỆU (EDA)
+# ==================================================================================================
+@st.cache_data(show_spinner=False)
+def load_eda_sample_dataframe() -> pd.DataFrame:
+    """
+    Đọc và gộp dữ liệu lịch sử từ `data/historical/*.csv` để hiển thị cho Tab EDA.
+    Dùng `on_bad_lines="skip"` vì một số file CSV lịch sử có cấu trúc cột không đồng nhất tuyệt đối
+    giữa các lần ghi (do được append qua nhiều lần chạy `fetch_data.py` ở các phiên bản khác nhau) -
+    bỏ qua vài dòng lỗi hiếm gặp còn hơn là làm crash toàn bộ Tab EDA.
+    """
+    if not HISTORICAL_DIR.exists():
+        return pd.DataFrame()
 
-    top_row = df_predictions.loc[df_predictions["Xác suất ngập (%)"].idxmax()]
-    at_risk_df = df_predictions[df_predictions["Nguy cơ"] != "🟢 An toàn"]
+    csv_files = sorted(HISTORICAL_DIR.glob("*.csv"))
+    if not csv_files:
+        return pd.DataFrame()
 
-    return (
-        f"Tại thời điểm cập nhật, **{top_row['Địa phương']}** đang có xác suất ngập cao nhất "
-        f"({top_row['Xác suất ngập (%)']:.2f}%), tương ứng mức cảnh báo `{top_row['Nguy cơ']}`. "
-        f"Hiện có {len(at_risk_df)}/{len(df_predictions)} địa phương đang ở mức cảnh báo (ngập nhẹ/ngập nặng). "
-        "Ban chỉ đạo phòng chống thiên tai nên ưu tiên theo dõi sát các khu vực này, sẵn sàng phương án "
-        "ứng phó nếu xác suất tiếp tục tăng ở các lần cập nhật kế tiếp."
-    )
+    frames = []
+    for csv_file in csv_files:
+        try:
+            df = pd.read_csv(csv_file, on_bad_lines="skip", engine="python")
+        except Exception:
+            continue
+        df["Địa phương"] = csv_file.stem.replace("_10years", "").replace("_", " ").strip()
+        frames.append(df)
 
+    if not frames:
+        return pd.DataFrame()
 
-def render_prediction_table(df_predictions):
-    """Hiển thị bảng dự báo với định dạng màu cho cột nguy cơ."""
-    display_df = df_predictions.drop(columns=["Vĩ độ", "Kinh độ"])
-    numeric_columns = display_df.select_dtypes(include="number").columns.tolist()
-    formatter = {column: "{:.2f}" for column in numeric_columns}
-    render_styled_table(
-        build_contrast_styler(
-            display_df,
-            numeric_formats=formatter,
-            risk_column="Nguy cơ",
-        ),
-        height=320,
-    )
-    render_chart_discussion(build_prediction_table_discussion(df_predictions))
+    combined_df = pd.concat(frames, ignore_index=True)
+    if "Thời_gian" in combined_df.columns:
+        combined_df["Thời_gian"] = pd.to_datetime(combined_df["Thời_gian"], errors="coerce")
+        combined_df = combined_df.dropna(subset=["Thời_gian"]).sort_values("Thời_gian").reset_index(drop=True)
 
-
-def build_future_forecast_discussion(display_df: pd.DataFrame) -> str:
-    """Sinh nhận xét động cho bảng dự báo N ngày tới."""
-    if display_df.empty or "Xác suất ngập (%)" not in display_df.columns:
-        return "Chưa có dữ liệu forecast hợp lệ để đưa ra nhận xét."
-
-    top_row = display_df.loc[display_df["Xác suất ngập (%)"].idxmax()]
-    high_risk_days = display_df[display_df["Nguy cơ"] != "🟢 An toàn"]["Ngày"].nunique()
-    total_days = display_df["Ngày"].nunique()
-
-    return (
-        f"Trong giai đoạn dự báo này, nguy cơ ngập cao nhất được ghi nhận vào ngày **{top_row['Ngày']}** "
-        f"tại **{top_row['Địa phương']}**, với xác suất khoảng {top_row['Xác suất ngập (%)']:.2f}% "
-        f"(mức `{top_row['Nguy cơ']}`). Có {high_risk_days}/{total_days} ngày trong khung dự báo xuất hiện "
-        "ít nhất một địa phương ở mức cảnh báo. Đây là cơ sở để đơn vị quản lý bố trí lịch trực và chuẩn bị "
-        "vật tư phòng chống ngập theo đúng thời điểm rủi ro cao thay vì dàn trải nguồn lực."
-    )
+    return combined_df
 
 
-def render_future_forecast_table(df_future, days):
-    """Hiển thị bảng dự báo cho N ngày tiếp theo với định dạng 2 chữ số thập phân."""
-    if df_future.empty:
-        st.warning("Hiện chưa lấy được dữ liệu forecast cho các ngày tiếp theo.")
-        return
-
-    display_df = df_future.head(days).copy() if "Ngày" in df_future.columns else df_future.copy()
-    numeric_columns = display_df.select_dtypes(include="number").columns.tolist()
-
-    render_styled_table(
-        build_contrast_styler(
-            display_df,
-            numeric_formats={column: "{:.2f}" for column in numeric_columns},
-            risk_column="Nguy cơ",
-        ),
-        height=430,
-    )
-    render_chart_discussion(build_future_forecast_discussion(display_df))
-
-def render_future_forecast_sections(df_future):
-    """Hiển thị dự báo 7 ngày và 14 ngày tiếp theo."""
-    st.subheader("Dự báo mưa và nguy cơ ngập các ngày tới")
+def render_eda_tab() -> None:
+    """
+    Nội dung Tab 1 - Khám phá Dữ liệu (EDA), bước ĐẦU TIÊN của vòng đời Data Science.
+    Bố cục: 2 cột song song (Raw Data | Thống kê mô tả) phía trên, tiếp theo là 1 khối biểu đồ phân
+    phối/tương quan, và cuối cùng là khối xử lý giá trị thiếu/ngoại lai - mỗi khối đặt trong
+    `st.expander` để trang không bị dồn cục, người xem chỉ mở phần mình cần.
+    """
+    st.subheader("📊 Khám phá Dữ liệu (EDA)")
     st.caption(
-        "Dữ liệu thời tiết forecast được tổng hợp theo ngày "
+        "Bước 1/4 của pipeline: hiểu dữ liệu trước khi làm sạch và huấn luyện. Các biểu đồ tĩnh bên dưới "
+        "được sinh sẵn bởi `eda_analysis.py` (chạy `python eda_analysis.py` để làm mới sau khi có dữ liệu mới)."
     )
 
-    if df_future.empty:
-        st.warning("Không có dữ liệu forecast 7 ngày / 14 ngày để hiển thị.")
-        return
+    eda_df = load_eda_sample_dataframe()
 
-    horizon_7d = df_future.head(7 * len(LOCATIONS)).copy()
-    horizon_14d = df_future.head(14 * len(LOCATIONS)).copy()
+    # ---- Hàng 1: bố cục 2 CỘT song song bằng st.columns ----
+    col_raw, col_stats = st.columns(2)
 
-    tab_7d, tab_14d = st.tabs(["7 ngày tới", "14 ngày tới"])
+    with col_raw:
+        with st.expander("🔎 Dữ liệu thô (Raw Data)", expanded=True):
+            # TODO: nếu bạn có logic đọc dữ liệu thô khác (ví dụ đọc trực tiếp từ 1 file cụ thể),
+            # hãy thay `eda_df` bên dưới bằng DataFrame của bạn.
+            if eda_df.empty:
+                st.info("Chưa có dữ liệu lịch sử trong `data/historical/`. Hãy chạy `fetch_data.py` trước.")
+            else:
+                st.dataframe(eda_df.head(20), use_container_width=True, hide_index=True)
+                render_chart_discussion(
+                    f"Bảng hiển thị 20 dòng đầu (`df.head()`) trong tổng số {len(eda_df):,} dòng đã gộp từ "
+                    f"{eda_df['Địa phương'].nunique()} địa phương - gồm các biến khí tượng, thủy văn theo giờ "
+                    "và nhãn nguy cơ ngập. Đây là nguyên liệu đầu vào cho toàn bộ pipeline ở các tab phía sau."
+                )
 
-    with tab_7d:
-        render_future_forecast_table(horizon_7d, days=len(horizon_7d))
+    with col_stats:
+        with st.expander("📐 Thống kê mô tả (Descriptive Statistics)", expanded=True):
+            # TODO: dán code `df.describe()` / thống kê chi tiết hơn của bạn (ví dụ describe theo
+            # từng địa phương, theo từng lớp nguy cơ ngập...) vào đây.
+            if eda_df.empty:
+                st.info("Chưa có dữ liệu để thống kê.")
+            else:
+                numeric_df = eda_df.select_dtypes(include="number")
+                st.dataframe(numeric_df.describe().T, use_container_width=True)
+                render_chart_discussion(
+                    "Bảng `describe()` cho thấy khoảng giá trị, trung bình và độ lệch chuẩn của từng biến số - "
+                    "cơ sở để phát hiện đơn vị đo bất thường (ví dụ độ ẩm âm, nhiệt độ ngoài khoảng hợp lý) "
+                    "trước khi đưa dữ liệu vào bước tiền xử lý ở Tab 2."
+                )
 
-    with tab_14d:
-        render_future_forecast_table(horizon_14d, days=len(horizon_14d))
+    st.markdown("---")
 
-
-def render_sidebar_info(model, scaler):
-    """Hiển thị thông tin kỹ thuật"""
-    expected_features = get_expected_feature_columns(model, scaler)
-    st.sidebar.subheader("Thông tin hệ thống")
-    st.sidebar.write(f"Số địa phương đang theo dõi: {len(LOCATIONS)}")
-    st.sidebar.info(
-        "App đang dùng bản đồ nhẹ để ưu tiên hiệu năng cho huấn luyện ML/deep learning. "
-        "Routing OSM tạm thời được tách khỏi màn hình chính để tránh lag và crash trình duyệt."
-    )
-    st.sidebar.toggle(
-        "Hiển thị bản đồ nhẹ",
-        value=False,
-        key="show_light_map",
-        help="Để tắt mặc định nhằm giảm tải cho trình duyệt khi tập trung huấn luyện mô hình.",
-    )
-    #st.sidebar.write(f"Số biến đầu vào mô hình: {len(expected_features)}")
-    #st.sidebar.write("Thứ tự biến đầu vào:")
-    #st.sidebar.code(", ".join(expected_features))
-
-    #if RAW_OSM_PATH.exists():
-      #  st.sidebar.info(
-     #       "Đã phát hiện file OSM thô `data/geo/map`, "
-    #        "nhưng app hiện dùng `thuathienhue_districts.geojson` để render ranh giới."
-   #     )
-
-  #  st.sidebar.caption(f"Frontend hiện đọc artifact từ: `{LATEST_MODELS_DIR}`")
-
-def render_training_controls():
-    """Cụm điều khiển MLOps: chọn mô hình và chạy huấn luyện theo yêu cầu."""
-    st.sidebar.markdown("---")
-    with st.sidebar.expander("⚙️ Tùy chọn Huấn luyện AI (MLOps)", expanded=False):
-        training_state = reconcile_training_state()
-        available_models = get_all_model_names()
-        selected_models = st.multiselect(
-            "Chọn mô hình cần huấn luyện",
-            options=available_models,
-            default=available_models,
-            key="selected_training_models",
-        )
-        balancing_method = st.selectbox(
-            "Phương pháp cân bằng dữ liệu",
-            options=["auto", "gan", "smote"],
-            index=0,
-            key="selected_balancing_method",
-        )
-
-        status_label_map = {
-            "idle": "Chưa chạy",
-            "starting": "Đang khởi tạo",
-            "running": "Đang huấn luyện",
-            "completed": "Hoàn tất",
-            "failed": "Thất bại",
+    # ---- Hàng 2: biểu đồ phân phối / tương quan (ảnh tĩnh do eda_analysis.py sinh sẵn) ----
+    with st.expander("📈 Phân phối dữ liệu & Ma trận tương quan (Distribution / Heatmap)", expanded=True):
+        # TODO: đây là placeholder hiển thị ẢNH TĨNH từ `eda_analysis.py` để tránh vẽ lại biểu đồ nặng
+        # mỗi lần Streamlit rerun. Nếu muốn biểu đồ TƯƠNG TÁC, có thể thay bằng `px.imshow()` (heatmap)
+        # hoặc `px.histogram()` (phân phối) ngay trong hàm này.
+        eda_chart_files = {
+            "Ma trận tương quan (Heatmap)": PLOTS_DIR / "correlation_heatmap.png",
+            "Phân bố lớp mục tiêu": PLOTS_DIR / "class_distribution.png",
+            "Xu hướng mưa & tỷ lệ ngập theo tháng": PLOTS_DIR / "monthly_trend.png",
+            "Tỷ lệ ngập theo địa phương": PLOTS_DIR / "flood_share_by_location.png",
+            "Phân bố lượng mưa theo lớp": PLOTS_DIR / "rain_distribution_by_class.png",
+            "Phân bố triều cường theo lớp": PLOTS_DIR / "tide_distribution_by_class.png",
         }
-        st.caption(f"Trạng thái hiện tại: {status_label_map.get(training_state['status'], training_state['status'])}")
-        if training_state.get("selected_models"):
-            st.caption(f"Mô hình đã chọn: {', '.join(training_state['selected_models'])}")
-        if training_state.get("started_at"):
-            st.caption(f"Bắt đầu: {training_state['started_at']}")
-        if training_state.get("finished_at"):
-            st.caption(f"Kết thúc: {training_state['finished_at']}")
-        if training_state.get("best_model_name"):
-            st.success(f"Best model gần nhất: {training_state['best_model_name']}")
-        if training_state.get("error"):
-            st.error(training_state["error"])
-
-        if st.button(
-            "⚠️ Bắt đầu Huấn luyện Nền",
-            key="start_training_button",
-            use_container_width=True,
-            disabled=training_state["status"] in {"starting", "running"},
-        ):
-            try:
-                if not selected_models:
-                    st.warning("Vui lòng chọn ít nhất 1 mô hình trước khi huấn luyện.")
+        chart_columns = st.columns(2)
+        for index, (chart_title, chart_path) in enumerate(eda_chart_files.items()):
+            with chart_columns[index % 2]:
+                st.markdown(f"**{chart_title}**")
+                if chart_path.exists():
+                    st.image(str(chart_path), use_column_width=True)
                 else:
-                    start_background_training(selected_models, balancing_method=balancing_method)
-                    st.success("Đã khởi chạy background training. Bạn có thể tiếp tục dùng app mà không làm dừng tiến trình train.")
-            except Exception as exc:
-                st.error(str(exc))
+                    st.info(f"Chưa có `{chart_path.name}`. Hãy chạy `python eda_analysis.py` để sinh ảnh.")
+        render_chart_discussion(
+            "Các biểu đồ trên tổng hợp quan hệ tương quan giữa các biến, phân phối lớp mục tiêu, xu hướng "
+            "mưa/ngập theo mùa vụ, và tỷ lệ ngập theo địa phương - cung cấp căn cứ định lượng cho khuyến "
+            "nghị quản trị ở Tab 3 (ví dụ: tháng nào, khu vực nào cần ưu tiên nguồn lực phòng chống ngập)."
+        )
 
-        action_col_1, action_col_2 = st.columns(2)
-        if action_col_1.button("Làm mới trạng thái", key="refresh_training_status_button", use_container_width=True):
-            st.info("Đã cập nhật trạng thái train nền.")
-        if action_col_2.button("Nạp artifact mới", key="reload_trained_artifacts_button", use_container_width=True):
-            st.cache_data.clear()
-            st.cache_resource.clear()
-            st.success("Đã xóa cache artifact. App sẽ dùng artifact mới ở lần render hiện tại.")
-
-        training_log_tail = read_training_log_tail()
-        if training_log_tail:
-            st.text_area(
-                "Log huấn luyện gần nhất",
-                value=training_log_tail,
-                height=220,
-                key="training_log_tail_view",
+    # ---- Hàng 3: xử lý giá trị thiếu / ngoại lai ----
+    with st.expander("🧹 Xử lý giá trị thiếu & ngoại lai (Missing Value / Outlier)", expanded=False):
+        # TODO: dán logic phát hiện/xử lý outlier thật của bạn (IQR, Z-score theo từng lớp...) vào đây.
+        if eda_df.empty:
+            st.info("Chưa có dữ liệu để kiểm tra.")
+        else:
+            missing_summary = eda_df.isna().sum().rename("Số lượng thiếu").to_frame()
+            missing_summary["Tỷ lệ thiếu (%)"] = (missing_summary["Số lượng thiếu"] / len(eda_df) * 100).round(2)
+            st.dataframe(missing_summary, use_container_width=True)
+            render_chart_discussion(
+                "Bảng trên thống kê số lượng và tỷ lệ giá trị thiếu theo từng cột - căn cứ để quyết định "
+                "chiến lược xử lý (loại bỏ, nội suy, hay điền giá trị trung vị) ở Tab 2. Với biến ngoại lai "
+                "(outlier), khuyến nghị dùng phương pháp IQR hoặc Z-score TÍNH RIÊNG cho từng lớp nguy cơ ngập, "
+                "vì giá trị mưa/triều cực đoan trong lớp `Ngập nặng` là TÍN HIỆU THẬT có giá trị dự báo, "
+                "không nên loại bỏ nhầm như outlier thông thường."
             )
 
 
-def render_sidebar_controls(df_predictions: pd.DataFrame, df_future: pd.DataFrame):
-    """Bảng điều khiển gọn gàng cho refresh API và tải dữ liệu CSV."""
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🛠️ Bảng Điều Khiển")
-
-    if st.sidebar.button(
-        "☁️ Cập nhật API",
-        key="refresh_weather_forecast_button",
-        use_container_width=True,
-    ):
-        try:
-            st.toast("Đang cập nhật dữ liệu mới...", icon="⏳")
-            st.cache_data.clear()
-            st.cache_resource.clear()
-        except Exception as e:
-            st.error(str(e))
-
-    realtime_csv_data = None
-    future_csv_data = None
-
-    try:
-        realtime_csv_data = df_predictions.to_csv(index=False).encode("utf-8-sig")
-    except Exception as e:
-        st.error(str(e))
-
-    try:
-        future_csv_data = df_future.to_csv(index=False).encode("utf-8-sig")
-    except Exception as e:
-        st.error(str(e))
-
-    if realtime_csv_data is not None:
-        st.sidebar.download_button(
-            label="📥 Tải Bảng Dự báo Hiện tại (CSV)",
-            data=realtime_csv_data,
-            file_name="du_bao_hien_tai.csv",
-            mime="text/csv",
-            key="download_realtime_csv_button",
-            use_container_width=True,
-        )
-
-    if future_csv_data is not None:
-        st.sidebar.download_button(
-            label="📥 Tải Dự báo 14 ngày (CSV)",
-            data=future_csv_data,
-            file_name="du_bao_14_ngay.csv",
-            mime="text/csv",
-            key="download_future_csv_button",
-            use_container_width=True,
-        )
-
-
+# ==================================================================================================
+# TAB 2 - ⚙️ TIỀN XỬ LÝ & HUẤN LUYỆN
+# ==================================================================================================
 def build_ctgan_distribution_dataframe(section_summary: dict | None) -> pd.DataFrame:
     """Chuyển class distribution JSON sang DataFrame gọn cho UI."""
     distribution = (section_summary or {}).get("class_distribution", {})
@@ -2088,14 +630,28 @@ def build_ctgan_distribution_discussion(distribution_df: pd.DataFrame, title: st
     )
 
 
-def render_ctgan_dataset_panel(
-    title: str,
-    subtitle: str,
-    summary: dict | None,
-    dataset_df: pd.DataFrame,
-) -> None:
-    """Render 1 cột dữ liệu trước hoặc sau CTGAN."""
-    st.markdown(f"### {title}")
+@st.cache_data(show_spinner=False)
+def load_ctgan_comparison_artifacts():
+    """Đọc dữ liệu export trước/sau CTGAN (do `analyze_and_train.py` xuất ra) để hiển thị nhanh trên Streamlit."""
+    if not CTGAN_DISTRIBUTION_PATH.exists():
+        return None
+
+    with CTGAN_DISTRIBUTION_PATH.open("r", encoding="utf-8") as file:
+        summary = json.load(file)
+
+    before_df = pd.read_csv(CTGAN_BEFORE_PATH) if CTGAN_BEFORE_PATH.exists() else pd.DataFrame()
+    after_df = pd.read_csv(CTGAN_AFTER_PATH) if CTGAN_AFTER_PATH.exists() else pd.DataFrame()
+
+    return {
+        "summary": summary,
+        "before_df": before_df,
+        "after_df": after_df,
+    }
+
+
+def render_ctgan_dataset_panel(title: str, subtitle: str, summary: dict | None, dataset_df: pd.DataFrame) -> None:
+    """Render 1 cột dữ liệu trước hoặc sau CTGAN (dùng cho cả 2 cột trong `render_ctgan_section`)."""
+    st.markdown(f"#### {title}")
     st.caption(subtitle)
     total_rows = (summary or {}).get("total_rows")
     sample_rows = (summary or {}).get("sample_rows")
@@ -2113,24 +669,20 @@ def render_ctgan_dataset_panel(
     if dataset_df.empty:
         st.info("Chưa có file dữ liệu để hiển thị.")
     else:
-        st.dataframe(dataset_df, use_container_width=True, hide_index=True, height=420)
-        render_chart_discussion(
-            f"Bảng trên hiển thị {len(dataset_df):,} dòng mẫu trong tập **{title.lower()}**, dùng để đối chiếu "
-            "trực quan cấu trúc và giá trị đặc trưng trước/sau khi áp dụng augmentation, hỗ trợ kiểm tra dữ liệu "
-            "tổng hợp có còn hợp lý về mặt vật lý (ví dụ độ ẩm đất, lượng mưa không âm) hay không."
-        )
+        st.dataframe(dataset_df, use_container_width=True, hide_index=True, height=320)
 
 
-def render_ctgan_comparison_page() -> None:
-    """Màn hình so sánh trực quan dữ liệu trước và sau CTGAN."""
-    st.subheader("📊 So sánh dữ liệu CTGAN")
-    st.caption("Trang này đọc các file export từ pipeline huấn luyện để so sánh nhanh dữ liệu trước và sau augmentation.")
-
+def render_ctgan_section() -> None:
+    """
+    Khối 'Cân bằng dữ liệu' bên trong Tab 2: so sánh trực quan dữ liệu TRƯỚC và SAU khi áp dụng CTGAN
+    (hoặc SMOTE fallback) - đây là bước bắt buộc trước khi huấn luyện vì dữ liệu ngập lụt luôn mất cân
+    bằng nặng giữa 3 lớp (An toàn / Ngập nhẹ / Ngập nặng).
+    """
     artifacts = load_ctgan_comparison_artifacts()
     if artifacts is None:
         st.info(
-            "Chưa tìm thấy file export CTGAN. Hãy chạy huấn luyện với CTGAN trong `analyze_and_train.py` "
-            "để tạo `data_before_ctgan.csv`, `data_after_ctgan.csv` và file thống kê phân phối lớp."
+            "Chưa tìm thấy file export CTGAN. Hãy chạy huấn luyện trong `analyze_and_train.py` để tạo "
+            "`data_before_ctgan.csv`, `data_after_ctgan.csv` và file thống kê phân phối lớp."
         )
         return
 
@@ -2161,154 +713,165 @@ def render_ctgan_comparison_page() -> None:
         )
 
 
-@st.cache_data(show_spinner=False)
-def load_daily_rainfall_history(location_csv_name: str) -> pd.DataFrame:
-    file_path = HISTORICAL_DIR / location_csv_name
-    if not file_path.exists():
-        return pd.DataFrame()
-    df = pd.read_csv(file_path)
-    if "Thời_gian" not in df.columns or "Lượng_mưa_mm" not in df.columns:
-        return pd.DataFrame()
-    df["Thời_gian"] = pd.to_datetime(df["Thời_gian"], errors="coerce")
-    df = df.dropna(subset=["Thời_gian"]).sort_values("Thời_gian")
-    df["date"] = df["Thời_gian"].dt.floor("D")
-    df["Lượng_mưa_mm"] = pd.to_numeric(df["Lượng_mưa_mm"], errors="coerce").fillna(0.0)
-    daily = df.groupby("date", as_index=False)["Lượng_mưa_mm"].sum().sort_values("date").reset_index(drop=True)
-    return daily
+def render_training_controls_panel() -> None:
+    """
+    Cụm điều khiển MLOps: chọn mô hình, chạy huấn luyện/tinh chỉnh NỀN (background) và xem log.
+    Đặt ngay trong Tab 2 (thay vì giấu trong sidebar như trước) vì đây chính là hành động trung tâm
+    của bước "Huấn luyện" trong pipeline, nên cần hiển thị rõ ràng ở khu vực nội dung chính.
+    """
+    training_state = reconcile_training_state()
+    available_models = get_all_model_names()
 
-
-def get_chronos_module():
-    import importlib
-    import sys
-
-    base_dir_str = str(BASE_DIR)
-    if base_dir_str not in sys.path:
-        sys.path.insert(0, base_dir_str)
-
-    return importlib.import_module("chronos_predictor")
-
-
-def render_chronos_llm_page() -> None:
-    st.subheader("🔮 Dự báo Nâng cao (Chronos LLM)")
-    st.markdown(
-        "Trang này sử dụng Amazon Time Series Foundation Model `amazon/chronos-t5-mini` theo chế độ Zero-shot "
-        "(không fine-tune, không huấn luyện). Model chạy trên CPU nên thời gian suy luận có thể chậm hơn ML truyền thống."
-    )
-
-    location_options = {
-        "TP Huế": "TP_Hue_10years.csv",
-        "Hương Thủy": "Huong_Thuy_10years.csv",
-        "Phú Vang": "Phu_Vang_10years.csv",
-        "Hương Trà": "Huong_Tra_10years.csv",
-        "Quảng Điền": "Quang_Dien_10years.csv",
-    }
-    selected_location = st.selectbox(
-        "Chọn khu vực (dùng lịch sử mưa để dự báo)",
-        options=list(location_options.keys()),
-        index=0,
-        key="chronos_location_select",
-    )
-    prediction_length = st.slider("Số ngày dự báo", min_value=3, max_value=14, value=7, step=1)
-    light_threshold = st.number_input("Ngưỡng Ngập nhẹ (mm/ngày)", min_value=0.0, value=25.0, step=1.0)
-    heavy_threshold = st.number_input("Ngưỡng Ngập nặng (mm/ngày)", min_value=0.0, value=50.0, step=1.0)
-
-    daily_history = load_daily_rainfall_history(location_options[selected_location])
-    if daily_history.empty:
-        st.warning("Chưa có dữ liệu lịch sử để chạy Chronos. Hãy chạy `fetch_data.py` trước.")
-        return
-
-    st.caption(f"Dữ liệu lịch sử theo ngày: {len(daily_history)} dòng")
-    history_context_df = daily_history.tail(30).copy()
-
-    if st.button("Tạo dự báo 7 ngày tới" if prediction_length == 7 else f"Tạo dự báo {prediction_length} ngày tới", key="chronos_generate_button"):
-        try:
-            chronos_module = get_chronos_module()
-        except Exception as exc:
-            st.error("Không thể nạp Chronos module/dependencies.")
-            st.exception(exc)
-            return
-
-        with st.spinner("Đang chạy Chronos Zero-shot inference trên CPU..."):
+    control_col, status_col = st.columns([1.3, 1])
+    with control_col:
+        selected_models = st.multiselect(
+            "Chọn mô hình cần huấn luyện / tinh chỉnh",
+            options=available_models,
+            default=available_models,
+            key="selected_training_models",
+        )
+        balancing_method = st.selectbox(
+            "Phương pháp cân bằng dữ liệu",
+            options=["auto", "gan", "smote"],
+            index=0,
+            key="selected_balancing_method",
+            help="'auto' ưu tiên CTGAN, tự fallback sang SMOTE nếu thiếu thư viện hoặc lỗi khi chạy.",
+        )
+        if st.button(
+            "⚠️ Bắt đầu Huấn luyện Nền",
+            key="start_training_button",
+            use_container_width=True,
+            disabled=training_state["status"] in {"starting", "running"},
+        ):
             try:
-                raw_hourly = pd.read_csv(HISTORICAL_DIR / location_options[selected_location])
-                result = chronos_module.run_chronos_forecast(
-                    raw_hourly,
-                    prediction_length=int(prediction_length),
-                    value_column="Lượng_mưa_mm",
-                    time_column="Thời_gian",
-                    light_threshold=float(light_threshold),
-                    heavy_threshold=float(heavy_threshold),
-                )
-                plot_df = chronos_module.chronos_result_to_plotly_frame(result)
+                if not selected_models:
+                    st.warning("Vui lòng chọn ít nhất 1 mô hình trước khi huấn luyện.")
+                else:
+                    start_background_training(selected_models, balancing_method=balancing_method)
+                    st.success("Đã khởi chạy background training - có thể tiếp tục dùng app trong lúc chờ.")
             except Exception as exc:
-                st.error("Chronos inference thất bại.")
-                st.exception(exc)
-                return
+                st.error(str(exc))
 
-        import plotly.graph_objects as go
+    with status_col:
+        status_label_map = {
+            "idle": "Chưa chạy",
+            "starting": "Đang khởi tạo",
+            "running": "Đang huấn luyện",
+            "completed": "Hoàn tất",
+            "failed": "Thất bại",
+        }
+        st.metric("Trạng thái", status_label_map.get(training_state["status"], training_state["status"]))
+        if training_state.get("best_model_name"):
+            st.success(f"Best model gần nhất: {training_state['best_model_name']}")
+        if training_state.get("error"):
+            st.error(training_state["error"])
+        if st.button("🔄 Nạp lại artifact mới nhất", key="reload_trained_artifacts_button", use_container_width=True):
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            st.success("Đã xóa cache - dữ liệu/metrics sẽ được nạp lại ở lần chạy tiếp theo.")
 
-        fig = go.Figure()
-        fig.add_trace(
-            go.Scatter(
-                x=plot_df.loc[plot_df["segment"] == "history", "date"],
-                y=plot_df.loc[plot_df["segment"] == "history", "value"],
-                mode="lines",
-                name="Lịch sử (30 ngày)",
-                line=dict(color="#60a5fa", width=3),
+    training_log_tail = read_training_log_tail()
+    if training_log_tail:
+        st.text_area(
+            "Log huấn luyện / tinh chỉnh gần nhất",
+            value=training_log_tail,
+            height=220,
+            key="training_log_tail_view",
+        )
+    else:
+        st.caption("Chưa có log huấn luyện nào - log sẽ xuất hiện tại đây sau khi bấm 'Bắt đầu Huấn luyện Nền'.")
+
+
+def render_preprocessing_training_tab() -> None:
+    """
+    Nội dung Tab 2 - Tiền xử lý & Huấn luyện, bước THỨ HAI của vòng đời Data Science.
+    Bố cục: 2 cột song song (Dữ liệu đã làm sạch | Chia Train/Test) phía trên, tiếp theo là khối
+    Cân bằng dữ liệu (CTGAN) và khối Log Tinh chỉnh siêu tham số - mỗi khối 1 `st.expander`.
+    """
+    st.subheader("⚙️ Tiền xử lý & Huấn luyện")
+    st.caption(
+        "Bước 2/4 của pipeline: làm sạch dữ liệu, chia tập train/test đúng đặc thù chuỗi thời gian, "
+        "cân bằng lớp thiểu số, và tinh chỉnh siêu tham số (Optuna / GridSearchCV)."
+    )
+
+    col_clean, col_split = st.columns(2)
+
+    with col_clean:
+        with st.expander("🧼 Dữ liệu đã làm sạch (Cleaned Data)", expanded=True):
+            # TODO: dán code hiển thị dữ liệu SAU khi qua preprocess_data()/preprocess_features()
+            # (xem `analyze_and_train.py`) vào đây, ví dụ: st.dataframe(cleaned_df.head(20)).
+            st.info(
+                "Placeholder: hiển thị `df.head()` của dữ liệu SAU khi xử lý missing values, ép kiểu dữ liệu, "
+                "và tạo lại nhãn 3 lớp theo rule-based (xem hàm `preprocess_data()` trong `analyze_and_train.py`)."
             )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=plot_df.loc[plot_df["segment"] == "forecast", "date"],
-                y=plot_df.loc[plot_df["segment"] == "forecast", "value"],
-                mode="lines+markers",
-                name="Dự báo (Chronos)",
-                line=dict(color="#f59e0b", width=3, dash="dash"),
+            st.code(
+                "# Ví dụ dán code thật của bạn vào đây:\n"
+                "# from analyze_and_train import load_and_concatenate_csvs, preprocess_features\n"
+                "# raw_df = load_and_concatenate_csvs()\n"
+                "# cleaned_df = preprocess_features(raw_df)\n"
+                "# st.dataframe(cleaned_df.head(20))",
+                language="python",
             )
-        )
-        fig.add_hline(y=float(light_threshold), line_width=2, line_dash="dot", line_color="#fb7185")
-        fig.add_hline(y=float(heavy_threshold), line_width=2, line_dash="dot", line_color="#ef4444")
-        fig.update_layout(
-            title=f"Chronos forecast - {selected_location}",
-            xaxis_title="Ngày",
-            yaxis_title="Lượng mưa (mm/ngày)",
-            margin=dict(l=10, r=10, t=50, b=10),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        )
-        st.plotly_chart(fig, use_container_width=True)
 
-        max_forecast_index = int(pd.Series(result.forecast_values).idxmax())
-        peak_day = result.forecast_dates[max_forecast_index]
-        peak_value = float(result.forecast_values[max_forecast_index])
-        risk_days = sum(1 for label in result.forecast_labels if int(label) > 0)
-        render_chart_discussion(
-            f"Theo dự báo Zero-shot của Chronos, lượng mưa cao nhất trong {prediction_length} ngày tới tại "
-            f"**{selected_location}** rơi vào ngày **{peak_day}** với khoảng {peak_value:.2f} mm/ngày. "
-            f"Có {risk_days}/{prediction_length} ngày được gắn nhãn cảnh báo (vượt ngưỡng ngập nhẹ/nặng đã thiết lập). "
-            "Do đây là mô hình foundation model chạy zero-shot (không huấn luyện lại trên dữ liệu Huế), kết quả nên "
-            "được dùng như tín hiệu tham khảo bổ sung, đối chiếu với mô hình ML chính ở trang Tổng quan trước khi "
-            "ra quyết định vận hành."
+    with col_split:
+        with st.expander("✂️ Chia tập Train / Test (Data Splitting)", expanded=True):
+            st.markdown(
+                "- **Tỷ lệ chia**: 80% Train / 20% Test.\n"
+                "- **Phương pháp**: chia theo MỐC THỜI GIAN (`shuffle=False`) - tập Test luôn nằm SAU "
+                "tập Train, không chia ngẫu nhiên.\n"
+            )
+            # QUAN TRỌNG - GIẢI THÍCH KỸ THUẬT DÙNG CHO PHẦN BẢO VỆ LUẬN VĂN:
+            # Với dữ liệu chuỗi thời gian, TUYỆT ĐỐI không dùng train_test_split(shuffle=True) hay K-Fold
+            # thông thường, vì sẽ để lọt thông tin TƯƠNG LAI vào tập huấn luyện (data leakage), khiến độ
+            # chính xác đánh giá bị "ảo" (cao hơn thực tế khi triển khai thật). Thay vào đó nên dùng
+            # `sklearn.model_selection.TimeSeriesSplit` - một dạng cross-validation walk-forward: mỗi fold
+            # sau luôn dùng NHIỀU dữ liệu quá khứ hơn để dự báo một đoạn TƯƠNG LAI kế tiếp, đảm bảo mọi lần
+            # đánh giá đều mô phỏng đúng bối cảnh "chỉ biết quá khứ, dự báo tương lai" như khi vận hành thực tế.
+            st.code(
+                "from sklearn.model_selection import TimeSeriesSplit\n\n"
+                "# TimeSeriesSplit đảm bảo không rò rỉ dữ liệu tương lai (data leakage) vào tập huấn luyện\n"
+                "splitter = TimeSeriesSplit(n_splits=5)\n"
+                "for train_idx, test_idx in splitter.split(X):\n"
+                "    X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]\n"
+                "    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]\n"
+                "    # TODO: fit/evaluate mô hình cho từng fold tại đây",
+                language="python",
+            )
+            render_chart_discussion(
+                "TimeSeriesSplit khác K-Fold thông thường ở chỗ nó KHÔNG xáo trộn dữ liệu - đảm bảo mọi "
+                "lần đánh giá đều mô phỏng đúng bối cảnh dự báo thực tế (chỉ dùng dữ liệu quá khứ để dự "
+                "báo tương lai), tránh đánh giá bị 'ảo' do rò rỉ thông tin tương lai."
+            )
+
+    st.markdown("---")
+
+    with st.expander("⚖️ Cân bằng dữ liệu (CTGAN Before / After)", expanded=False):
+        st.caption(
+            "Đọc file export từ `analyze_and_train.py` để so sánh dữ liệu trước/sau khi cân bằng lớp "
+            "thiểu số bằng CTGAN (tự fallback sang SMOTE nếu cần)."
         )
+        render_ctgan_section()
 
-        forecast_table = pd.DataFrame(
-            {
-                "Ngày": result.forecast_dates,
-                "Mưa dự báo (mm)": result.forecast_values,
-                "Nhãn dự báo": result.forecast_labels,
-            }
+    with st.expander("🎯 Log Tinh chỉnh Siêu tham số (Optuna / GridSearchCV)", expanded=True):
+        # TODO: dán code hiển thị log/kết quả thật từ Optuna Study hoặc GridSearchCV.cv_results_ vào đây,
+        # ví dụ: st.dataframe(study.trials_dataframe()) hoặc st.dataframe(pd.DataFrame(grid_search.cv_results_)).
+        # Xem file `hyperparameter_tuning.py` (hàm tune_random_forest_gridsearch / tune_xgboost_optuna /
+        # tune_lstm_optuna) để lấy code tuning đầy đủ - GridSearchCV phù hợp cho Random Forest vì không
+        # gian tham số nhỏ, rời rạc; Optuna phù hợp cho XGBoost/LSTM vì không gian tham số lớn, liên tục
+        # và có yếu tố kiến trúc (số lớp/số unit của LSTM) mà GridSearchCV không biểu diễn hiệu quả được.
+        st.info(
+            "Placeholder: dán bảng log/kết quả tuning thật (Optuna `trials_dataframe()` hoặc "
+            "`GridSearchCV.cv_results_`) tại đây. Bên dưới là cụm điều khiển MLOps thật, dùng để "
+            "khởi chạy huấn luyện nền và xem log ngay trong ứng dụng."
         )
-        st.dataframe(forecast_table, use_container_width=True, hide_index=True, height=260)
-        render_chart_discussion(
-            f"Bảng chi tiết cho thấy đầy đủ {len(forecast_table)} ngày dự báo cùng lượng mưa và nhãn cảnh báo tương ứng "
-            "(so với hai ngưỡng Ngập nhẹ/Ngập nặng đã cấu hình phía trên), phục vụ việc tra cứu số liệu chính xác cho "
-            "từng ngày thay vì chỉ đọc xu hướng trên biểu đồ."
-        )
+        render_training_controls_panel()
 
 
-def render_model_metrics(evaluation_metrics, runtime_info):
-    """Hiển thị bảng số liệu, biểu đồ Plotly và ảnh artifact đánh giá mô hình."""
-    st.subheader("Model Evaluation Metrics")
-
+# ==================================================================================================
+# TAB 3 - 📈 ĐÁNH GIÁ MÔ HÌNH
+# ==================================================================================================
+def render_model_metrics(evaluation_metrics, runtime_info) -> None:
+    """Hiển thị bảng số liệu, biểu đồ Plotly và ảnh artifact đánh giá mô hình (Model Comparison Metrics)."""
     if not evaluation_metrics:
         st.info("Chưa có evaluation metrics để hiển thị.")
         return
@@ -2332,9 +895,7 @@ def render_model_metrics(evaluation_metrics, runtime_info):
         st.info("Không có dữ liệu metrics hợp lệ để hiển thị.")
         return
 
-    metrics_df = metrics_df.sort_values(
-        by="F1 (Macro)", ascending=False
-    ).reset_index(drop=True)
+    metrics_df = metrics_df.sort_values(by="F1 (Macro)", ascending=False).reset_index(drop=True)
     render_styled_table(
         build_contrast_styler(
             metrics_df,
@@ -2379,9 +940,8 @@ def render_model_metrics(evaluation_metrics, runtime_info):
     st.plotly_chart(fig_f1, use_container_width=True)
     render_chart_discussion(
         f"Biểu đồ xếp hạng toàn bộ mô hình theo F1-Score cho thấy nhóm mô hình dẫn đầu tách biệt khá rõ so với "
-        f"nhóm cuối bảng. Mô hình `{best_metrics_row['Model']}` hiện đang được chọn làm mô hình phục vụ dự báo "
-        "thời gian thực trên dashboard, đảm bảo cân bằng tốt nhất giữa khả năng phát hiện đúng các trường hợp "
-        "ngập (Recall) và hạn chế cảnh báo sai (Precision)."
+        f"nhóm cuối bảng. Mô hình `{best_metrics_row['Model']}` hiện đang được chọn làm best model, đảm bảo cân "
+        "bằng tốt nhất giữa khả năng phát hiện đúng các trường hợp ngập (Recall) và hạn chế cảnh báo sai (Precision)."
     )
 
     st.markdown("### Top 5 mô hình: Accuracy / Precision / Recall")
@@ -2426,14 +986,14 @@ def render_model_metrics(evaluation_metrics, runtime_info):
     with image_col_1:
         st.markdown("**Confusion Matrix**")
         if confusion_matrix_path.exists():
-            st.image(str(confusion_matrix_path), use_container_width=True)
+            st.image(str(confusion_matrix_path), use_column_width=True)
         else:
             st.info("Chưa có ảnh `confusion_matrix.png` trong `models/latest/`.")
 
     with image_col_2:
         st.markdown("**Feature Importance**")
         if feature_importance_path.exists():
-            st.image(str(feature_importance_path), use_container_width=True)
+            st.image(str(feature_importance_path), use_column_width=True)
         else:
             st.info("Chưa có ảnh `feature_importance.png` trong `models/latest/`.")
 
@@ -2442,8 +1002,7 @@ def render_model_metrics(evaluation_metrics, runtime_info):
             "Confusion Matrix cho biết mô hình đang nhầm lẫn giữa lớp nào với lớp nào nhiều nhất — cần đặc biệt "
             "lưu ý nếu các trường hợp `Ngập nặng` bị dự đoán nhầm thành `An toàn` hoặc `Ngập nhẹ`, vì đây là loại "
             "sai số nguy hiểm nhất trong bài toán cảnh báo. Feature Importance cho thấy biến khí tượng - thủy văn "
-            "nào (mưa, độ ẩm đất, triều cường...) đóng góp nhiều nhất vào quyết định của mô hình; những biến có "
-            "trọng số cao nên được ưu tiên thu thập chính xác và giám sát liên tục để đảm bảo chất lượng dự báo."
+            "nào (mưa, độ ẩm đất, triều cường...) đóng góp nhiều nhất vào quyết định của mô hình."
         )
 
     st.caption(
@@ -2475,11 +1034,7 @@ def render_model_metrics(evaluation_metrics, runtime_info):
     import plotly.graph_objects as go
 
     class_name_map = roc_payload.get("class_names", {})
-    class_label_vi = {
-        "0": "Không ngập",
-        "1": "Ngập nhẹ",
-        "2": "Ngập nặng",
-    }
+    class_label_vi = {"0": "Không ngập", "1": "Ngập nhẹ", "2": "Ngập nặng"}
     curves = roc_payload.get("curves", {})
     model_name = roc_payload.get("model_name", "Best Model")
 
@@ -2539,14 +1094,56 @@ def render_model_metrics(evaluation_metrics, runtime_info):
             f"Đường cong ROC cho thấy mô hình phân biệt tốt nhất lớp `{best_class_label}` với AUC = "
             f"{auc_by_class[best_class_key]:.4f} (càng gần 1 càng tốt), trong khi lớp `{worst_class_label}` có AUC "
             f"thấp nhất, khoảng {auc_by_class[worst_class_key]:.4f}. Nếu lớp `Ngập nặng` có AUC thấp, đây là tín hiệu "
-            "cần bổ sung thêm dữ liệu ngập nặng (qua CTGAN/SMOTE) hoặc tinh chỉnh ngưỡng cảnh báo, vì đây là lớp có "
-            "hậu quả nghiêm trọng nhất nếu bị bỏ sót."
+            "cần bổ sung thêm dữ liệu ngập nặng (qua CTGAN/SMOTE) hoặc tinh chỉnh ngưỡng cảnh báo."
         )
 
 
-# =================================================================================================
-# SMART ROUTING - CHỈ ĐƯỜNG NÉ VÙNG NGẬP BẰNG TOMTOM ROUTING API
-# =================================================================================================
+def render_evaluation_tab() -> None:
+    """
+    Nội dung Tab 3 - Đánh giá Mô hình, bước THỨ BA của vòng đời Data Science.
+    Bố cục: khối so sánh chỉ số (tái sử dụng `render_model_metrics`) rồi đến khối "Kết luận quản trị" -
+    phần bắt buộc phải có để nối kết quả kỹ thuật với ý nghĩa thực tiễn cho người ra quyết định.
+    """
+    st.subheader("📈 Đánh giá Mô hình")
+    st.caption("Bước 3/4 của pipeline: so sánh hiệu năng các mô hình đã huấn luyện và rút ra khuyến nghị quản trị.")
+
+    try:
+        evaluation_metrics, runtime_info = load_evaluation_artifacts()
+    except Exception as exc:
+        st.warning(
+            f"❌ Chưa thể nạp evaluation metrics: {exc} "
+            "Hãy khởi chạy huấn luyện ở Tab 2 (⚙️ Tiền xử lý & Huấn luyện) trước."
+        )
+        return
+
+    with st.expander("📊 So sánh chỉ số mô hình (F1-Score / Precision / Recall)", expanded=True):
+        render_model_metrics(evaluation_metrics, runtime_info)
+
+    with st.expander("🏛️ Nhận định & Kết luận quản trị (Managerial Insights)", expanded=True):
+        # TODO: thay nội dung placeholder này bằng nhận định THẬT rút ra từ kết quả mô hình + EDA (Tab 1)
+        # của bạn - đây là phần quan trọng nhất khi bảo vệ luận văn vì nối kết quả kỹ thuật với hành động
+        # quản trị thực tế, không chỉ dừng lại ở con số.
+        st.markdown(
+            """
+            **Gợi ý cấu trúc phần Kết luận quản trị (điền số liệu thật của bạn vào đây):**
+
+            1. **Hiệu năng mô hình đề xuất triển khai** — nêu tên mô hình tốt nhất, F1-macro, và lý do
+               chọn (cân bằng Precision/Recall, ưu tiên Recall cho lớp `Ngập nặng` vì bỏ sót nguy hiểm
+               hơn cảnh báo dư).
+            2. **Khu vực ưu tiên** — dựa trên EDA ở Tab 1 (`flood_share_by_location.png`), địa phương nào
+               có tần suất ngập cao nhất cần được ưu tiên đầu tư trạm quan trắc / lực lượng ứng trực.
+            3. **Thời điểm ưu tiên** — dựa trên `monthly_trend.png`, giai đoạn nào trong năm cần tăng
+               cường giám sát và chuẩn bị phương án sơ tán.
+            4. **Rủi ro còn tồn đọng** — nêu giới hạn của mô hình (ví dụ AUC lớp `Ngập nặng` thấp do
+               thiếu dữ liệu) và đề xuất hướng khắc phục (thu thập thêm dữ liệu, cải thiện CTGAN,
+               dùng `hyperparameter_tuning.py` để tinh chỉnh sâu hơn).
+            """
+        )
+
+
+# ==================================================================================================
+# TAB 4 - 🗺️ BẢN ĐỒ TRÁNH NGẬP (Smart Routing bằng TomTom Routing API)
+# ==================================================================================================
 def polygon_to_bounding_rectangle(polygon_points: list[tuple[float, float]]) -> dict:
     """
     Quy đổi 1 polygon (danh sách điểm lat/lon khoanh vùng ngập) thành 1 hình chữ nhật bao ngoài
@@ -2569,6 +1166,17 @@ def polygon_to_bounding_rectangle(polygon_points: list[tuple[float, float]]) -> 
     }
 
 
+def _haversine_distance_km(point_a: tuple[float, float], point_b: tuple[float, float]) -> float:
+    """Tính khoảng cách đường chim bay (km) giữa 2 điểm lat/lon - chỉ dùng để hiển thị ước lượng
+    khi nhánh tiết kiệm API bỏ qua việc gọi TomTom (xem `fetch_tomtom_route`)."""
+    lat1, lon1 = math.radians(point_a[0]), math.radians(point_a[1])
+    lat2, lon2 = math.radians(point_b[0]), math.radians(point_b[1])
+    delta_lat = lat2 - lat1
+    delta_lon = lon2 - lon1
+    haversine_a = math.sin(delta_lat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
+    return 6371.0 * 2 * math.asin(math.sqrt(haversine_a))
+
+
 def fetch_tomtom_route(
     start_point: tuple[float, float],
     end_point: tuple[float, float],
@@ -2588,16 +1196,14 @@ def fetch_tomtom_route(
         bằng phương thức POST kèm body `avoidAreas` để tính đường vòng né ngập.
       - NẾU `flooded_polygons` RỖNG: không có vùng ngập nào cần né -> KHÔNG gọi API TomTom nữa
         (tiết kiệm 100% chi phí lượt gọi đó), chỉ vẽ một đường thẳng minh họa nối 2 điểm và báo
-        thành công cho người dùng. Đây là lựa chọn có chủ đích cho bản demo: trong hệ thống thực tế
-        vận hành lâu dài, có thể đổi lại thành 1 lệnh GET định tuyến thường (không avoidAreas) nếu
-        vẫn muốn có tuyến đường bám theo mạng lưới đường thật ngay cả khi không có ngập.
+        thành công cho người dùng.
 
     TẠI SAO CHỌN `travelMode=motorcycle`?
     Đối tượng phục vụ chính của hệ thống cảnh báo là NGƯỜI DÂN VÀ LỰC LƯỢNG CỨU HỘ tại Huế - phương
     tiện di chuyển phổ biến nhất trong đô thị Việt Nam khi có ngập cục bộ là XE MÁY, không phải ô tô.
     Xe máy có khả năng len lỏi qua các tuyến đường nhỏ/hẻm mà ô tô (`car`) không đi được, đồng thời
-    vẫn cần né vùng ngập sâu (khác với đi bộ `pedestrian` - không tối ưu về thời gian di chuyển
-    trong tình huống khẩn cấp). Vì vậy `motorcycle` là travel mode sát với bài toán thực tế nhất.
+    vẫn cần né vùng ngập sâu (khác với đi bộ `pedestrian` - không tối ưu về thời gian di chuyển trong
+    tình huống khẩn cấp). Vì vậy `motorcycle` là travel mode sát với bài toán thực tế nhất.
 
     Trả về dict:
         {"success": bool, "route_points": [(lat, lon), ...], "distance_km": float,
@@ -2665,24 +1271,13 @@ def fetch_tomtom_route(
         }
 
 
-def _haversine_distance_km(point_a: tuple[float, float], point_b: tuple[float, float]) -> float:
-    """Tính khoảng cách đường chim bay (km) giữa 2 điểm lat/lon - chỉ dùng để hiển thị ước lượng
-    khi nhánh tiết kiệm API bỏ qua việc gọi TomTom (xem `fetch_tomtom_route`)."""
-    lat1, lon1 = math.radians(point_a[0]), math.radians(point_a[1])
-    lat2, lon2 = math.radians(point_b[0]), math.radians(point_b[1])
-    delta_lat = lat2 - lat1
-    delta_lon = lon2 - lon1
-    haversine_a = math.sin(delta_lat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
-    return 6371.0 * 2 * math.asin(math.sqrt(haversine_a))
-
-
 def build_smart_routing_map(
     start_point: tuple[float, float],
     end_point: tuple[float, float],
     flooded_polygons: list,
     route_points: list | None,
 ) -> folium.Map:
-    """Dựng bản đồ Folium: marker điểm đi/đến, vùng ngập tô ĐỎ, tuyến đường an toàn vẽ XANH DƯƠNG."""
+    """Dựng bản đồ Folium: marker điểm đi/đến, vùng ngập tô ĐỎ, tuyến đường di chuyển vẽ XANH DƯƠNG."""
     center_lat = (start_point[0] + end_point[0]) / 2
     center_lon = (start_point[1] + end_point[1]) / 2
     routing_map = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="OpenStreetMap")
@@ -2724,11 +1319,15 @@ def build_smart_routing_map(
 
 
 def render_smart_routing_tab() -> None:
-    """Render toàn bộ nội dung tab '🗺️ Bản đồ Chỉ đường Tránh ngập'."""
-    st.subheader("🗺️ Bản đồ Chỉ đường Thông minh - Né khu vực ngập")
+    """
+    Nội dung Tab 4 - Bản đồ Tránh ngập, bước THỨ TƯ (sản phẩm ứng dụng thực tế) của pipeline.
+    Bố cục: cụm điều khiển (checkbox mô phỏng + nút tìm đường) đặt CĂN GIỮA bằng `st.columns([1,2,1])`,
+    bản đồ Folium đặt CĂN GIỮA rộng hơn bằng `st.columns([1,6,1])` để cân đối với phần điều khiển.
+    """
+    st.subheader("🗺️ Bản đồ Tránh ngập")
     st.caption(
-        "Sử dụng TomTom Routing API (travelMode=motorcycle) để tính tuyến đường phù hợp cho xe máy, "
-        "tự động né các khu vực đang ngập khi có cảnh báo."
+        "Bước 4/4 của pipeline: ứng dụng thực tế của mô hình - dùng TomTom Routing API "
+        "(travelMode=motorcycle) để tính tuyến đường phù hợp cho xe máy, tự động né các khu vực đang ngập."
     )
 
     # ---- Cụm điều khiển đặt CĂN GIỮA bằng bố cục 3 cột (cột giữa rộng hơn 2 cột biên) ----
@@ -2789,134 +1388,61 @@ def render_smart_routing_tab() -> None:
         st_folium(smart_map, width=1000, height=600)
 
 
+# ==================================================================================================
+# SIDEBAR & ĐIỂM VÀO CHÍNH
+# ==================================================================================================
+def render_sidebar() -> None:
+    """Sidebar tối giản: giới thiệu nhanh 4 bước pipeline + nút làm mới cache toàn cục."""
+    st.sidebar.markdown("## 🌊 Flood Prediction Pipeline")
+    st.sidebar.caption("Đồ án Thạc sĩ - Dự báo & Cảnh báo Ngập lụt Thừa Thiên Huế")
+    st.sidebar.markdown(
+        "1. 📊 Khám phá Dữ liệu (EDA)\n"
+        "2. ⚙️ Tiền xử lý & Huấn luyện\n"
+        "3. 📈 Đánh giá Mô hình\n"
+        "4. 🗺️ Bản đồ Tránh ngập\n"
+    )
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🔄 Làm mới toàn bộ cache", key="clear_all_cache_button", use_container_width=True):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.sidebar.success("Đã xóa cache - dữ liệu sẽ được nạp lại ở lần chạy tiếp theo.")
+
+
 def main():
-    """Điểm vào chính của ứng dụng."""
+    """Điểm vào chính của ứng dụng - 4 tab bám sát đúng vòng đời Data Science (Data Science Lifecycle)."""
     apply_global_ui_theme()
-    st.title("🌊 Hệ thống Dự báo Ngập lụt tại Thành phố Huế")
+    render_sidebar()
+
+    st.title("🌊 Hệ thống Dự báo Ngập lụt Thừa Thiên Huế")
+    st.caption(
+        "Pipeline: Khám phá dữ liệu → Tiền xử lý & Huấn luyện → Đánh giá mô hình → Bản đồ chỉ đường tránh ngập."
+    )
     st.markdown("---")
-    selected_menu = render_navigation_menu()
-
-    if selected_menu == "🌊 Tổng quan dự báo" and st_autorefresh is not None:
-        st_autorefresh(interval=AUTO_REFRESH_INTERVAL_MS, key="dashboard_autorefresh_60_minutes")
-
-    if selected_menu == "📊 So sánh dữ liệu CTGAN":
-        render_training_controls()
-        render_ctgan_comparison_page()
-        return
-    if selected_menu == "🔮 Dự báo Nâng cao (Chronos LLM)":
-        render_training_controls()
-        render_chronos_llm_page()
-        return
-
-    try:
-        model, scaler, evaluation_metrics, runtime_info = load_runtime_artifacts()
-    except Exception as exc:
-        render_training_controls()
-        st.warning(
-            f"❌ Chưa thể nạp artifact mô hình: {exc} "
-            "Bạn có thể khởi chạy background training từ sidebar rồi bấm `Nạp artifact mới` sau khi train xong."
-        )
-        return
-
-    df_predictions = get_realtime_prediction(model, scaler)
-    df_future = get_future_predictions(model, scaler, forecast_days=14)
-    current_update_time = get_processing_timestamp_display()
-    # Các cụm điều khiển sidebar KHÔNG đặt trong tab vì Streamlit luôn hiển thị sidebar cố định,
-    # bất kể người dùng đang xem tab nào ở khu vực nội dung chính.
-    render_sidebar_info(model, scaler)
-    render_tomorrow_nowcasting()
-    render_stormglass_tide_sidebar()
-    render_training_controls()
-    render_sidebar_controls(df_predictions, df_future)
 
     # ------------------------------------------------------------------------------------------
-    # BỐ CỤC TOÀN TRANG BẰNG st.tabs: tách riêng khu vực Dashboard (số liệu/biểu đồ) và khu vực
-    # Bản đồ chỉ đường, giúp mỗi màn hình gọn gàng, không bị dồn hết nội dung xuống một trang dài.
+    # BỐ CỤC TOÀN TRANG BẰNG st.tabs: 4 tab bám sát đúng vòng đời Data Science, giúp người xem
+    # (giảng viên/hội đồng) theo dõi mạch pipeline từ dữ liệu thô đến sản phẩm ứng dụng thực tế,
+    # thay vì một trang dashboard vận hành dài dòng, khó tách bạch từng giai đoạn.
     # ------------------------------------------------------------------------------------------
-    tab1, tab2 = st.tabs(["📊 Tổng quan Dự báo", "🗺️ Bản đồ Chỉ đường Tránh ngập"])
+    tab_eda, tab_train, tab_eval, tab_map = st.tabs(
+        [
+            "📊 Khám phá Dữ liệu (EDA)",
+            "⚙️ Tiền xử lý & Huấn luyện",
+            "📈 Đánh giá Mô hình",
+            "🗺️ Bản đồ Tránh ngập",
+        ]
+    )
 
-    with tab1:
-        # Banner cảnh báo realtime luôn đặt NGOÀI expander vì đây là thông tin quan trọng nhất,
-        # cần đập vào mắt người dùng ngay khi mở tab, không nên bị ẩn phía sau một cú click.
-        render_realtime_flood_warning_section(model, scaler)
+    with tab_eda:
+        render_eda_tab()
 
-        # Cụm "Bản đồ + Bảng dự báo" là nội dung chính, đặt ở 2 cột ngay dưới banner cảnh báo.
-        map_col, table_col = st.columns([2.1, 1.2])
-        with map_col:
-            render_map_panel(df_predictions, current_update_time)
-        with table_col:
-            st.subheader("📊 Bảng dữ liệu Dự báo trực tuyến")
-            st.caption(f"🕒 Dữ liệu cập nhật lúc: {current_update_time}")
-            render_prediction_table(df_predictions)
-            with st.expander(
-                "🔍 Đối chiếu sự thật nền (Ground Truth Validation with NOAA CDO)",
-                expanded=False,
-            ):
-                st.caption("NOAA CDO test")
-                if st.button(
-                    "Khởi chạy luồng kiểm chứng NOAA",
-                    key="run_noaa_ground_truth_validation",
-                    use_container_width=True,
-                ):
-                    st.session_state["run_noaa_validation"] = True
+    with tab_train:
+        render_preprocessing_training_tab()
 
-                if st.session_state.get("run_noaa_validation", False):
-                    with st.spinner("Đang kết nối vệ tinh NOAA..."):
-                        validation_df = render_cross_validation_table(df_predictions)
-                        st.session_state["noaa_validation_df"] = validation_df
-                        st.session_state["run_noaa_validation"] = False
+    with tab_eval:
+        render_evaluation_tab()
 
-                if "noaa_validation_df" in st.session_state:
-                    noaa_validation_df = st.session_state["noaa_validation_df"]
-                    render_styled_table(
-                        build_contrast_styler(
-                            noaa_validation_df,
-                            confidence_column="Độ tin cậy",
-                        ),
-                        height=280,
-                    )
-                    if not noaa_validation_df.empty:
-                        low_confidence_df = noaa_validation_df[
-                            noaa_validation_df["Độ tin cậy"] == "🔴 Thấp"
-                        ]
-                        render_chart_discussion(
-                            f"Có {len(low_confidence_df)}/{len(noaa_validation_df)} địa phương đang có độ tin cậy "
-                            "`🔴 Thấp` khi đối chiếu số liệu Open-Meteo với NOAA CDO (chênh lệch nhiệt độ > 2°C hoặc "
-                            "lượng mưa > 10mm). Nếu số lượng này tăng cao trong nhiều lần kiểm tra liên tiếp, cần xem xét "
-                            "bổ sung nguồn dữ liệu quan trắc mặt đất tại các khu vực đó để tránh mô hình dự báo bị lệch "
-                            "do nhiễu từ nguồn vệ tinh/tái phân tích."
-                        )
-
-        st.markdown("---")
-
-        # Các khối "phụ" (dự báo dài hạn, đánh giá mô hình, ghi chú hệ thống) được gói trong
-        # st.expander và ĐÓNG SẴN (expanded=False) để trang không bị dài lê thê ngay khi mở lên -
-        # người dùng chỉ mở ra khi thật sự cần xem, giúp giao diện gọn và có phân cấp rõ ràng.
-        with st.expander("📅 Dự báo mưa & nguy cơ ngập 7 / 14 ngày tới", expanded=False):
-            render_future_forecast_sections(df_future)
-
-        with st.expander("📈 Đánh giá & So sánh hiệu năng mô hình (Model Metrics)", expanded=False):
-            render_model_metrics(evaluation_metrics, runtime_info)
-
-        with st.expander("📌 Ghi chú hệ thống", expanded=False):
-            st.write(
-                "Ứng dụng tự động kiểm tra dữ liệu lịch sử và mô hình khi khởi động. "
-                "Nếu thiếu dữ liệu, app sẽ tự gọi `fetch_data.py`; nếu thiếu model/metrics, "
-                "app sẽ tự gọi `analyze_and_train.py`. "
-                "Ứng dụng lấy dữ liệu thời tiết hiện tại từ Open-Meteo, "
-                "kết hợp giá trị triều cường fallback khi nguồn biển không ổn định. "
-                "Phần dự báo 7 ngày / 14 ngày được tổng hợp từ forecast thời tiết theo giờ, "
-                "sau đó đưa qua mô hình ML để ước lượng nguy cơ ngập theo từng ngày. "
-                "Nếu muốn hiển thị ranh giới đẹp và chính xác, hãy đảm bảo file GeoJSON "
-                "trong thư mục `data/geo/` là dữ liệu hành chính đã chuẩn hóa tên địa phương."
-            )
-
-            if st.button("🔄 Làm mới dữ liệu"):
-                st.cache_data.clear()
-                st.cache_resource.clear()
-                st.success("Đã làm mới cache dữ liệu cho lần render hiện tại.")
-
-    with tab2:
+    with tab_map:
         render_smart_routing_tab()
 
 
