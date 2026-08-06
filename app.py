@@ -491,6 +491,27 @@ def render_chart_discussion(text: str) -> None:
     st.info(text)
 
 
+def render_full_width_image(image_path: str) -> None:
+    """
+    Hiển thị ảnh full-width, TƯƠNG THÍCH NHIỀU PHIÊN BẢN STREAMLIT khác nhau giữa máy dev và server.
+
+    Streamlit đã đổi cách khai báo "ảnh chiếm full chiều rộng" qua nhiều phiên bản:
+    - Bản cũ (vd 1.38.x): dùng `use_column_width=True`.
+    - Bản mới hơn: đổi tên thành `use_container_width=True`.
+    - Bản mới nhất: cả 2 tham số trên đều bị loại bỏ (deprecated), thay bằng `width="stretch"`.
+
+    Do máy dev/test và server Ubuntu triển khai có thể cài 2 phiên bản Streamlit khác nhau (như đã
+    gặp: server báo warning "use_column_width đã bị loại bỏ, dùng width thay thế"), hàm này THỬ dùng
+    API mới (`width="stretch"`) trước; nếu môi trường đang chạy là bản Streamlit cũ chưa hỗ trợ tham
+    số này (ném `TypeError` vì tên tham số không tồn tại), tự động lùi về `use_column_width=True`.
+    Nhờ vậy CÙNG MỘT đoạn code chạy đúng trên cả 2 môi trường, không cần biết trước server cài bản nào.
+    """
+    try:
+        st.image(image_path, width="stretch")
+    except TypeError:
+        st.image(image_path, use_column_width=True)
+
+
 def build_contrast_styler(df: pd.DataFrame, numeric_formats: dict | None = None):
     """Tạo Styler có độ tương phản cao (nền tối, chữ sáng, sọc ngựa vằn) để bảng web dễ đọc hơn."""
     styled_df = df.style
@@ -667,7 +688,7 @@ def render_eda_tab() -> None:
             with chart_columns[index % 2]:
                 st.markdown(f"**{chart_title}**")
                 if chart_path.exists():
-                    st.image(str(chart_path), use_column_width=True)
+                    render_full_width_image(str(chart_path))
                 else:
                     st.info(f"Chưa có `{chart_path.name}`. Hãy chạy `python eda_analysis.py` để sinh ảnh.")
         render_chart_discussion(
@@ -1081,14 +1102,14 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
     with image_col_1:
         st.markdown("**Confusion Matrix**")
         if confusion_matrix_path.exists():
-            st.image(str(confusion_matrix_path), use_column_width=True)
+            render_full_width_image(str(confusion_matrix_path))
         else:
             st.info("Chưa có ảnh `confusion_matrix.png` trong `models/latest/`.")
 
     with image_col_2:
         st.markdown("**Feature Importance**")
         if feature_importance_path.exists():
-            st.image(str(feature_importance_path), use_column_width=True)
+            render_full_width_image(str(feature_importance_path))
         else:
             st.info("Chưa có ảnh `feature_importance.png` trong `models/latest/`.")
 
