@@ -209,7 +209,21 @@ def load_and_concatenate_csvs(data_dir: Path = DATA_DIR) -> pd.DataFrame:
     dataframes = []
     print(f"Found {len(csv_files)} CSV files. Reading data...")
     for file_path in csv_files:
-        df = pd.read_csv(file_path)
+        # `on_bad_lines="skip"`: nếu một dòng trong CSV có SỐ TRƯỜNG (số cột) không khớp với header
+        # (ví dụ dòng có 8 trường trong khi header chỉ khai báo 7 cột - đúng lỗi
+        # "Expected 7 fields in line 87626, saw 8" đã gặp), mặc định pandas sẽ NÉM ParserError và
+        # dừng đọc toàn bộ file ngay lập tức, làm crash cả pipeline dù chỉ có vài dòng lỗi cục bộ.
+        # Với `on_bad_lines="skip"`, pandas sẽ BỎ QUA riêng các dòng bị lỗi cấu trúc đó và tiếp tục
+        # đọc phần còn lại của file bình thường, thay vì dừng toàn bộ. Từ pandas >= 1.3 (đang dùng
+        # pandas 2.x), tham số này hoạt động tốt ngay với engine mặc định ("c"), không cần đổi sang
+        # engine="python" (vốn chậm hơn nhiều lần trên file lớn ~88k dòng như ở đây).
+        # Lưu ý quan trọng: đây là lớp phòng thủ (defensive coding) để pipeline không crash toàn bộ
+        # vì vài dòng lỗi hiếm gặp - KHÔNG thay thế cho việc xử lý tận gốc nguyên nhân sinh ra dòng
+        # lỗi (ở đề tài này, nguyên nhân gốc là do `fetch_data.py` từng ghi thêm 1 cột thừa khi append
+        # dữ liệu mới, đã được sửa tận gốc + dọn lại toàn bộ file CSV lịch sử). Nếu số dòng đọc được
+        # sau này thấp bất thường so với kỳ vọng, nên kiểm tra lại nguồn dữ liệu thay vì chỉ dựa vào
+        # cờ skip này.
+        df = pd.read_csv(file_path, on_bad_lines="skip")
         df[LOCATION_COL] = normalize_location_name(file_path)
         dataframes.append(df)
         print(f"Loaded: {Path(file_path).name} - {len(df)} rows")
@@ -1124,6 +1138,117 @@ def load_latest_scaler() -> StandardScaler:
     if not scaler_path.exists():
         raise FileNotFoundError("Không tìm thấy `models/latest/scaler.pkl` để incremental transform.")
     return joblib.load(scaler_path)
+
+
+def load_latest_best_model():
+    """Nạp mô hình tốt nhất đã lưu (`models/latest/best_model.pkl`) để suy luận/dự báo."""
+    model_path = LATEST_MODELS_DIR / "best_model.pkl"
+    if not model_path.exists():
+        raise FileNotFoundError("Không tìm thấy `models/latest/best_model.pkl`. Hãy chạy huấn luyện trước.")
+    return joblib.load(model_path)
+
+
+def predict_next_3_days(future_weather_df: pd.DataFrame, model=None, scaler: StandardScaler | None = None) -> pd.DataFrame:
+    """
+    Dự báo nguy cơ ngập cho 3 ngày tới (Day+1, Day+2, Day+3) từ dữ liệu thời tiết dự báo.
+
+    ----------------------------------------------------------------------------------------------
+    GIẢI THÍCH LOGIC "3-DAY ROLLING PREDICTION" (dùng cho báo cáo luận văn):
+    ----------------------------------------------------------------------------------------------
+    - Hàm này KHÔNG tự gọi API thời tiết. Người dùng tự fetch dữ liệu forecast 3 ngày tới từ
+      Open-Meteo Forecast API (`https://api.open-meteo.com/v1/forecast`, tham số `forecast_days`),
+      tổng hợp về dạng THEO NGÀY (1 dòng = 1 ngày, giống `build_daily_feature_dataset()` ở trên:
+      nhiệt độ/độ ẩm/độ ẩm đất/triều lấy trung bình ngày, lượng mưa lấy tổng ngày), rồi truyền
+      DataFrame đó vào tham số `future_weather_df`.
+    - Đây là kiểu dự báo "rolling" theo nghĩa: mỗi lần chạy lại (mỗi ngày mới), cửa sổ 3 ngày dự báo
+      LUÔN TRƯỢT (roll) về phía trước theo ngày hiện tại - Day+1/Day+2/Day+3 hôm nay sẽ khác với
+      Day+1/Day+2/Day+3 của hôm qua, vì luôn được tính lại dựa trên bản tin thời tiết forecast MỚI
+      NHẤT tại thời điểm gọi hàm, chứ không phải một dự báo cố định một lần rồi dùng mãi.
+    - Với mỗi ngày trong 3 ngày, hàm dùng CÙNG một mô hình đã huấn luyện (`best_model.pkl`) để suy
+      luận ĐỘC LẬP (không đệ quy dùng kết quả Day+1 làm đầu vào cho Day+2) - vì đầu vào của mô hình
+      là các biến khí tượng - thủy văn của CHÍNH ngày đó (đã có sẵn từ forecast API), không phải
+      chuỗi nhãn ngập của các ngày trước, nên không cần/không nên tạo vòng lặp tự hồi quy (autoregressive
+      loop) ở đây - cách này tránh hiện tượng "lỗi dồn tích" (error accumulation) thường gặp khi dự
+      báo đa bước bằng cách đưa dự đoán của bước trước làm đầu vào cho bước sau.
+
+    Tham số:
+        future_weather_df: DataFrame ĐÃ tổng hợp theo ngày, sắp xếp theo thời gian tăng dần, có tối
+            thiểu 3 dòng và đủ các cột trong FEATURE_COLS. Nên có thêm cột "Ngày" (datetime/date) để
+            gắn nhãn ngày dự báo cho kết quả trả về; nếu thiếu, hàm tự gán Day+1/Day+2/Day+3 kể từ
+            ngày chạy hiện tại.
+        model: model đã huấn luyện (có `.predict()`, tốt nhất có thêm `.predict_proba()`). Nếu để
+            `None`, hàm tự gọi `load_latest_best_model()` để nạp `models/latest/best_model.pkl`.
+        scaler: `StandardScaler` đã fit sẵn. Nếu để `None`, hàm tự gọi `load_latest_scaler()`.
+
+    Trả về:
+        pd.DataFrame gồm các cột: `Ngày_dự_báo`, `Ngày_thứ` (Day+1/Day+2/Day+3), `Nguy_cơ_ngập`
+        (0/1/2), `Nhãn_nguy_cơ` (An toàn/Ngập nhẹ/Ngập nặng), `Xác_suất_ngập_%`.
+    """
+    if model is None:
+        model = load_latest_best_model()
+    if scaler is None:
+        scaler = load_latest_scaler()
+
+    if len(future_weather_df) < 3:
+        raise ValueError(
+            f"Cần tối thiểu 3 ngày dữ liệu thời tiết dự báo, chỉ nhận được {len(future_weather_df)} ngày."
+        )
+
+    # Chỉ lấy đúng 3 ngày KẾ TIẾP theo thứ tự thời gian (nếu future_weather_df có nhiều hơn 3 dòng,
+    # ví dụ forecast_days=7, chỉ 3 dòng đầu tiên - gần hiện tại nhất - được dùng).
+    next_3_days_df = future_weather_df.copy()
+    if DATE_COL in next_3_days_df.columns:
+        next_3_days_df = next_3_days_df.sort_values(DATE_COL)
+    next_3_days_df = next_3_days_df.head(3).reset_index(drop=True)
+
+    # Dùng đúng thứ tự cột mà scaler mong đợi (StandardScaler ghi nhớ `feature_names_in_` khi được
+    # fit bằng DataFrame có tên cột - xem `split_time_series_data()`), tránh lệch thứ tự cột âm thầm
+    # gây sai kết quả dự đoán mà không báo lỗi.
+    feature_columns = list(getattr(scaler, "feature_names_in_", FEATURE_COLS))
+    missing_columns = [column for column in feature_columns if column not in next_3_days_df.columns]
+    if missing_columns:
+        raise ValueError(f"Dữ liệu thời tiết đầu vào thiếu các cột bắt buộc: {missing_columns}")
+
+    X_future = next_3_days_df[feature_columns]
+    X_future_scaled = pd.DataFrame(scaler.transform(X_future), columns=feature_columns)
+
+    predictions = model.predict(X_future_scaled)
+    if hasattr(model, "predict_proba"):
+        proba_matrix = model.predict_proba(X_future_scaled)
+        # Bài toán đa lớp (0=An toàn/1=Ngập nhẹ/2=Ngập nặng): "xác suất ngập" = P(lớp 1) + P(lớp 2),
+        # tức xác suất KHÔNG rơi vào lớp 0 - giữ nhất quán với cách tính đang dùng trong toàn bộ đề tài
+        # (xem `get_prediction_and_flood_probability` ở các phiên bản trước của `app.py`).
+        if proba_matrix.shape[1] >= 3:
+            flood_probabilities = proba_matrix[:, 1:].sum(axis=1)
+        elif proba_matrix.shape[1] == 2:
+            flood_probabilities = proba_matrix[:, 1]
+        else:
+            flood_probabilities = (predictions > 0).astype(float)
+    else:
+        flood_probabilities = (predictions > 0).astype(float)
+
+    class_name_map = {0: "An toàn", 1: "Ngập nhẹ", 2: "Ngập nặng"}
+    day_labels = ["Day+1", "Day+2", "Day+3"]
+    today = pd.Timestamp.now().normalize()
+
+    result_rows = []
+    for offset in range(len(next_3_days_df)):
+        prediction = int(predictions[offset])
+        forecast_date = next_3_days_df.iloc[offset].get(DATE_COL) if DATE_COL in next_3_days_df.columns else None
+        if pd.isna(forecast_date) or forecast_date is None:
+            forecast_date = today + pd.Timedelta(days=offset + 1)
+
+        result_rows.append(
+            {
+                "Ngày_dự_báo": pd.Timestamp(forecast_date).strftime("%Y-%m-%d"),
+                "Ngày_thứ": day_labels[offset],
+                "Nguy_cơ_ngập": prediction,
+                "Nhãn_nguy_cơ": class_name_map.get(prediction, "Không xác định"),
+                "Xác_suất_ngập_%": round(float(flood_probabilities[offset]) * 100, 2),
+            }
+        )
+
+    return pd.DataFrame(result_rows)
 
 
 def ensure_xgboost_model_available() -> XGBClassifier | None:
