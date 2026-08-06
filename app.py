@@ -72,6 +72,31 @@ MENU_OPTIONS = [
     "🔮 Dự báo Nâng cao (Chronos LLM)",
 ]
 
+# ------------------------------------------------------------------------------------------------
+# CẤU HÌNH SMART ROUTING (TomTom Routing API) - dùng cho tab "🗺️ Bản đồ Chỉ đường Tránh ngập".
+# LƯU Ý BẢO MẬT: key được hardcode trực tiếp theo yêu cầu để chạy nhanh cho đồ án; `os.getenv(...)`
+# vẫn được ưu tiên đọc trước nếu bạn khai báo TOMTOM_API_KEY trong file `.env` (đã có sẵn cơ chế
+# `load_dotenv()` ở đầu file). Trước khi đẩy code lên GitHub public, nên XÓA key hardcode và chỉ
+# giữ lại biến môi trường, để tránh lộ API key trong lịch sử commit.
+# ------------------------------------------------------------------------------------------------
+TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY", "opH6G1fIc4yptvSrCqQ6iZI5yaifz1Je")
+TOMTOM_ROUTING_BASE_URL = "https://api.tomtom.com/routing/1/calculateRoute"
+
+# Dữ liệu giả lập (dummy) để demo tính năng chỉ đường mà không cần chờ có dữ liệu ngập thời gian thực.
+# Điểm đi/đến lấy ngẫu nhiên 2 địa phương trong danh sách LOCATIONS phía trên (TP Huế -> Phú Vang).
+DUMMY_START_POINT = (16.4637, 107.5909)  # TP Huế
+DUMMY_END_POINT = (16.4706, 107.7148)  # Phú Vang
+# Mỗi polygon là 1 danh sách điểm (lat, lon) khoanh vùng khu vực đang ngập, đặt chắn ngang giữa
+# điểm đi và điểm đến để minh họa rõ hiệu quả né vùng ngập khi bật mô phỏng.
+DUMMY_FLOODED_POLYGONS = [
+    [
+        (16.4680, 107.6120),
+        (16.4680, 107.6420),
+        (16.4460, 107.6420),
+        (16.4460, 107.6120),
+    ],
+]
+
 # Khởi tạo client Open-Meteo có cache và retry để hạn chế lỗi mạng tạm thời.
 cache_session = requests_cache.CachedSession(".cache", expire_after=3600)
 retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
@@ -2519,6 +2544,251 @@ def render_model_metrics(evaluation_metrics, runtime_info):
         )
 
 
+# =================================================================================================
+# SMART ROUTING - CHỈ ĐƯỜNG NÉ VÙNG NGẬP BẰNG TOMTOM ROUTING API
+# =================================================================================================
+def polygon_to_bounding_rectangle(polygon_points: list[tuple[float, float]]) -> dict:
+    """
+    Quy đổi 1 polygon (danh sách điểm lat/lon khoanh vùng ngập) thành 1 hình chữ nhật bao ngoài
+    (bounding box), đúng định dạng `avoidAreas.rectangles` mà TomTom Routing API hỗ trợ.
+
+    QUAN TRỌNG - LƯU Ý KỸ THUẬT CẦN GIẢI TRÌNH VỚI GIẢNG VIÊN:
+    TomTom Routing API (endpoint `calculateRoute`) CHỈ hỗ trợ `avoidAreas.rectangles` (hình chữ nhật
+    theo tọa độ southWestCorner/northEastCorner), KHÔNG hỗ trợ `avoidAreas.polygons` (đa giác tự do)
+    như một số API định tuyến khác (vd. OpenRouteService có `avoid_polygons`). Do đó, để payload gửi
+    lên TomTom thực sự hợp lệ và có tác dụng né vùng ngập thật, ta cần "xấp xỉ" polygon ngập bằng
+    hình chữ nhật bao ngoài nhỏ nhất (min/max lat, min/max lon) trước khi đưa vào request.
+    Phần polygon GỐC (chi tiết, không phải hình chữ nhật) vẫn được giữ nguyên để VẼ trên bản đồ
+    Folium cho trực quan - chỉ có phần gửi lên API là bị đơn giản hóa thành rectangle.
+    """
+    latitudes = [point[0] for point in polygon_points]
+    longitudes = [point[1] for point in polygon_points]
+    return {
+        "southWestCorner": {"latitude": min(latitudes), "longitude": min(longitudes)},
+        "northEastCorner": {"latitude": max(latitudes), "longitude": max(longitudes)},
+    }
+
+
+def fetch_tomtom_route(
+    start_point: tuple[float, float],
+    end_point: tuple[float, float],
+    flooded_polygons: list | None = None,
+    api_key: str = TOMTOM_API_KEY,
+) -> dict:
+    """
+    Gọi TomTom Routing API để tính tuyến đường từ `start_point` đến `end_point`.
+
+    ----------------------------------------------------------------------------------------------
+    LOGIC TIẾT KIỆM CHI PHÍ GỌI API (COST-SAVING LOGIC):
+    ----------------------------------------------------------------------------------------------
+    TomTom tính phí/giới hạn quota theo số lượt gọi API. Việc tính toán né vùng ngập (`avoidAreas`)
+    tốn kém hơn một truy vấn định tuyến thông thường (do TomTom phải loại bỏ toàn bộ đoạn đường nằm
+    trong rectangle cấm rồi tìm đường vòng thay thế). Vì vậy:
+      - NẾU `flooded_polygons` KHÔNG rỗng: có nguy cơ ngập thật trên tuyến -> bắt buộc gọi TomTom
+        bằng phương thức POST kèm body `avoidAreas` để tính đường vòng né ngập.
+      - NẾU `flooded_polygons` RỖNG: không có vùng ngập nào cần né -> KHÔNG gọi API TomTom nữa
+        (tiết kiệm 100% chi phí lượt gọi đó), chỉ vẽ một đường thẳng minh họa nối 2 điểm và báo
+        thành công cho người dùng. Đây là lựa chọn có chủ đích cho bản demo: trong hệ thống thực tế
+        vận hành lâu dài, có thể đổi lại thành 1 lệnh GET định tuyến thường (không avoidAreas) nếu
+        vẫn muốn có tuyến đường bám theo mạng lưới đường thật ngay cả khi không có ngập.
+
+    TẠI SAO CHỌN `travelMode=motorcycle`?
+    Đối tượng phục vụ chính của hệ thống cảnh báo là NGƯỜI DÂN VÀ LỰC LƯỢNG CỨU HỘ tại Huế - phương
+    tiện di chuyển phổ biến nhất trong đô thị Việt Nam khi có ngập cục bộ là XE MÁY, không phải ô tô.
+    Xe máy có khả năng len lỏi qua các tuyến đường nhỏ/hẻm mà ô tô (`car`) không đi được, đồng thời
+    vẫn cần né vùng ngập sâu (khác với đi bộ `pedestrian` - không tối ưu về thời gian di chuyển
+    trong tình huống khẩn cấp). Vì vậy `motorcycle` là travel mode sát với bài toán thực tế nhất.
+
+    Trả về dict:
+        {"success": bool, "route_points": [(lat, lon), ...], "distance_km": float,
+         "travel_time_min": float, "used_avoid_areas": bool, "error": str | None}
+    """
+    has_flood_zones = bool(flooded_polygons)
+    locations = f"{start_point[0]},{start_point[1]}:{end_point[0]},{end_point[1]}"
+
+    if not has_flood_zones:
+        # ---- NHÁNH TIẾT KIỆM: không có vùng ngập -> KHÔNG gọi TomTom, vẽ đường thẳng minh họa ----
+        straight_line_points = [start_point, end_point]
+        approx_distance_km = _haversine_distance_km(start_point, end_point)
+        return {
+            "success": True,
+            "route_points": straight_line_points,
+            "distance_km": round(approx_distance_km, 2),
+            "travel_time_min": None,
+            "used_avoid_areas": False,
+            "error": None,
+        }
+
+    # ---- NHÁNH BẮT BUỘC GỌI API: có vùng ngập -> POST kèm avoidAreas để né tuyến ----
+    request_url = f"{TOMTOM_ROUTING_BASE_URL}/{locations}/json"
+    query_params = {
+        "key": api_key,
+        "traffic": "true",
+        "travelMode": "motorcycle",
+        "routeType": "fastest",
+    }
+    request_body = {
+        "avoidAreas": {
+            "rectangles": [polygon_to_bounding_rectangle(polygon) for polygon in flooded_polygons]
+        }
+    }
+
+    try:
+        response = requests.post(request_url, params=query_params, json=request_body, timeout=15)
+        response.raise_for_status()
+        payload = response.json()
+
+        route = payload["routes"][0]
+        summary = route["summary"]
+        route_points = [
+            (point["latitude"], point["longitude"])
+            for leg in route["legs"]
+            for point in leg["points"]
+        ]
+
+        return {
+            "success": True,
+            "route_points": route_points,
+            "distance_km": round(summary["lengthInMeters"] / 1000, 2),
+            "travel_time_min": round(summary["travelTimeInSeconds"] / 60, 1),
+            "used_avoid_areas": True,
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "route_points": [],
+            "distance_km": None,
+            "travel_time_min": None,
+            "used_avoid_areas": True,
+            "error": str(exc),
+        }
+
+
+def _haversine_distance_km(point_a: tuple[float, float], point_b: tuple[float, float]) -> float:
+    """Tính khoảng cách đường chim bay (km) giữa 2 điểm lat/lon - chỉ dùng để hiển thị ước lượng
+    khi nhánh tiết kiệm API bỏ qua việc gọi TomTom (xem `fetch_tomtom_route`)."""
+    lat1, lon1 = math.radians(point_a[0]), math.radians(point_a[1])
+    lat2, lon2 = math.radians(point_b[0]), math.radians(point_b[1])
+    delta_lat = lat2 - lat1
+    delta_lon = lon2 - lon1
+    haversine_a = math.sin(delta_lat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
+    return 6371.0 * 2 * math.asin(math.sqrt(haversine_a))
+
+
+def build_smart_routing_map(
+    start_point: tuple[float, float],
+    end_point: tuple[float, float],
+    flooded_polygons: list,
+    route_points: list | None,
+) -> folium.Map:
+    """Dựng bản đồ Folium: marker điểm đi/đến, vùng ngập tô ĐỎ, tuyến đường an toàn vẽ XANH DƯƠNG."""
+    center_lat = (start_point[0] + end_point[0]) / 2
+    center_lon = (start_point[1] + end_point[1]) / 2
+    routing_map = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="OpenStreetMap")
+
+    folium.Marker(
+        location=start_point,
+        tooltip="Điểm xuất phát",
+        icon=folium.Icon(color="green", icon="play", prefix="fa"),
+    ).add_to(routing_map)
+    folium.Marker(
+        location=end_point,
+        tooltip="Điểm đến",
+        icon=folium.Icon(color="red", icon="flag-checkered", prefix="fa"),
+    ).add_to(routing_map)
+
+    # Vẽ TOÀN BỘ polygon ngập gốc (chi tiết, không phải bounding box) để trực quan đúng hình dạng
+    # thực tế của vùng ngập, dù phần gửi lên TomTom đã được đơn giản hóa thành rectangle.
+    for polygon in flooded_polygons:
+        folium.Polygon(
+            locations=polygon,
+            color="#B91C1C",
+            weight=2,
+            fill=True,
+            fill_color="#EF4444",
+            fill_opacity=0.4,
+            tooltip="🔴 Khu vực đang ngập - cần né tránh",
+        ).add_to(routing_map)
+
+    if route_points:
+        folium.PolyLine(
+            locations=route_points,
+            color="#2563EB",
+            weight=6,
+            opacity=0.85,
+            tooltip="🔵 Tuyến đường di chuyển",
+        ).add_to(routing_map)
+
+    return routing_map
+
+
+def render_smart_routing_tab() -> None:
+    """Render toàn bộ nội dung tab '🗺️ Bản đồ Chỉ đường Tránh ngập'."""
+    st.subheader("🗺️ Bản đồ Chỉ đường Thông minh - Né khu vực ngập")
+    st.caption(
+        "Sử dụng TomTom Routing API (travelMode=motorcycle) để tính tuyến đường phù hợp cho xe máy, "
+        "tự động né các khu vực đang ngập khi có cảnh báo."
+    )
+
+    # ---- Cụm điều khiển đặt CĂN GIỮA bằng bố cục 3 cột (cột giữa rộng hơn 2 cột biên) ----
+    control_left, control_center, control_right = st.columns([1, 2, 1])
+    with control_center:
+        simulate_flood = st.checkbox(
+            "🧪 Mô phỏng có vùng ngập trên tuyến đường (dummy data)",
+            value=True,
+            key="simulate_flood_zone_toggle",
+            help="Tắt để xem nhánh tiết kiệm API khi không có vùng ngập nào cần né.",
+        )
+        flooded_polygons = DUMMY_FLOODED_POLYGONS if simulate_flood else []
+
+        find_route_clicked = st.button(
+            "🧭 Tìm tuyến đường",
+            key="find_smart_route_button",
+            use_container_width=True,
+        )
+
+    # Chỉ gọi API khi người dùng bấm nút (tránh gọi lại TomTom mỗi lần Streamlit rerun do tương tác
+    # UI khác - đây cũng là một hình thức tiết kiệm lượt gọi API bổ sung), kết quả được lưu vào
+    # session_state để vẫn hiển thị lại khi chuyển qua chuyển lại giữa các tab.
+    if find_route_clicked:
+        with st.spinner("Đang tính toán tuyến đường..."):
+            st.session_state["smart_route_result"] = fetch_tomtom_route(
+                DUMMY_START_POINT, DUMMY_END_POINT, flooded_polygons=flooded_polygons
+            )
+            st.session_state["smart_route_flooded_polygons"] = flooded_polygons
+
+    route_result = st.session_state.get("smart_route_result")
+    active_flooded_polygons = st.session_state.get("smart_route_flooded_polygons", flooded_polygons)
+
+    with control_center:
+        if route_result is None:
+            st.info("Bấm **Tìm tuyến đường** để bắt đầu tính toán.")
+        elif not route_result["success"]:
+            st.error(f"Không thể lấy tuyến đường từ TomTom: {route_result['error']}")
+        elif not active_flooded_polygons:
+            # Nhánh tiết kiệm API: không có vùng ngập nên không gọi TomTom, chỉ báo thành công.
+            st.success(
+                f"✅ Không phát hiện vùng ngập trên tuyến - bỏ qua việc gọi TomTom API để tiết kiệm "
+                f"chi phí. Khoảng cách đường chim bay ước lượng: {route_result['distance_km']} km."
+            )
+        else:
+            metric_col_1, metric_col_2, metric_col_3 = st.columns(3)
+            metric_col_1.metric("Quãng đường", f"{route_result['distance_km']} km")
+            metric_col_2.metric("Thời gian di chuyển", f"{route_result['travel_time_min']} phút")
+            metric_col_3.metric("Vùng ngập đã né", f"{len(active_flooded_polygons)}")
+            st.success("✅ Đã tính tuyến đường né vùng ngập thành công bằng TomTom Routing API.")
+
+    # ---- Bản đồ đặt CĂN GIỮA, rộng và cân đối trong tab ----
+    map_left, map_center, map_right = st.columns([1, 6, 1])
+    with map_center:
+        route_points_to_draw = route_result["route_points"] if route_result and route_result["success"] else None
+        smart_map = build_smart_routing_map(
+            DUMMY_START_POINT, DUMMY_END_POINT, active_flooded_polygons, route_points_to_draw
+        )
+        st_folium(smart_map, width=1000, height=600)
+
+
 def main():
     """Điểm vào chính của ứng dụng."""
     apply_global_ui_theme()
@@ -2551,88 +2821,103 @@ def main():
     df_predictions = get_realtime_prediction(model, scaler)
     df_future = get_future_predictions(model, scaler, forecast_days=14)
     current_update_time = get_processing_timestamp_display()
+    # Các cụm điều khiển sidebar KHÔNG đặt trong tab vì Streamlit luôn hiển thị sidebar cố định,
+    # bất kể người dùng đang xem tab nào ở khu vực nội dung chính.
     render_sidebar_info(model, scaler)
     render_tomorrow_nowcasting()
     render_stormglass_tide_sidebar()
     render_training_controls()
-    render_realtime_flood_warning_section(model, scaler)
-
-    map_col, table_col = st.columns([2.1, 1.2])
-
-    with map_col:
-        render_map_panel(df_predictions, current_update_time)
-
     render_sidebar_controls(df_predictions, df_future)
 
-    with table_col:
-        st.subheader("📊 Bảng dữ liệu Dự báo trực tuyến")
-        st.caption(f"🕒 Dữ liệu cập nhật lúc: {current_update_time}")
-        render_prediction_table(df_predictions)
-        with st.expander(
-            "🔍 Đối chiếu sự thật nền (Ground Truth Validation with NOAA CDO)",
-            expanded=False,
-        ):
-            st.caption(
-                "NOAA CDO test"
-            )
-            if st.button(
-                "Khởi chạy luồng kiểm chứng NOAA",
-                key="run_noaa_ground_truth_validation",
-                use_container_width=True,
+    # ------------------------------------------------------------------------------------------
+    # BỐ CỤC TOÀN TRANG BẰNG st.tabs: tách riêng khu vực Dashboard (số liệu/biểu đồ) và khu vực
+    # Bản đồ chỉ đường, giúp mỗi màn hình gọn gàng, không bị dồn hết nội dung xuống một trang dài.
+    # ------------------------------------------------------------------------------------------
+    tab1, tab2 = st.tabs(["📊 Tổng quan Dự báo", "🗺️ Bản đồ Chỉ đường Tránh ngập"])
+
+    with tab1:
+        # Banner cảnh báo realtime luôn đặt NGOÀI expander vì đây là thông tin quan trọng nhất,
+        # cần đập vào mắt người dùng ngay khi mở tab, không nên bị ẩn phía sau một cú click.
+        render_realtime_flood_warning_section(model, scaler)
+
+        # Cụm "Bản đồ + Bảng dự báo" là nội dung chính, đặt ở 2 cột ngay dưới banner cảnh báo.
+        map_col, table_col = st.columns([2.1, 1.2])
+        with map_col:
+            render_map_panel(df_predictions, current_update_time)
+        with table_col:
+            st.subheader("📊 Bảng dữ liệu Dự báo trực tuyến")
+            st.caption(f"🕒 Dữ liệu cập nhật lúc: {current_update_time}")
+            render_prediction_table(df_predictions)
+            with st.expander(
+                "🔍 Đối chiếu sự thật nền (Ground Truth Validation with NOAA CDO)",
+                expanded=False,
             ):
-                st.session_state["run_noaa_validation"] = True
+                st.caption("NOAA CDO test")
+                if st.button(
+                    "Khởi chạy luồng kiểm chứng NOAA",
+                    key="run_noaa_ground_truth_validation",
+                    use_container_width=True,
+                ):
+                    st.session_state["run_noaa_validation"] = True
 
-            if st.session_state.get("run_noaa_validation", False):
-                with st.spinner("Đang kết nối vệ tinh NOAA..."):
-                    validation_df = render_cross_validation_table(df_predictions)
-                    st.session_state["noaa_validation_df"] = validation_df
-                    st.session_state["run_noaa_validation"] = False
+                if st.session_state.get("run_noaa_validation", False):
+                    with st.spinner("Đang kết nối vệ tinh NOAA..."):
+                        validation_df = render_cross_validation_table(df_predictions)
+                        st.session_state["noaa_validation_df"] = validation_df
+                        st.session_state["run_noaa_validation"] = False
 
-            if "noaa_validation_df" in st.session_state:
-                noaa_validation_df = st.session_state["noaa_validation_df"]
-                render_styled_table(
-                    build_contrast_styler(
-                        noaa_validation_df,
-                        confidence_column="Độ tin cậy",
-                    ),
-                    height=280,
-                )
-                if not noaa_validation_df.empty:
-                    low_confidence_df = noaa_validation_df[
-                        noaa_validation_df["Độ tin cậy"] == "🔴 Thấp"
-                    ]
-                    render_chart_discussion(
-                        f"Có {len(low_confidence_df)}/{len(noaa_validation_df)} địa phương đang có độ tin cậy "
-                        "`🔴 Thấp` khi đối chiếu số liệu Open-Meteo với NOAA CDO (chênh lệch nhiệt độ > 2°C hoặc "
-                        "lượng mưa > 10mm). Nếu số lượng này tăng cao trong nhiều lần kiểm tra liên tiếp, cần xem xét "
-                        "bổ sung nguồn dữ liệu quan trắc mặt đất tại các khu vực đó để tránh mô hình dự báo bị lệch "
-                        "do nhiễu từ nguồn vệ tinh/tái phân tích."
+                if "noaa_validation_df" in st.session_state:
+                    noaa_validation_df = st.session_state["noaa_validation_df"]
+                    render_styled_table(
+                        build_contrast_styler(
+                            noaa_validation_df,
+                            confidence_column="Độ tin cậy",
+                        ),
+                        height=280,
                     )
+                    if not noaa_validation_df.empty:
+                        low_confidence_df = noaa_validation_df[
+                            noaa_validation_df["Độ tin cậy"] == "🔴 Thấp"
+                        ]
+                        render_chart_discussion(
+                            f"Có {len(low_confidence_df)}/{len(noaa_validation_df)} địa phương đang có độ tin cậy "
+                            "`🔴 Thấp` khi đối chiếu số liệu Open-Meteo với NOAA CDO (chênh lệch nhiệt độ > 2°C hoặc "
+                            "lượng mưa > 10mm). Nếu số lượng này tăng cao trong nhiều lần kiểm tra liên tiếp, cần xem xét "
+                            "bổ sung nguồn dữ liệu quan trắc mặt đất tại các khu vực đó để tránh mô hình dự báo bị lệch "
+                            "do nhiễu từ nguồn vệ tinh/tái phân tích."
+                        )
 
-    st.markdown("---")
-    render_future_forecast_sections(df_future)
+        st.markdown("---")
 
-    st.markdown("---")
-    render_model_metrics(evaluation_metrics, runtime_info)
+        # Các khối "phụ" (dự báo dài hạn, đánh giá mô hình, ghi chú hệ thống) được gói trong
+        # st.expander và ĐÓNG SẴN (expanded=False) để trang không bị dài lê thê ngay khi mở lên -
+        # người dùng chỉ mở ra khi thật sự cần xem, giúp giao diện gọn và có phân cấp rõ ràng.
+        with st.expander("📅 Dự báo mưa & nguy cơ ngập 7 / 14 ngày tới", expanded=False):
+            render_future_forecast_sections(df_future)
 
-    st.markdown("---")
-    st.subheader("📌 Ghi chú")
-    st.write(
-        "Ứng dụng tự động kiểm tra dữ liệu lịch sử và mô hình khi khởi động. "
-        "Nếu thiếu dữ liệu, app sẽ tự gọi `fetch_data.py`; nếu thiếu model/metrics, "
-        "app sẽ tự gọi `analyze_and_train.py`. "
-        "Ứng dụng lấy dữ liệu thời tiết hiện tại từ Open-Meteo, "
-        "kết hợp giá trị triều cường fallback khi nguồn biển không ổn định. "
-        "Phần dự báo 7 ngày / 14 ngày được tổng hợp từ forecast thời tiết theo giờ, "
-        "sau đó đưa qua mô hình ML để ước lượng nguy cơ ngập theo từng ngày. "
-        "Nếu muốn hiển thị ranh giới đẹp và chính xác, hãy đảm bảo file GeoJSON "
-        "trong thư mục `data/geo/` là dữ liệu hành chính đã chuẩn hóa tên địa phương."
-    )
+        with st.expander("📈 Đánh giá & So sánh hiệu năng mô hình (Model Metrics)", expanded=False):
+            render_model_metrics(evaluation_metrics, runtime_info)
 
-    if st.button("🔄 Làm mới dữ liệu"):
-        st.cache_data.clear()
-        st.cache_resource.clear()
-        st.success("Đã làm mới cache dữ liệu cho lần render hiện tại.")
+        with st.expander("📌 Ghi chú hệ thống", expanded=False):
+            st.write(
+                "Ứng dụng tự động kiểm tra dữ liệu lịch sử và mô hình khi khởi động. "
+                "Nếu thiếu dữ liệu, app sẽ tự gọi `fetch_data.py`; nếu thiếu model/metrics, "
+                "app sẽ tự gọi `analyze_and_train.py`. "
+                "Ứng dụng lấy dữ liệu thời tiết hiện tại từ Open-Meteo, "
+                "kết hợp giá trị triều cường fallback khi nguồn biển không ổn định. "
+                "Phần dự báo 7 ngày / 14 ngày được tổng hợp từ forecast thời tiết theo giờ, "
+                "sau đó đưa qua mô hình ML để ước lượng nguy cơ ngập theo từng ngày. "
+                "Nếu muốn hiển thị ranh giới đẹp và chính xác, hãy đảm bảo file GeoJSON "
+                "trong thư mục `data/geo/` là dữ liệu hành chính đã chuẩn hóa tên địa phương."
+            )
+
+            if st.button("🔄 Làm mới dữ liệu"):
+                st.cache_data.clear()
+                st.cache_resource.clear()
+                st.success("Đã làm mới cache dữ liệu cho lần render hiện tại.")
+
+    with tab2:
+        render_smart_routing_tab()
 
 
 if __name__ == "__main__":
