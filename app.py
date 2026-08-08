@@ -69,20 +69,40 @@ TRAINING_LOG_PATH = CACHE_DIR / "training_output.log"
 TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY", "opH6G1fIc4yptvSrCqQ6iZI5yaifz1Je")
 TOMTOM_ROUTING_BASE_URL = "https://api.tomtom.com/routing/1/calculateRoute"
 
-# Dữ liệu giả lập (dummy) để demo tính năng chỉ đường mà không cần chờ có dữ liệu ngập thời gian thực.
-# Điểm đi/đến ví dụ: TP Huế -> Phú Vang.
-DUMMY_START_POINT = (16.4637, 107.5909)  # TP Huế
-DUMMY_END_POINT = (16.4706, 107.7148)  # Phú Vang
-# Mỗi polygon là 1 danh sách điểm (lat, lon) khoanh vùng khu vực đang ngập, đặt chắn ngang giữa
-# điểm đi và điểm đến để minh họa rõ hiệu quả né vùng ngập khi bật mô phỏng.
-DUMMY_FLOODED_POLYGONS = [
-    [
-        (16.4680, 107.6120),
-        (16.4680, 107.6420),
-        (16.4460, 107.6420),
-        (16.4460, 107.6120),
-    ],
+# 5 ĐIỂM GIÁM SÁT NGẬP LỤT THỰC TẾ tại Thừa Thiên Huế (tọa độ trung tâm gần đúng của mỗi địa
+# phương) - thay thế hoàn toàn cho dữ liệu giả lập (dummy) trước đây. Đây là DUY NHẤT nguồn tọa độ
+# dùng cho cả bản đồ giám sát lẫn 2 ô chọn điểm đi/điểm đến của tính năng định tuyến bên dưới.
+REAL_MONITORED_LOCATIONS: dict[str, tuple[float, float]] = {
+    "TP Huế": (16.4637, 107.5909),
+    "Hương Thủy": (16.4022, 107.6833),
+    "Hương Trà": (16.4525, 107.4989),
+    "Phú Vang": (16.4506, 107.7289),
+    "Quảng Điền": (16.5925, 107.5256),
+}
+
+# Ánh xạ tên địa phương (khớp cột 'Địa phương' của df_predictions) -> file CSV lịch sử tương ứng
+# trong data/historical/. Dùng làm dự phòng khi CHƯA có model đã triển khai (xem
+# get_latest_flood_predictions()) và để lấy quan trắc gần nhất phục vụ suy luận model thật.
+LOCATION_HISTORICAL_FILE: dict[str, str] = {
+    "TP Huế": "TP_Hue_10years.csv",
+    "Hương Thủy": "Huong_Thuy_10years.csv",
+    "Hương Trà": "Huong_Tra_10years.csv",
+    "Phú Vang": "Phu_Vang_10years.csv",
+    "Quảng Điền": "Quang_Dien_10years.csv",
+}
+
+# Danh sách đặc trưng đầu vào của model - PHẢI khớp đúng FEATURE_COLS trong analyze_and_train.py.
+FEATURE_COLS_FOR_INFERENCE = [
+    "Nhiệt_độ_C",
+    "Độ_ẩm_%",
+    "Lượng_mưa_mm",
+    "Độ_ẩm_đất",
+    "Chiều_cao_triều_m",
 ]
+
+# Nửa cạnh (độ) của hình vuông xấp xỉ vùng ngập được vẽ quanh 1 điểm giám sát đang có nguy cơ
+# 'Ngập' - khoảng 0.015 độ vĩ/kinh ~ 1.5km, đủ nhỏ để không "nuốt" luôn toàn bộ khu vực lân cận.
+FLOOD_ZONE_HALF_SIZE_DEG = 0.015
 
 
 def apply_global_ui_theme():
@@ -1420,39 +1440,155 @@ def fetch_tomtom_route(
         }
 
 
+def build_flood_zone_polygon(
+    center_point: tuple[float, float], half_size_deg: float = FLOOD_ZONE_HALF_SIZE_DEG
+) -> list[tuple[float, float]]:
+    """Sinh 1 hình vuông nhỏ (bounding box) bao quanh 1 tọa độ trung tâm, đại diện cho vùng ngập
+    ước tính tại địa phương đó. Đây là polygon THẬT (không phải dummy) vì tâm của nó chính là tọa độ
+    giám sát thực tế trong REAL_MONITORED_LOCATIONS, chỉ có KÍCH THƯỚC là xấp xỉ."""
+    center_lat, center_lon = center_point
+    return [
+        (center_lat + half_size_deg, center_lon - half_size_deg),
+        (center_lat + half_size_deg, center_lon + half_size_deg),
+        (center_lat - half_size_deg, center_lon + half_size_deg),
+        (center_lat - half_size_deg, center_lon - half_size_deg),
+    ]
+
+
+def predict_flood_class(deployed_model: dict, location_df: pd.DataFrame, feature_columns: list[str]) -> int:
+    """
+    Suy luận nhãn nguy cơ ngập (0 = An toàn, 1 = Ngập nhẹ, 2 = Ngập nặng) mới nhất bằng model THẬT
+    đã triển khai, tự động chọn đúng luồng xử lý theo `model_type` (xem `load_deployment_model()`
+    để biết chi tiết 3 loại model: sklearn_tabular / keras_sequence / hybrid_lstm_xgboost).
+    """
+    model_type = deployed_model["model_type"]
+    scaler = deployed_model["scaler"]
+
+    if model_type == "sklearn_tabular":
+        latest_features = location_df[feature_columns].iloc[[-1]]
+        scaled_features = scaler.transform(latest_features)
+        return int(deployed_model["model"].predict(scaled_features)[0])
+
+    window_size = deployed_model.get("window_size") or 24
+    if len(location_df) < window_size:
+        raise ValueError("Không đủ dữ liệu quan trắc để tạo chuỗi thời gian cho model tuần tự.")
+    window_features = location_df[feature_columns].iloc[-window_size:]
+    scaled_window = scaler.transform(window_features)
+    model_input = scaled_window.reshape(1, window_size, len(feature_columns))
+
+    if model_type == "keras_sequence":
+        class_probabilities = deployed_model["model"].predict(model_input, verbose=0)
+        return int(class_probabilities.argmax(axis=-1)[0])
+
+    if model_type == "hybrid_lstm_xgboost":
+        embedding = deployed_model["feature_extractor"].predict(model_input, verbose=0)
+        return int(deployed_model["classifier"].predict(embedding)[0])
+
+    raise ValueError(f"model_type không được hỗ trợ cho suy luận thời gian thực: {model_type}")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_latest_flood_predictions() -> pd.DataFrame:
+    """
+    ĐỌC ĐỘNG trạng thái nguy cơ ngập MỚI NHẤT cho 5 địa phương giám sát thực tế - đây chính là
+    `df_predictions` mà bản đồ định tuyến bên dưới dựa vào, với 2 cột ['Địa phương', 'Nguy cơ'].
+
+    Đây là "cầu nối" giữa pipeline AI (Tab 2 huấn luyện, Tab 3 đánh giá) và bản đồ định tuyến
+    (Tab 4): thay vì hardcode nguy cơ ngập giả lập như bản demo cũ, hàm này tự động suy ra nguy cơ
+    ngập THẬT cho từng địa phương, để routing engine phía dưới TỰ ĐỘNG né đúng khu vực đang được AI
+    cảnh báo mà không cần chỉnh sửa code bằng tay mỗi khi tình hình thời tiết thay đổi.
+
+    Thứ tự ưu tiên khi xác định 'Nguy cơ':
+      1. Nếu đã có model được triển khai (`deployment_config.json` tồn tại sau khi huấn luyện ở
+         Tab 2) -> nạp model thật và suy luận trên quan trắc GẦN NHẤT của từng địa phương.
+      2. Nếu CHƯA huấn luyện model nào -> dự phòng bằng chính nhãn `Nguy_cơ_ngập` THỰC TẾ ở dòng dữ
+         liệu quan trắc gần nhất trong data/historical/*.csv (vẫn là dữ liệu thật, không phải số
+         ngẫu nhiên) để bản đồ luôn phản ánh tình trạng có cơ sở dữ liệu, không bao giờ "đứng im".
+    """
+    deployed_model = None
+    feature_columns = FEATURE_COLS_FOR_INFERENCE
+    try:
+        evaluation_metrics, deployment_config, runtime_info = load_evaluation_artifacts()
+        deployed_model = load_deployment_model(deployment_config, runtime_info["latest_dir"])
+        feature_columns = deployment_config.get("feature_columns", feature_columns)
+    except Exception:
+        deployed_model = None  # Chưa có model triển khai -> dùng nhánh dự phòng bên dưới.
+
+    records = []
+    for location_name, csv_filename in LOCATION_HISTORICAL_FILE.items():
+        risk_status = "An toàn"
+        try:
+            location_df = pd.read_csv(HISTORICAL_DIR / csv_filename).sort_values("Thời_gian")
+            if deployed_model is not None:
+                predicted_class = predict_flood_class(deployed_model, location_df, feature_columns)
+            else:
+                predicted_class = int(location_df["Nguy_cơ_ngập"].iloc[-1])
+            risk_status = "An toàn" if predicted_class == 0 else "Ngập"
+        except Exception:
+            risk_status = "An toàn"  # Thiếu dữ liệu/model lỗi -> mặc định an toàn, không chặn UI.
+
+        records.append({"Địa phương": location_name, "Nguy cơ": risk_status})
+
+    return pd.DataFrame(records, columns=["Địa phương", "Nguy cơ"])
+
+
 def build_smart_routing_map(
-    start_point: tuple[float, float],
-    end_point: tuple[float, float],
-    flooded_polygons: list,
-    route_points: list | None,
+    df_predictions: pd.DataFrame,
+    real_flooded_polygons: list,
+    start_point: tuple[float, float] | None = None,
+    end_point: tuple[float, float] | None = None,
+    route_points: list | None = None,
 ) -> folium.Map:
-    """Dựng bản đồ Folium: marker điểm đi/đến, vùng ngập tô ĐỎ, tuyến đường di chuyển vẽ XANH DƯƠNG."""
-    center_lat = (start_point[0] + end_point[0]) / 2
-    center_lon = (start_point[1] + end_point[1]) / 2
-    routing_map = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="OpenStreetMap")
+    """Dựng bản đồ Folium DUY NHẤT gộp cả 2 chức năng:
+    1) Giám sát 5 địa phương thực tế - marker XANH LÁ ('An toàn') / ĐỎ ('Ngập') + vùng ngập tô đỏ.
+    2) Định tuyến - marker điểm đi/đến + tuyến đường né ngập vẽ XANH DƯƠNG.
+    """
+    center_lat = sum(lat for lat, _ in REAL_MONITORED_LOCATIONS.values()) / len(REAL_MONITORED_LOCATIONS)
+    center_lon = sum(lon for _, lon in REAL_MONITORED_LOCATIONS.values()) / len(REAL_MONITORED_LOCATIONS)
+    routing_map = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles="OpenStreetMap")
 
-    folium.Marker(
-        location=start_point,
-        tooltip="Điểm xuất phát",
-        icon=folium.Icon(color="green", icon="play", prefix="fa"),
-    ).add_to(routing_map)
-    folium.Marker(
-        location=end_point,
-        tooltip="Điểm đến",
-        icon=folium.Icon(color="red", icon="flag-checkered", prefix="fa"),
-    ).add_to(routing_map)
+    # ---- (1) Giám sát: vẽ 5 địa phương thực tế, màu marker theo đúng 'Nguy cơ' dự báo của AI ----
+    for location_name, coordinates in REAL_MONITORED_LOCATIONS.items():
+        risk_rows = df_predictions.loc[df_predictions["Địa phương"] == location_name, "Nguy cơ"]
+        risk_status = risk_rows.iloc[0] if not risk_rows.empty else "An toàn"
 
-    # Vẽ TOÀN BỘ polygon ngập gốc (chi tiết, không phải bounding box) để trực quan đúng hình dạng
-    # thực tế của vùng ngập, dù phần gửi lên TomTom đã được đơn giản hóa thành rectangle.
-    for polygon in flooded_polygons:
+        if risk_status == "Ngập":
+            folium.Marker(
+                location=coordinates,
+                tooltip=f"🔴 {location_name}: Nguy cơ NGẬP (dự báo AI)",
+                icon=folium.Icon(color="red", icon="exclamation-triangle", prefix="fa"),
+            ).add_to(routing_map)
+        else:
+            folium.Marker(
+                location=coordinates,
+                tooltip=f"🟢 {location_name}: An toàn",
+                icon=folium.Icon(color="green", icon="check", prefix="fa"),
+            ).add_to(routing_map)
+
+    # ---- Vẽ vùng ngập THỰC TẾ (đã được suy ra từ df_predictions, không còn là dummy cố định) ----
+    for polygon in real_flooded_polygons:
         folium.Polygon(
             locations=polygon,
             color="#B91C1C",
             weight=2,
             fill=True,
             fill_color="#EF4444",
-            fill_opacity=0.4,
-            tooltip="🔴 Khu vực đang ngập - cần né tránh",
+            fill_opacity=0.35,
+            tooltip="🔴 Vùng ngập ước tính - routing engine tự động né khu vực này",
+        ).add_to(routing_map)
+
+    # ---- (2) Định tuyến: điểm đi/đến (màu riêng, tránh trùng với màu xanh lá/đỏ của giám sát) ----
+    if start_point is not None:
+        folium.Marker(
+            location=start_point,
+            tooltip="🏁 Điểm xuất phát",
+            icon=folium.Icon(color="blue", icon="play", prefix="fa"),
+        ).add_to(routing_map)
+    if end_point is not None:
+        folium.Marker(
+            location=end_point,
+            tooltip="🏁 Điểm đến",
+            icon=folium.Icon(color="cadetblue", icon="flag-checkered", prefix="fa"),
         ).add_to(routing_map)
 
     if route_points:
@@ -1461,7 +1597,7 @@ def build_smart_routing_map(
             color="#2563EB",
             weight=6,
             opacity=0.85,
-            tooltip="🔵 Tuyến đường di chuyển",
+            tooltip="🔵 Tuyến đường di chuyển (đã né vùng ngập)",
         ).add_to(routing_map)
 
     return routing_map
@@ -1470,25 +1606,50 @@ def build_smart_routing_map(
 def render_smart_routing_tab() -> None:
     """
     Nội dung Tab 4 - Bản đồ Tránh ngập, bước THỨ TƯ (sản phẩm ứng dụng thực tế) của pipeline.
-    Bố cục: cụm điều khiển (checkbox mô phỏng + nút tìm đường) đặt CĂN GIỮA bằng `st.columns([1,2,1])`,
-    bản đồ Folium đặt CĂN GIỮA rộng hơn bằng `st.columns([1,6,1])` để cân đối với phần điều khiển.
+    Bố cục: bảng giám sát 5 địa phương thực tế -> cụm chọn điểm đi/đến + nút tìm đường (CĂN GIỮA
+    bằng `st.columns([1,2,1])`) -> bản đồ Folium gộp cả giám sát lẫn định tuyến (CĂN GIỮA rộng hơn
+    bằng `st.columns([1,6,1])`).
     """
     st.subheader("🗺️ Bản đồ Tránh ngập")
     st.caption(
-        "Bước 4/4 của pipeline: ứng dụng thực tế của mô hình - dùng TomTom Routing API "
-        "(travelMode=motorcycle) để tính tuyến đường phù hợp cho xe máy, tự động né các khu vực đang ngập."
+        "Bước 4/4 của pipeline: giám sát 5 địa phương THỰC TẾ tại Thừa Thiên Huế bằng kết quả dự báo "
+        "của model AI, sau đó dùng TomTom Routing API (travelMode=motorcycle) để tự động tính tuyến "
+        "đường phù hợp cho xe máy, né các khu vực đang được AI cảnh báo ngập."
     )
 
-    # ---- Cụm điều khiển đặt CĂN GIỮA bằng bố cục 3 cột (cột giữa rộng hơn 2 cột biên) ----
+    # ==============================================================================================
+    # BƯỚC 1: ĐỌC ĐỘNG kết quả dự báo mới nhất (df_predictions) cho 5 địa phương giám sát thực tế.
+    # Đây là điểm khác biệt CỐT LÕI so với bản demo cũ: bản đồ không còn hiển thị vùng ngập cố định
+    # (dummy) nữa, mà LUÔN phản ánh đúng đầu ra hiện tại của model AI (get_latest_flood_predictions()).
+    # ==============================================================================================
+    df_predictions = get_latest_flood_predictions()
+
+    # ---- BƯỚC 2: từ df_predictions, suy ra danh sách vùng ngập THỰC TẾ cần né (real_flooded_polygons)
+    # - CHỈ những địa phương có 'Nguy cơ' = 'Ngập' mới được thêm vào đây. Danh sách này sẽ được
+    # truyền thẳng vào tham số avoidAreas của TomTom Routing API bên dưới, nghĩa là routing engine
+    # TỰ ĐỘNG chặn đúng khu vực AI đang cảnh báo, không cần con người khoanh vùng thủ công.
+    real_flooded_polygons: list[list[tuple[float, float]]] = []
+    for location_name, coordinates in REAL_MONITORED_LOCATIONS.items():
+        risk_rows = df_predictions.loc[df_predictions["Địa phương"] == location_name, "Nguy cơ"]
+        if not risk_rows.empty and risk_rows.iloc[0] == "Ngập":
+            real_flooded_polygons.append(build_flood_zone_polygon(coordinates))
+
+    st.markdown("##### 📡 Trạng thái giám sát 5 địa phương (từ dự báo AI mới nhất)")
+    st.dataframe(df_predictions, use_container_width=True, hide_index=True)
+
+    # ---- Cụm chọn điểm đi/điểm đến + nút tìm đường, đặt CĂN GIỮA bằng bố cục 3 cột ----
     control_left, control_center, control_right = st.columns([1, 2, 1])
     with control_center:
-        simulate_flood = st.checkbox(
-            "🧪 Mô phỏng có vùng ngập trên tuyến đường (dummy data)",
-            value=True,
-            key="simulate_flood_zone_toggle",
-            help="Tắt để xem nhánh tiết kiệm API khi không có vùng ngập nào cần né.",
+        location_names = list(REAL_MONITORED_LOCATIONS.keys())
+        start_location_name = st.selectbox(
+            "📍 Điểm xuất phát", location_names, index=0, key="routing_start_select"
         )
-        flooded_polygons = DUMMY_FLOODED_POLYGONS if simulate_flood else []
+        end_location_name = st.selectbox(
+            "🏁 Điểm đến",
+            location_names,
+            index=3 if len(location_names) > 3 else 0,
+            key="routing_end_select",
+        )
 
         find_route_clicked = st.button(
             "🧭 Tìm tuyến đường",
@@ -1496,43 +1657,58 @@ def render_smart_routing_tab() -> None:
             use_container_width=True,
         )
 
+    start_point = REAL_MONITORED_LOCATIONS[start_location_name]
+    end_point = REAL_MONITORED_LOCATIONS[end_location_name]
+
     # Chỉ gọi API khi người dùng bấm nút (tránh gọi lại TomTom mỗi lần Streamlit rerun do tương tác
     # UI khác - đây cũng là một hình thức tiết kiệm lượt gọi API bổ sung), kết quả được lưu vào
     # session_state để vẫn hiển thị lại khi chuyển qua chuyển lại giữa các tab.
     if find_route_clicked:
-        with st.spinner("Đang tính toán tuyến đường..."):
-            st.session_state["smart_route_result"] = fetch_tomtom_route(
-                DUMMY_START_POINT, DUMMY_END_POINT, flooded_polygons=flooded_polygons
-            )
-            st.session_state["smart_route_flooded_polygons"] = flooded_polygons
+        if start_location_name == end_location_name:
+            st.session_state["smart_route_result"] = None
+            st.session_state["smart_route_same_point_error"] = True
+        else:
+            st.session_state["smart_route_same_point_error"] = False
+            with st.spinner("Đang tính toán tuyến đường né vùng ngập..."):
+                # ---- BƯỚC 3: gọi TomTom, truyền real_flooded_polygons vào avoidAreas ----
+                st.session_state["smart_route_result"] = fetch_tomtom_route(
+                    start_point, end_point, flooded_polygons=real_flooded_polygons
+                )
+            st.session_state["smart_route_points"] = (start_location_name, end_location_name)
 
     route_result = st.session_state.get("smart_route_result")
-    active_flooded_polygons = st.session_state.get("smart_route_flooded_polygons", flooded_polygons)
 
     with control_center:
-        if route_result is None:
+        if st.session_state.get("smart_route_same_point_error"):
+            st.warning("⚠️ Điểm xuất phát và điểm đến đang trùng nhau - vui lòng chọn 2 địa điểm khác nhau.")
+        elif route_result is None:
             st.info("Bấm **Tìm tuyến đường** để bắt đầu tính toán.")
         elif not route_result["success"]:
             st.error(f"Không thể lấy tuyến đường từ TomTom: {route_result['error']}")
-        elif not active_flooded_polygons:
-            # Nhánh tiết kiệm API: không có vùng ngập nên không gọi TomTom, chỉ báo thành công.
+        elif not real_flooded_polygons:
+            # Nhánh tiết kiệm API: không địa phương nào đang 'Ngập' nên không cần né, không gọi TomTom.
             st.success(
-                f"✅ Không phát hiện vùng ngập trên tuyến - bỏ qua việc gọi TomTom API để tiết kiệm "
-                f"chi phí. Khoảng cách đường chim bay ước lượng: {route_result['distance_km']} km."
+                f"✅ Không địa phương nào đang có nguy cơ ngập - bỏ qua việc gọi TomTom API để tiết "
+                f"kiệm chi phí. Khoảng cách đường chim bay ước lượng: {route_result['distance_km']} km."
             )
         else:
             metric_col_1, metric_col_2, metric_col_3 = st.columns(3)
             metric_col_1.metric("Quãng đường", f"{route_result['distance_km']} km")
             metric_col_2.metric("Thời gian di chuyển", f"{route_result['travel_time_min']} phút")
-            metric_col_3.metric("Vùng ngập đã né", f"{len(active_flooded_polygons)}")
+            metric_col_3.metric("Vùng ngập đã né", f"{len(real_flooded_polygons)}")
             st.success("✅ Đã tính tuyến đường né vùng ngập thành công bằng TomTom Routing API.")
 
-    # ---- Bản đồ đặt CĂN GIỮA, rộng và cân đối trong tab ----
+    # ---- Bản đồ đặt CĂN GIỮA, rộng và cân đối trong tab - gộp cả giám sát 5 địa phương lẫn tuyến
+    # đường vừa tính (nếu có) trên cùng 1 bản đồ Folium duy nhất ----
     map_left, map_center, map_right = st.columns([1, 6, 1])
     with map_center:
         route_points_to_draw = route_result["route_points"] if route_result and route_result["success"] else None
         smart_map = build_smart_routing_map(
-            DUMMY_START_POINT, DUMMY_END_POINT, active_flooded_polygons, route_points_to_draw
+            df_predictions=df_predictions,
+            real_flooded_polygons=real_flooded_polygons,
+            start_point=start_point,
+            end_point=end_point,
+            route_points=route_points_to_draw,
         )
         st_folium(smart_map, width=1000, height=600)
 
