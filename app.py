@@ -61,13 +61,38 @@ TRAINING_STATUS_PATH = CACHE_DIR / "training_status.json"
 TRAINING_LOG_PATH = CACHE_DIR / "training_output.log"
 
 # ------------------------------------------------------------------------------------------------
-# CẤU HÌNH SMART ROUTING (TomTom Routing API) - dùng cho tab "🗺️ Bản đồ Tránh ngập".
-# LƯU Ý BẢO MẬT: key được hardcode trực tiếp theo yêu cầu để chạy nhanh cho đồ án; `os.getenv(...)`
-# vẫn được ưu tiên đọc trước nếu bạn khai báo TOMTOM_API_KEY trong file `.env` (đã có sẵn cơ chế
-# `load_dotenv()` ở đầu file). Trước khi đẩy code lên GitHub public, nên XÓA key hardcode và chỉ
-# giữ lại biến môi trường, để tránh lộ API key trong lịch sử commit.
+# QUẢN LÝ API KEY AN TOÀN BẰNG st.secrets - KHÔNG hardcode key thật trong source code nữa (đây chính
+# là nguyên nhân GitGuardian từng phát hiện rò rỉ key TomTom cũ trong lịch sử Git của repo này).
+#
+# CƠ CHẾ HOẠT ĐỘNG:
+#   1. Khi chạy `streamlit run app.py`, Streamlit tự động đọc file `.streamlit/secrets.toml` (nếu có)
+#      và nạp toàn bộ key trong đó vào object `st.secrets` - hoạt động y hệt một dict, ví dụ
+#      `st.secrets["TOMTOM_KEY"]`. File này chỉ tồn tại CỤC BỘ trên máy bạn (hoặc được khai báo riêng
+#      trong mục "Secrets" khi deploy lên Streamlit Community Cloud), và đã được khai báo trong
+#      `.gitignore` -> Git sẽ KHÔNG BAO GIỜ commit file này lên GitHub, nên GitGuardian sẽ không còn
+#      gì để quét thấy.
+#   2. Nếu máy không có `.streamlit/secrets.toml` (ví dụ máy CI, hoặc bạn quen dùng file `.env` có
+#      sẵn `load_dotenv()` ở đầu file), `get_api_secret()` bên dưới sẽ tự động rơi xuống đọc biến môi
+#      trường bằng `os.getenv()` thay vì làm app crash - vẫn giữ được tính linh hoạt của cơ chế cũ.
+#   3. Nếu CẢ HAI đều không có key, hàm trả về `None` - các lời gọi API tương ứng (TomTom, OpenWeather)
+#      cần tự kiểm tra `None` để báo lỗi rõ ràng cho người dùng thay vì gọi API với key rỗng.
+#
+# LƯU Ý QUAN TRỌNG: key TomTom CŨ (đã từng hardcode trực tiếp trong file này ở các commit trước) coi
+# như đã bị lộ vĩnh viễn trong lịch sử Git dù đã xóa khỏi code hiện tại - BẮT BUỘC phải thu hồi
+# (revoke/regenerate) key đó trên dashboard TomTom, không chỉ đơn thuần xóa khỏi source code.
 # ------------------------------------------------------------------------------------------------
-TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY", "opH6G1fIc4yptvSrCqQ6iZI5yaifz1Je")
+def get_api_secret(secret_key: str, env_var_name: str) -> str | None:
+    """Đọc 1 API key theo thứ tự ưu tiên: `st.secrets` (secrets.toml) -> biến môi trường (`.env`)."""
+    try:
+        if secret_key in st.secrets:
+            return st.secrets[secret_key]
+    except Exception:
+        pass  # Chưa có file .streamlit/secrets.toml trên máy này -> rơi xuống nhánh .env bên dưới.
+    return os.getenv(env_var_name)
+
+
+TOMTOM_API_KEY = get_api_secret("TOMTOM_KEY", "TOMTOM_API_KEY")
+OPENWEATHER_API_KEY = get_api_secret("OPENWEATHER_KEY", "OPENWEATHER_API_KEY")
 TOMTOM_ROUTING_BASE_URL = "https://api.tomtom.com/routing/1/calculateRoute"
 
 # 5 ĐIỂM GIÁM SÁT NGẬP LỤT THỰC TẾ tại Thừa Thiên Huế (tọa độ trung tâm gần đúng của mỗi địa
