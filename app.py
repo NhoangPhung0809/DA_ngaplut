@@ -1,6 +1,5 @@
 import json
 import importlib.util
-import math
 import os
 import subprocess
 import sys
@@ -1335,17 +1334,6 @@ def polygon_to_bounding_rectangle(polygon_points: list[tuple[float, float]]) -> 
     }
 
 
-def _haversine_distance_km(point_a: tuple[float, float], point_b: tuple[float, float]) -> float:
-    """Tính khoảng cách đường chim bay (km) giữa 2 điểm lat/lon - chỉ dùng để hiển thị ước lượng
-    khi nhánh tiết kiệm API bỏ qua việc gọi TomTom (xem `fetch_tomtom_route`)."""
-    lat1, lon1 = math.radians(point_a[0]), math.radians(point_a[1])
-    lat2, lon2 = math.radians(point_b[0]), math.radians(point_b[1])
-    delta_lat = lat2 - lat1
-    delta_lon = lon2 - lon1
-    haversine_a = math.sin(delta_lat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
-    return 6371.0 * 2 * math.asin(math.sqrt(haversine_a))
-
-
 def fetch_tomtom_route(
     start_point: tuple[float, float],
     end_point: tuple[float, float],
@@ -1353,19 +1341,14 @@ def fetch_tomtom_route(
     api_key: str = TOMTOM_API_KEY,
 ) -> dict:
     """
-    Gọi TomTom Routing API để tính tuyến đường từ `start_point` đến `end_point`.
-
-    ----------------------------------------------------------------------------------------------
-    LOGIC TIẾT KIỆM CHI PHÍ GỌI API (COST-SAVING LOGIC):
-    ----------------------------------------------------------------------------------------------
-    TomTom tính phí/giới hạn quota theo số lượt gọi API. Việc tính toán né vùng ngập (`avoidAreas`)
-    tốn kém hơn một truy vấn định tuyến thông thường (do TomTom phải loại bỏ toàn bộ đoạn đường nằm
-    trong rectangle cấm rồi tìm đường vòng thay thế). Vì vậy:
-      - NẾU `flooded_polygons` KHÔNG rỗng: có nguy cơ ngập thật trên tuyến -> bắt buộc gọi TomTom
-        bằng phương thức POST kèm body `avoidAreas` để tính đường vòng né ngập.
-      - NẾU `flooded_polygons` RỖNG: không có vùng ngập nào cần né -> KHÔNG gọi API TomTom nữa
-        (tiết kiệm 100% chi phí lượt gọi đó), chỉ vẽ một đường thẳng minh họa nối 2 điểm và báo
-        thành công cho người dùng.
+    LUÔN gọi TomTom Routing API để lấy tuyến đường THẬT bám theo mạng lưới đường (snap-to-road) từ
+    `start_point` đến `end_point` - không còn nhánh vẽ đường chim bay minh họa như trước:
+      - NẾU `flooded_polygons` RỖNG: gọi TomTom KHÔNG kèm `avoidAreas` (định tuyến bình thường,
+        TomTom tự chọn tuyến nhanh nhất qua mạng lưới đường thật).
+      - NẾU `flooded_polygons` CÓ dữ liệu: gọi TomTom KÈM `avoidAreas` để tính đường vòng né vùng
+        ngập AI vừa cảnh báo.
+    Trong cả 2 trường hợp, `route_points` trả về LUÔN là tọa độ do TomTom tính, không phải điểm nối
+    thẳng đi/đến.
 
     TẠI SAO CHỌN `travelMode=motorcycle`?
     Đối tượng phục vụ chính của hệ thống cảnh báo là NGƯỜI DÂN VÀ LỰC LƯỢNG CỨU HỘ tại Huế - phương
@@ -1381,20 +1364,6 @@ def fetch_tomtom_route(
     has_flood_zones = bool(flooded_polygons)
     locations = f"{start_point[0]},{start_point[1]}:{end_point[0]},{end_point[1]}"
 
-    if not has_flood_zones:
-        # ---- NHÁNH TIẾT KIỆM: không có vùng ngập -> KHÔNG gọi TomTom, vẽ đường thẳng minh họa ----
-        straight_line_points = [start_point, end_point]
-        approx_distance_km = _haversine_distance_km(start_point, end_point)
-        return {
-            "success": True,
-            "route_points": straight_line_points,
-            "distance_km": round(approx_distance_km, 2),
-            "travel_time_min": None,
-            "used_avoid_areas": False,
-            "error": None,
-        }
-
-    # ---- NHÁNH BẮT BUỘC GỌI API: có vùng ngập -> POST kèm avoidAreas để né tuyến ----
     request_url = f"{TOMTOM_ROUTING_BASE_URL}/{locations}/json"
     query_params = {
         "key": api_key,
@@ -1402,14 +1371,20 @@ def fetch_tomtom_route(
         "travelMode": "motorcycle",
         "routeType": "fastest",
     }
-    request_body = {
-        "avoidAreas": {
-            "rectangles": [polygon_to_bounding_rectangle(polygon) for polygon in flooded_polygons]
-        }
-    }
-
     try:
-        response = requests.post(request_url, params=query_params, json=request_body, timeout=15)
+        if has_flood_zones:
+            # TomTom BẮT BUỘC dùng POST kèm body 'avoidAreas' khi cần né vùng ngập - request body
+            # RỖNG sẽ bị TomTom từ chối với lỗi 400 (đã kiểm chứng thực tế), nên nhánh KHÔNG có vùng
+            # ngập bên dưới phải dùng GET thay vì POST với body {}.
+            request_body = {
+                "avoidAreas": {
+                    "rectangles": [polygon_to_bounding_rectangle(polygon) for polygon in flooded_polygons]
+                }
+            }
+            response = requests.post(request_url, params=query_params, json=request_body, timeout=15)
+        else:
+            # Không có vùng ngập cần né -> gọi GET tiêu chuẩn, TomTom tự tính tuyến nhanh nhất.
+            response = requests.get(request_url, params=query_params, timeout=15)
         response.raise_for_status()
         payload = response.json()
 
@@ -1426,7 +1401,7 @@ def fetch_tomtom_route(
             "route_points": route_points,
             "distance_km": round(summary["lengthInMeters"] / 1000, 2),
             "travel_time_min": round(summary["travelTimeInSeconds"] / 60, 1),
-            "used_avoid_areas": True,
+            "used_avoid_areas": has_flood_zones,
             "error": None,
         }
     except Exception as exc:
@@ -1435,7 +1410,7 @@ def fetch_tomtom_route(
             "route_points": [],
             "distance_km": None,
             "travel_time_min": None,
-            "used_avoid_areas": True,
+            "used_avoid_areas": has_flood_zones,
             "error": str(exc),
         }
 
@@ -1685,18 +1660,20 @@ def render_smart_routing_tab() -> None:
             st.info("Bấm **Tìm tuyến đường** để bắt đầu tính toán.")
         elif not route_result["success"]:
             st.error(f"Không thể lấy tuyến đường từ TomTom: {route_result['error']}")
-        elif not real_flooded_polygons:
-            # Nhánh tiết kiệm API: không địa phương nào đang 'Ngập' nên không cần né, không gọi TomTom.
-            st.success(
-                f"✅ Không địa phương nào đang có nguy cơ ngập - bỏ qua việc gọi TomTom API để tiết "
-                f"kiệm chi phí. Khoảng cách đường chim bay ước lượng: {route_result['distance_km']} km."
-            )
         else:
+            # Luôn gọi TomTom nên luôn có số liệu THẬT (quãng đường/thời gian bám theo mạng lưới
+            # đường thật) - khác nhau duy nhất giữa 2 trường hợp là có kèm avoidAreas hay không.
             metric_col_1, metric_col_2, metric_col_3 = st.columns(3)
             metric_col_1.metric("Quãng đường", f"{route_result['distance_km']} km")
             metric_col_2.metric("Thời gian di chuyển", f"{route_result['travel_time_min']} phút")
             metric_col_3.metric("Vùng ngập đã né", f"{len(real_flooded_polygons)}")
-            st.success("✅ Đã tính tuyến đường né vùng ngập thành công bằng TomTom Routing API.")
+            if route_result["used_avoid_areas"]:
+                st.success("✅ Đã tính tuyến đường né vùng ngập thành công bằng TomTom Routing API.")
+            else:
+                st.success(
+                    "✅ Không địa phương nào đang có nguy cơ ngập - TomTom tính tuyến đường bình "
+                    "thường (không kèm avoidAreas)."
+                )
 
     # ---- Bản đồ đặt CĂN GIỮA, rộng và cân đối trong tab - gộp cả giám sát 5 địa phương lẫn tuyến
     # đường vừa tính (nếu có) trên cùng 1 bản đồ Folium duy nhất ----
@@ -1710,7 +1687,10 @@ def render_smart_routing_tab() -> None:
             end_point=end_point,
             route_points=route_points_to_draw,
         )
-        st_folium(smart_map, width=1000, height=600)
+        # `returned_objects=[]` tắt việc st_folium gửi trạng thái pan/zoom/click ngược về Streamlit -
+        # đây là nguyên nhân khiến app rerun toàn bộ mỗi lần người dùng chỉ kéo/phóng bản đồ. Vì tab
+        # này không cần đọc lại tương tác trên bản đồ (chỉ hiển thị), tắt hẳn để tránh rerun thừa.
+        st_folium(smart_map, width=1000, height=600, returned_objects=[])
 
 
 # ==================================================================================================
