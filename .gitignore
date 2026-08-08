@@ -12,3 +12,7 @@ pm/
 
 # Chứa API key thật (OPENWEATHER_API_KEY, STORMGLASS_API_KEY, NOAA_CDO_TOKEN, ...) - KHÔNG được commit.
 .env
+
+# Thư mục cấu hình Streamlit cục bộ - chứa .streamlit/secrets.toml (OPENWEATHER_KEY, TOMTOM_KEY, ...).
+# Bỏ qua CẢ THƯ MỤC để chắc chắn không có API key thật nào lọt vào Git dù đặt tên file khác đi.
+.streamlit/
