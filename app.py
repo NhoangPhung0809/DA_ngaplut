@@ -1,5 +1,6 @@
 import json
 import importlib.util
+import math
 import os
 import subprocess
 import sys
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import folium
 import joblib
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import requests
@@ -1505,6 +1507,154 @@ def get_latest_flood_predictions() -> pd.DataFrame:
         records.append({"Địa phương": location_name, "Nguy cơ": risk_status})
 
     return pd.DataFrame(records, columns=["Địa phương", "Nguy cơ"])
+
+
+# ==================================================================================================
+# MODULE DỰ BÁO 4 NGÀY (Ngày T, T+1, T+2, T+3) - CORE FORECASTING MODULE
+# ==================================================================================================
+def _fetch_or_estimate_tide_heights(lat: float, lon: float, forecast_dates: pd.DatetimeIndex) -> list[float]:
+    """
+    Lấy chiều cao triều (m) cho từng ngày trong `forecast_dates`.
+
+    Ưu tiên dữ liệu THẬT từ Open-Meteo Marine API (`wave_height_max`) tại chính tọa độ (lat, lon).
+    Marine API CHỈ có dữ liệu tại các điểm lưới nằm trên/gần biển - với tọa độ NỘI ĐỊA (ví dụ TP Huế,
+    Hương Trà, Quảng Điền), API trả về `null` cho toàn bộ ngày, khi đó hàm dùng công thức triều tổng
+    hợp (bán nhật triều chu kỳ ~12.42 giờ + chu kỳ mặt trăng ~29.53 ngày) làm giá trị xấp xỉ - ĐÚNG
+    phương pháp đã dùng để sinh cột `Chiều_cao_triều_m` khi xây dựng dữ liệu huấn luyện lịch sử (xem
+    `calculate_synthetic_tide()` trong `fetch_data.py`), giúp đầu vào suy luận nhất quán về mặt phân
+    phối với dữ liệu mà model đã học, thay vì dùng một hằng số mặc định tùy tiện.
+    """
+    try:
+        marine_response = requests.get(
+            "https://marine-api.open-meteo.com/v1/marine",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "daily": "wave_height_max",
+                "forecast_days": len(forecast_dates),
+                "timezone": "auto",
+            },
+            timeout=15,
+        )
+        marine_response.raise_for_status()
+        wave_heights = marine_response.json()["daily"]["wave_height_max"][: len(forecast_dates)]
+        if wave_heights and all(value is not None for value in wave_heights):
+            return [float(value) for value in wave_heights]
+    except (requests.exceptions.RequestException, KeyError, ValueError, TypeError):
+        pass  # Tọa độ nội địa hoặc Marine API lỗi -> rơi xuống nhánh công thức dự phòng bên dưới.
+
+    synthetic_heights = []
+    for forecast_date in forecast_dates:
+        elapsed_seconds = (forecast_date.to_pydatetime() - datetime(2000, 1, 1)).total_seconds()
+        lunar_phase = 2 * math.pi * elapsed_seconds / (29.53 * 86400)
+        semi_daily_phase = 2 * math.pi * elapsed_seconds / (12.42 * 3600)
+        tide_value = 1.0 + 0.5 * math.sin(lunar_phase) + 0.8 * math.sin(semi_daily_phase)
+        synthetic_heights.append(max(0.1, min(4.0, tide_value)))
+    return synthetic_heights
+
+
+def predict_4_days_forecast(lat: float, lon: float, model, scaler) -> pd.DataFrame | None:
+    """
+    Dự báo nguy cơ ngập cho 4 NGÀY LIÊN TIẾP - Ngày T (hôm nay), T+1, T+2, T+3 - tại 1 tọa độ
+    (lat, lon) bất kỳ, dùng `model` + `scaler` ĐÃ HUẤN LUYỆN SẴN được truyền vào (không tự nạp model
+    trong hàm này, để hàm dùng được với bất kỳ model nào - XGBoost, RandomForest, hay Deep Learning).
+
+    Trả về DataFrame gồm 3 cột: ['Ngày', 'Dự báo Lượng mưa (mm)', 'Dự đoán Ngập'], hoặc `None` nếu
+    gọi API/model lỗi (đã được xử lý gracefully bằng try-except, không raise exception ra ngoài).
+    """
+    FEATURE_COLS = ["Nhiệt_độ_C", "Độ_ẩm_%", "Lượng_mưa_mm", "Độ_ẩm_đất", "Chiều_cao_triều_m"]
+    FORECAST_DAYS = 4
+
+    # ==============================================================================================
+    # BƯỚC A - FETCH DATA: gọi Open-Meteo FORECAST API (dự báo tương lai - khác với Archive API chỉ
+    # có dữ liệu QUÁ KHỨ mà fetch_data.py dùng để xây tập huấn luyện) để lấy dữ liệu khí tượng THEO
+    # NGÀY cho đúng 4 ngày kể từ hôm nay.
+    #
+    # GIẢI THÍCH XỬ LÝ CỬA SỔ THỜI GIAN (datetime window) - để đưa vào báo cáo luận văn:
+    # Tham số `forecast_days=4` kết hợp `timezone="auto"` khiến Open-Meteo tự suy ra múi giờ ĐỊA
+    # PHƯƠNG của tọa độ (lat, lon) - với Huế là Asia/Ho_Chi_Minh (UTC+7) - rồi trả về mảng `daily.time`
+    # LUÔN bắt đầu từ NGÀY HIỆN TẠI theo múi giờ đó. Nhờ vậy, index 0 của mảng chính xác là Ngày T
+    # (hôm nay), index 1/2/3 lần lượt là T+1/T+2/T+3, mà KHÔNG cần tự tính `datetime.now() + timedelta`
+    # thủ công - cách làm thủ công dễ bị lệch 1 ngày nếu server chạy ở múi giờ UTC trong khi vị trí
+    # cần dự báo lại ở múi giờ khác (UTC+7).
+    # ==============================================================================================
+    try:
+        weather_response = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "daily": (
+                    "precipitation_sum,rain_sum,temperature_2m_mean,"
+                    "relative_humidity_2m_mean,soil_moisture_0_to_7cm_mean"
+                ),
+                "forecast_days": FORECAST_DAYS,
+                "timezone": "auto",
+            },
+            timeout=15,
+        )
+        weather_response.raise_for_status()
+        daily_weather = weather_response.json()["daily"]
+        forecast_dates = pd.to_datetime(daily_weather["time"])
+        if len(forecast_dates) < FORECAST_DAYS:
+            raise ValueError(f"API chỉ trả về {len(forecast_dates)}/{FORECAST_DAYS} ngày dữ liệu.")
+    except (requests.exceptions.RequestException, KeyError, ValueError, TypeError) as exc:
+        print(f"[predict_4_days_forecast] Lỗi khi gọi Open-Meteo Forecast API: {exc}")
+        return None
+
+    # Chiều cao triều lấy riêng (Forecast API thường không có biến này) - xem docstring hàm phụ trợ.
+    tide_heights = _fetch_or_estimate_tide_heights(lat, lon, forecast_dates)
+
+    # ==============================================================================================
+    # BƯỚC B - PREPROCESSING: gộp toàn bộ đặc trưng vào 1 DataFrame theo ĐÚNG THỨ TỰ CỘT mà `scaler`
+    # đã ghi nhớ lúc huấn luyện (`scaler.feature_names_in_`), sau đó `transform()` để đưa dữ liệu thô
+    # (đơn vị gốc: độ C, %, mm, m³/m³, m) về cùng thang đo chuẩn hóa (mean=0, std=1) mà model đã học.
+    # Bỏ qua bước này sẽ khiến model suy luận sai nghiêm trọng dù code chạy không lỗi.
+    # ==============================================================================================
+    try:
+        daily_features_df = pd.DataFrame(
+            {
+                "Nhiệt_độ_C": daily_weather["temperature_2m_mean"][:FORECAST_DAYS],
+                "Độ_ẩm_%": daily_weather["relative_humidity_2m_mean"][:FORECAST_DAYS],
+                "Lượng_mưa_mm": daily_weather["rain_sum"][:FORECAST_DAYS],
+                "Độ_ẩm_đất": daily_weather["soil_moisture_0_to_7cm_mean"][:FORECAST_DAYS],
+                "Chiều_cao_triều_m": tide_heights,
+            }
+        )
+        feature_columns = list(getattr(scaler, "feature_names_in_", FEATURE_COLS))
+        X_scaled = scaler.transform(daily_features_df[feature_columns])
+    except Exception as exc:
+        print(f"[predict_4_days_forecast] Lỗi khi tiền xử lý/chuẩn hóa dữ liệu: {exc}")
+        return None
+
+    # ==============================================================================================
+    # BƯỚC C - PREDICTION: `model` có thể là XGBoost/RandomForest (API kiểu scikit-learn, `.predict()`
+    # trả về THẲNG nhãn lớp 0/1/2 - mảng 1 chiều) hoặc Deep Learning/Keras (`.predict()` trả về ma
+    # trận xác suất softmax theo từng lớp - mảng 2 chiều, cần `argmax` để lấy nhãn lớp có xác suất cao
+    # nhất). Tự động nhận diện theo số chiều (`ndim`) của kết quả để xử lý đúng cho cả 2 trường hợp mà
+    # không cần biết trước loại model.
+    # ==============================================================================================
+    try:
+        raw_output = np.asarray(model.predict(X_scaled))
+        predicted_classes = np.argmax(raw_output, axis=1) if raw_output.ndim == 2 else raw_output.astype(int)
+    except Exception as exc:
+        print(f"[predict_4_days_forecast] Lỗi khi suy luận bằng model: {exc}")
+        return None
+
+    # ==============================================================================================
+    # BƯỚC D - OUTPUT: đóng gói kết quả thành DataFrame dễ đọc - gắn nhãn ngày thứ (T/T+1/T+2/T+3) và
+    # ánh xạ nhãn số sang văn bản tiếng Việt dễ hiểu (0 -> 'An toàn', khác 0 -> 'Nguy cơ ngập').
+    # ==============================================================================================
+    day_labels = ["T (Hôm nay)", "T+1", "T+2", "T+3"]
+    result_rows = [
+        {
+            "Ngày": f"{forecast_dates[offset].strftime('%d/%m/%Y')} ({day_labels[offset]})",
+            "Dự báo Lượng mưa (mm)": round(float(daily_features_df["Lượng_mưa_mm"].iloc[offset]), 1),
+            "Dự đoán Ngập": "An toàn" if int(predicted_classes[offset]) == 0 else "Nguy cơ ngập",
+        }
+        for offset in range(FORECAST_DAYS)
+    ]
+    return pd.DataFrame(result_rows, columns=["Ngày", "Dự báo Lượng mưa (mm)", "Dự đoán Ngập"])
 
 
 def build_smart_routing_map(
