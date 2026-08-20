@@ -1874,7 +1874,6 @@ def render_smart_routing_tab() -> None:
 def render_sidebar() -> None:
     """Sidebar tối giản: giới thiệu nhanh 4 bước pipeline + nút làm mới cache toàn cục."""
     st.sidebar.markdown("## 🌊 Flood Prediction Pipeline")
-    st.sidebar.caption("Đồ án Thạc sĩ - Dự báo & Cảnh báo Ngập lụt Thừa Thiên Huế")
     st.sidebar.markdown(
         "1. 📊 Khám phá Dữ liệu (EDA)\n"
         "2. ⚙️ Tiền xử lý & Huấn luyện\n"
