@@ -1514,7 +1514,11 @@ def get_latest_flood_predictions() -> pd.DataFrame:
     try:
         evaluation_metrics, deployment_config, runtime_info = load_evaluation_artifacts()
         deployed_model = load_deployment_model(deployment_config, runtime_info["latest_dir"])
-        feature_columns = deployment_config.get("feature_columns", feature_columns)
+        # Lưu ý: `deployment_config.json` lưu key "feature_cols" (xem `save_deployment_config()` trong
+        # `analyze_and_train.py`), không phải "feature_columns" - đã từng đọc sai tên khóa ở đây khiến
+        # luôn rơi về giá trị mặc định `FEATURE_COLS_FOR_INFERENCE` (vô hại vì trùng giá trị, nhưng dễ
+        # gây lỗi khó phát hiện nếu 2 danh sách này lệch nhau sau này).
+        feature_columns = deployment_config.get("feature_cols") or feature_columns
     except Exception:
         deployed_model = None  # Chưa có model triển khai -> dùng nhánh dự phòng bên dưới.
 
@@ -1539,9 +1543,13 @@ def get_latest_flood_predictions() -> pd.DataFrame:
 # ==================================================================================================
 # MODULE DỰ BÁO 4 NGÀY (Ngày T, T+1, T+2, T+3) - CORE FORECASTING MODULE
 # ==================================================================================================
-def _fetch_or_estimate_tide_heights(lat: float, lon: float, forecast_dates: pd.DatetimeIndex) -> list[float]:
+def _fetch_or_estimate_tide_heights(
+    lat: float, lon: float, forecast_dates: pd.DatetimeIndex, past_days: int = 0
+) -> list[float]:
     """
-    Lấy chiều cao triều (m) cho từng ngày trong `forecast_dates`.
+    Lấy chiều cao triều (m) cho từng ngày trong `forecast_dates` (có thể gồm cả ngày QUÁ KHỨ nếu
+    `past_days > 0` - dùng khi cần dựng cửa sổ chuỗi thời gian cho model dạng sequence/hybrid, xem
+    `predict_days_ahead_forecast_sequence()`).
 
     Ưu tiên dữ liệu THẬT từ Open-Meteo Marine API (`wave_height_max`) tại chính tọa độ (lat, lon).
     Marine API CHỈ có dữ liệu tại các điểm lưới nằm trên/gần biển - với tọa độ NỘI ĐỊA (ví dụ TP Huế,
@@ -1549,8 +1557,11 @@ def _fetch_or_estimate_tide_heights(lat: float, lon: float, forecast_dates: pd.D
     hợp (bán nhật triều chu kỳ ~12.42 giờ + chu kỳ mặt trăng ~29.53 ngày) làm giá trị xấp xỉ - ĐÚNG
     phương pháp đã dùng để sinh cột `Chiều_cao_triều_m` khi xây dựng dữ liệu huấn luyện lịch sử (xem
     `calculate_synthetic_tide()` trong `fetch_data.py`), giúp đầu vào suy luận nhất quán về mặt phân
-    phối với dữ liệu mà model đã học, thay vì dùng một hằng số mặc định tùy tiện.
+    phối với dữ liệu mà model đã học, thay vì dùng một hằng số mặc định tùy tiện. Công thức tổng hợp
+    này tính trực tiếp từ giá trị NGÀY THÁNG (không phụ thuộc gọi API), nên áp dụng được cho cả ngày
+    quá khứ lẫn tương lai mà không cần phân biệt.
     """
+    forecast_days_needed = len(forecast_dates) - past_days
     try:
         marine_response = requests.get(
             "https://marine-api.open-meteo.com/v1/marine",
@@ -1558,14 +1569,15 @@ def _fetch_or_estimate_tide_heights(lat: float, lon: float, forecast_dates: pd.D
                 "latitude": lat,
                 "longitude": lon,
                 "daily": "wave_height_max",
-                "forecast_days": len(forecast_dates),
+                "past_days": past_days,
+                "forecast_days": forecast_days_needed,
                 "timezone": "auto",
             },
             timeout=15,
         )
         marine_response.raise_for_status()
         wave_heights = marine_response.json()["daily"]["wave_height_max"][: len(forecast_dates)]
-        if wave_heights and all(value is not None for value in wave_heights):
+        if len(wave_heights) == len(forecast_dates) and all(value is not None for value in wave_heights):
             return [float(value) for value in wave_heights]
     except (requests.exceptions.RequestException, KeyError, ValueError, TypeError):
         pass  # Tọa độ nội địa hoặc Marine API lỗi -> rơi xuống nhánh công thức dự phòng bên dưới.
@@ -1690,6 +1702,113 @@ def predict_4_days_forecast(lat: float, lon: float, model, scaler) -> pd.DataFra
     return pd.DataFrame(result_rows, columns=["Ngày", "Dự báo Lượng mưa (mm)", "Dự đoán Ngập"])
 
 
+DEFAULT_SEQUENCE_WINDOW_SIZE = 7  # Khớp SEQUENCE_WINDOW mặc định trong analyze_and_train.py.
+
+
+def predict_days_ahead_forecast_sequence(
+    lat: float, lon: float, deployed_model: dict, feature_columns: list[str]
+) -> pd.DataFrame | None:
+    """
+    PHẦN MỞ RỘNG của `predict_4_days_forecast()` cho model DẠNG CHUỖI (`keras_sequence`) và HYBRID
+    (`hybrid_lstm_xgboost`) - 2 loại model mà `predict_4_days_forecast()` KHÔNG xử lý được, vì nó đưa
+    từng ngày vào model NHƯ 1 DÒNG ĐỘC LẬP (đúng cho model dạng bảng), trong khi model dạng chuỗi cần
+    NGUYÊN 1 CỬA SỔ nhiều ngày liên tiếp làm đầu vào.
+
+    ĐÚNG QUY ƯỚC CỬA SỔ LÚC HUẤN LUYỆN (xem `build_sequence_datasets()` trong `analyze_and_train.py`):
+    cửa sổ gồm `window_size` ngày liên tiếp, và NHÃN CẦN DỰ ĐOÁN LÀ CỦA CHÍNH NGÀY CUỐI CÙNG trong cửa
+    sổ đó (không phải ngày sau đó) - tức để dự đoán ngày T+3, cần 1 cửa sổ (window_size - 1) ngày
+    TRƯỚC T+3 cộng với chính ngày T+3.
+
+    CÁCH LẤY DỮ LIỆU: gọi Open-Meteo với CẢ `past_days` (lấy đúng (window_size - 1) ngày QUÁ KHỨ THẬT
+    ngay trước hôm nay) VÀ `forecast_days=4` (lấy dự báo TƯƠNG LAI cho T/T+1/T+2/T+3) trong CÙNG 1
+    request, ghép thành 1 chuỗi ngày liên tục duy nhất, rồi TRƯỢT cửa sổ qua 4 vị trí kết thúc tại
+    T/T+1/T+2/T+3 - với các cửa sổ của T+1/T+2/T+3, một phần cửa sổ sẽ dùng chính dữ liệu DỰ BÁO
+    (chưa xảy ra) của các ngày trước đó trong cùng đợt dự báo, đây là cách làm hợp lý duy nhất vì
+    tại thời điểm dự đoán, dữ liệu THẬT của những ngày đó chưa tồn tại.
+    """
+    model_type = deployed_model["model_type"]
+    scaler = deployed_model["scaler"]
+    window_size = deployed_model.get("window_size") or DEFAULT_SEQUENCE_WINDOW_SIZE
+    FORECAST_DAYS = 4
+    past_days_needed = window_size - 1
+    total_days_needed = past_days_needed + FORECAST_DAYS
+
+    try:
+        weather_response = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "daily": (
+                    "precipitation_sum,rain_sum,temperature_2m_mean,"
+                    "relative_humidity_2m_mean,soil_moisture_0_to_7cm_mean"
+                ),
+                "past_days": past_days_needed,
+                "forecast_days": FORECAST_DAYS,
+                "timezone": "auto",
+            },
+            timeout=15,
+        )
+        weather_response.raise_for_status()
+        daily_weather = weather_response.json()["daily"]
+        all_dates = pd.to_datetime(daily_weather["time"])
+        if len(all_dates) < total_days_needed:
+            raise ValueError(f"API chỉ trả về {len(all_dates)}/{total_days_needed} ngày dữ liệu.")
+    except (requests.exceptions.RequestException, KeyError, ValueError, TypeError) as exc:
+        print(f"[predict_days_ahead_forecast_sequence] Lỗi khi gọi Open-Meteo Forecast API: {exc}")
+        return None
+
+    tide_heights = _fetch_or_estimate_tide_heights(lat, lon, all_dates, past_days=past_days_needed)
+
+    try:
+        daily_features_df = pd.DataFrame(
+            {
+                "Nhiệt_độ_C": daily_weather["temperature_2m_mean"][:total_days_needed],
+                "Độ_ẩm_%": daily_weather["relative_humidity_2m_mean"][:total_days_needed],
+                "Lượng_mưa_mm": daily_weather["rain_sum"][:total_days_needed],
+                "Độ_ẩm_đất": daily_weather["soil_moisture_0_to_7cm_mean"][:total_days_needed],
+                "Chiều_cao_triều_m": tide_heights[:total_days_needed],
+            }
+        )
+        # Giữ tên cột (DataFrame) khi transform - tránh warning "X does not have valid feature names".
+        scaled_all_days = pd.DataFrame(
+            scaler.transform(daily_features_df[feature_columns]), columns=feature_columns
+        ).to_numpy()
+    except Exception as exc:
+        print(f"[predict_days_ahead_forecast_sequence] Lỗi khi tiền xử lý/chuẩn hóa dữ liệu: {exc}")
+        return None
+
+    day_labels = ["T (Hôm nay)", "T+1", "T+2", "T+3"]
+    result_rows = []
+    try:
+        for offset in range(FORECAST_DAYS):
+            end_idx = past_days_needed + offset  # Vị trí ngày T/T+1/T+2/T+3 trong chuỗi đã ghép.
+            start_idx = end_idx - window_size + 1
+            window_input = scaled_all_days[start_idx : end_idx + 1].reshape(1, window_size, len(feature_columns))
+
+            if model_type == "keras_sequence":
+                class_probabilities = deployed_model["model"].predict(window_input, verbose=0)
+                predicted_class = int(np.argmax(class_probabilities, axis=-1)[0])
+            elif model_type == "hybrid_lstm_xgboost":
+                embedding = deployed_model["feature_extractor"].predict(window_input, verbose=0)
+                predicted_class = int(deployed_model["classifier"].predict(embedding)[0])
+            else:
+                raise ValueError(f"model_type không được hỗ trợ: {model_type}")
+
+            result_rows.append(
+                {
+                    "Ngày": f"{all_dates[end_idx].strftime('%d/%m/%Y')} ({day_labels[offset]})",
+                    "Dự báo Lượng mưa (mm)": round(float(daily_features_df["Lượng_mưa_mm"].iloc[end_idx]), 1),
+                    "Dự đoán Ngập": "An toàn" if predicted_class == 0 else "Nguy cơ ngập",
+                }
+            )
+    except Exception as exc:
+        print(f"[predict_days_ahead_forecast_sequence] Lỗi khi suy luận bằng model: {exc}")
+        return None
+
+    return pd.DataFrame(result_rows, columns=["Ngày", "Dự báo Lượng mưa (mm)", "Dự đoán Ngập"])
+
+
 def render_forecast_tab() -> None:
     """
     Nội dung TRANG ĐẦU TIÊN của app - bảng dự báo nguy cơ ngập 4 ngày tới (T/T+1/T+2/T+3) cho toàn bộ
@@ -1716,22 +1835,6 @@ def render_forecast_tab() -> None:
         return
 
     model_type = deployment_config.get("model_type")
-    if model_type != "sklearn_tabular":
-        # `predict_4_days_forecast()` đưa từng ngày dự báo vào model NHƯ 1 DÒNG DỮ LIỆU ĐỘC LẬP (đúng
-        # cách model dạng bảng - sklearn/XGBoost - được huấn luyện). Model dạng chuỗi (keras_sequence)
-        # hoặc Hybrid cần một CỬA SỔ NHIỀU NGÀY QUÁ KHỨ liên tiếp làm đầu vào (xem `predict_flood_class`
-        # ở trên, dùng cho suy luận 1 thời điểm hiện tại) - 4 ngày dự báo tương lai từ Open-Meteo không
-        # đủ tạo lại đúng cửa sổ đó, nên tạm thời CHƯA hỗ trợ dự báo nhiều ngày cho 2 loại model này ở
-        # đây để tránh suy luận sai mà không báo lỗi.
-        st.info(
-            f"Best model hiện tại là `{deployment_config.get('model_name')}` (loại `{model_type}`). "
-            "Bảng dự báo 4 ngày ở trang này hiện chỉ hỗ trợ model dạng bảng (Machine Learning/Statistical "
-            "- sklearn/XGBoost...), vì suy luận nhiều ngày cần cửa sổ dữ liệu quá khứ mà model dạng chuỗi/"
-            "Hybrid yêu cầu, trong khi dữ liệu dự báo tương lai từ Open-Meteo không đủ để dựng lại cửa sổ "
-            "đó. Muốn dùng tính năng này, hãy huấn luyện lại ở Tab 2 và chỉ chọn các mô hình Machine "
-            "Learning/Statistical."
-        )
-        return
 
     try:
         deployed_model = load_deployment_model(deployment_config, runtime_info["latest_dir"])
@@ -1739,13 +1842,30 @@ def render_forecast_tab() -> None:
         st.error(f"❌ Không thể nạp model để dự báo: {exc}")
         return
 
+    # `deployment_config.json` lưu key "feature_cols" (xem `save_deployment_config()` trong
+    # `analyze_and_train.py`) - dùng đúng danh sách/thứ tự cột này thay vì hằng số cố định, để tự
+    # thích ứng nếu sau này bộ đặc trưng của model thay đổi.
+    feature_columns = deployment_config.get("feature_cols") or FEATURE_COLS_FOR_INFERENCE
+
     forecast_frames = []
     failed_locations = []
     with st.spinner("Đang gọi Open-Meteo và suy luận dự báo cho 5 địa phương..."):
         for location_name, (lat, lon) in REAL_MONITORED_LOCATIONS.items():
-            location_forecast_df = predict_4_days_forecast(
-                lat, lon, deployed_model["model"], deployed_model["scaler"]
-            )
+            # DISPATCH THEO ĐÚNG model_type - đây là điểm khác biệt so với bản trước (chỉ hỗ trợ
+            # sklearn_tabular): model dạng bảng dùng `predict_4_days_forecast()` (mỗi ngày 1 dòng độc
+            # lập), model dạng chuỗi/Hybrid dùng `predict_days_ahead_forecast_sequence()` (cửa sổ
+            # nhiều ngày liên tiếp, xem docstring hàm đó để biết chi tiết cách dựng cửa sổ).
+            if model_type == "sklearn_tabular":
+                location_forecast_df = predict_4_days_forecast(
+                    lat, lon, deployed_model["model"], deployed_model["scaler"]
+                )
+            elif model_type in {"keras_sequence", "hybrid_lstm_xgboost"}:
+                location_forecast_df = predict_days_ahead_forecast_sequence(
+                    lat, lon, deployed_model, feature_columns
+                )
+            else:
+                location_forecast_df = None
+
             if location_forecast_df is None:
                 failed_locations.append(location_name)
                 continue
