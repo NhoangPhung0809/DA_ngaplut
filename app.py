@@ -1865,105 +1865,85 @@ def build_smart_routing_map(
 def render_smart_routing_tab() -> None:
     """
     Nội dung Tab 4 - Bản đồ Tránh ngập, bước THỨ TƯ (sản phẩm ứng dụng thực tế) của pipeline.
-    Bố cục: bảng giám sát 5 địa phương thực tế -> cụm chọn điểm đi/đến + nút tìm đường (CĂN GIỮA
-    bằng `st.columns([1,2,1])`) -> bản đồ Folium gộp cả giám sát lẫn định tuyến (CĂN GIỮA rộng hơn
-    bằng `st.columns([1,6,1])`).
+
+    THIẾT KẾ LẠI THEO YÊU CẦU THỰC TẾ (khác bản demo trước - vốn chỉ cho chọn giữa 5 điểm giám sát
+    cố định và luôn cần bấm nút thủ công):
+      1. ĐIỂM ĐI/ĐẾN LÀ BẤT KỲ TRÊN BẢN ĐỒ: người dùng click trực tiếp lên bản đồ để đặt điểm xuất
+         phát/điểm đến ở BẤT KỲ đâu trong khu vực (không giới hạn quanh 5 điểm giám sát) - dùng
+         `st_folium(..., returned_objects=["last_clicked"])` để đọc lại tọa độ vừa click.
+      2. TỰ ĐỘNG TÌM ĐƯỜNG KHI CÓ NGẬP: chỉ cần MỘT địa phương giám sát chuyển sang trạng thái
+         'Ngập', hệ thống tự động gọi TomTom tính lại tuyến né vùng ngập ngay, KHÔNG cần người dùng
+         bấm nút - nút "Tìm tuyến đường" vẫn giữ lại để chủ động tính lại bất cứ lúc nào (kể cả khi
+         đang an toàn), nhưng không còn là điều kiện BẮT BUỘC để có tuyến đường khi có ngập.
     """
     st.subheader("🗺️ Bản đồ Tránh ngập")
     st.caption(
         "Bước 4/4 của pipeline: giám sát 5 địa phương THỰC TẾ tại Thừa Thiên Huế bằng kết quả dự báo "
-        "của model AI, sau đó dùng TomTom Routing API (travelMode=motorcycle) để tự động tính tuyến "
-        "đường phù hợp cho xe máy, né các khu vực đang được AI cảnh báo ngập."
+        "của model AI. Click trực tiếp lên bản đồ để đặt điểm xuất phát/điểm đến ở BẤT KỲ vị trí nào - "
+        "khi có địa phương đang ngập, hệ thống TỰ ĐỘNG tính lại tuyến né vùng ngập, không cần bấm nút."
     )
 
     # ==============================================================================================
     # BƯỚC 1: ĐỌC ĐỘNG kết quả dự báo mới nhất (df_predictions) cho 5 địa phương giám sát thực tế.
-    # Đây là điểm khác biệt CỐT LÕI so với bản demo cũ: bản đồ không còn hiển thị vùng ngập cố định
-    # (dummy) nữa, mà LUÔN phản ánh đúng đầu ra hiện tại của model AI (get_latest_flood_predictions()).
     # ==============================================================================================
     df_predictions = get_latest_flood_predictions()
 
     # ---- BƯỚC 2: từ df_predictions, suy ra danh sách vùng ngập THỰC TẾ cần né (real_flooded_polygons)
-    # - CHỈ những địa phương có 'Nguy cơ' = 'Ngập' mới được thêm vào đây. Danh sách này sẽ được
-    # truyền thẳng vào tham số avoidAreas của TomTom Routing API bên dưới, nghĩa là routing engine
-    # TỰ ĐỘNG chặn đúng khu vực AI đang cảnh báo, không cần con người khoanh vùng thủ công.
+    # và danh sách TÊN các địa phương đang ngập (dùng làm "chữ ký" để biết khi nào tình trạng ngập
+    # thay đổi, phục vụ auto-trigger ở BƯỚC 4).
     real_flooded_polygons: list[list[tuple[float, float]]] = []
+    flooded_location_names: list[str] = []
     for location_name, coordinates in REAL_MONITORED_LOCATIONS.items():
         risk_rows = df_predictions.loc[df_predictions["Địa phương"] == location_name, "Nguy cơ"]
         if not risk_rows.empty and risk_rows.iloc[0] == "Ngập":
             real_flooded_polygons.append(build_flood_zone_polygon(coordinates))
+            flooded_location_names.append(location_name)
 
     st.markdown("##### 📡 Trạng thái giám sát 5 địa phương (từ dự báo AI mới nhất)")
     st.dataframe(df_predictions, use_container_width=True, hide_index=True)
 
-    # ---- Cụm chọn điểm đi/điểm đến + nút tìm đường, đặt CĂN GIỮA bằng bố cục 3 cột ----
+    # ==============================================================================================
+    # BƯỚC 3: CHỌN ĐIỂM ĐI/ĐẾN BẰNG CÁCH CLICK LÊN BẢN ĐỒ (thay vì chỉ chọn trong 5 điểm cố định).
+    # `st.radio` xác định click TIẾP THEO trên bản đồ sẽ gán vào điểm nào; tọa độ mặc định ban đầu
+    # lấy tạm 2 điểm giám sát để bản đồ/tuyến đường có sẵn dữ liệu ngay từ lần mở tab đầu tiên, người
+    # dùng có thể click để thay đổi bất cứ lúc nào.
+    # ==============================================================================================
+    if "routing_start_point" not in st.session_state:
+        st.session_state["routing_start_point"] = REAL_MONITORED_LOCATIONS["TP Huế"]
+    if "routing_end_point" not in st.session_state:
+        st.session_state["routing_end_point"] = REAL_MONITORED_LOCATIONS["Phú Vang"]
+
     control_left, control_center, control_right = st.columns([1, 2, 1])
     with control_center:
-        location_names = list(REAL_MONITORED_LOCATIONS.keys())
-        start_location_name = st.selectbox(
-            "📍 Điểm xuất phát", location_names, index=0, key="routing_start_select"
+        click_target = st.radio(
+            "Click lên bản đồ để đặt:",
+            options=["🏁 Điểm xuất phát", "🎯 Điểm đến"],
+            horizontal=True,
+            key="routing_click_target",
         )
-        end_location_name = st.selectbox(
-            "🏁 Điểm đến",
-            location_names,
-            index=3 if len(location_names) > 3 else 0,
-            key="routing_end_select",
+        start_point = st.session_state["routing_start_point"]
+        end_point = st.session_state["routing_end_point"]
+        st.caption(
+            f"🏁 Xuất phát: `{start_point[0]:.4f}, {start_point[1]:.4f}` | "
+            f"🎯 Đến: `{end_point[0]:.4f}, {end_point[1]:.4f}`"
         )
-
         find_route_clicked = st.button(
-            "🧭 Tìm tuyến đường",
+            "🧭 Tính lại tuyến đường",
             key="find_smart_route_button",
             use_container_width=True,
+            help="Tuyến đường tự động tính lại khi có địa phương đang ngập - bấm nút này để chủ động tính lại bất cứ lúc nào.",
         )
 
-    start_point = REAL_MONITORED_LOCATIONS[start_location_name]
-    end_point = REAL_MONITORED_LOCATIONS[end_location_name]
-
-    # Chỉ gọi API khi người dùng bấm nút (tránh gọi lại TomTom mỗi lần Streamlit rerun do tương tác
-    # UI khác - đây cũng là một hình thức tiết kiệm lượt gọi API bổ sung), kết quả được lưu vào
-    # session_state để vẫn hiển thị lại khi chuyển qua chuyển lại giữa các tab.
-    if find_route_clicked:
-        if start_location_name == end_location_name:
-            st.session_state["smart_route_result"] = None
-            st.session_state["smart_route_same_point_error"] = True
-        else:
-            st.session_state["smart_route_same_point_error"] = False
-            with st.spinner("Đang tính toán tuyến đường né vùng ngập..."):
-                # ---- BƯỚC 3: gọi TomTom, truyền real_flooded_polygons vào avoidAreas ----
-                st.session_state["smart_route_result"] = fetch_tomtom_route(
-                    start_point, end_point, flooded_polygons=real_flooded_polygons
-                )
-            st.session_state["smart_route_points"] = (start_location_name, end_location_name)
-
-    route_result = st.session_state.get("smart_route_result")
-
-    with control_center:
-        if st.session_state.get("smart_route_same_point_error"):
-            st.warning("⚠️ Điểm xuất phát và điểm đến đang trùng nhau - vui lòng chọn 2 địa điểm khác nhau.")
-        elif route_result is None:
-            st.info("Bấm **Tìm tuyến đường** để bắt đầu tính toán.")
-        elif not route_result["success"]:
-            st.error(f"Không thể lấy tuyến đường từ TomTom: {route_result['error']}")
-        else:
-            # Luôn gọi TomTom nên luôn có số liệu THẬT (quãng đường/thời gian bám theo mạng lưới
-            # đường thật) - khác nhau duy nhất giữa 2 trường hợp là có kèm avoidAreas hay không.
-            metric_col_1, metric_col_2, metric_col_3 = st.columns(3)
-            metric_col_1.metric("Quãng đường", f"{route_result['distance_km']} km")
-            metric_col_2.metric("Thời gian di chuyển", f"{route_result['travel_time_min']} phút")
-            metric_col_3.metric("Vùng ngập đã né", f"{len(real_flooded_polygons)}")
-            if route_result["used_avoid_areas"]:
-                st.success("✅ Đã tính tuyến đường né vùng ngập thành công bằng TomTom Routing API.")
-            else:
-                st.success(
-                    "✅ Không địa phương nào đang có nguy cơ ngập - TomTom tính tuyến đường bình "
-                    "thường (không kèm avoidAreas)."
-                )
-
-    # ---- Bản đồ đặt CĂN GIỮA, rộng và cân đối trong tab - gộp cả giám sát 5 địa phương lẫn tuyến
-    # đường vừa tính (nếu có) trên cùng 1 bản đồ Folium duy nhất ----
+    # ---- Bản đồ đặt CĂN GIỮA, rộng và cân đối - vẽ TRƯỚC khi xử lý click để lấy được sự kiện click
+    # của LẦN RENDER NÀY (st_folium trả `last_clicked` ngay khi vẽ xong bản đồ) ----
     map_left, map_center, map_right = st.columns([1, 6, 1])
     with map_center:
-        route_points_to_draw = route_result["route_points"] if route_result and route_result["success"] else None
+        route_result_for_map = st.session_state.get("smart_route_result")
+        route_points_to_draw = (
+            route_result_for_map["route_points"]
+            if route_result_for_map and route_result_for_map["success"]
+            else None
+        )
         smart_map = build_smart_routing_map(
             df_predictions=df_predictions,
             real_flooded_polygons=real_flooded_polygons,
@@ -1971,10 +1951,84 @@ def render_smart_routing_tab() -> None:
             end_point=end_point,
             route_points=route_points_to_draw,
         )
-        # `returned_objects=[]` tắt việc st_folium gửi trạng thái pan/zoom/click ngược về Streamlit -
-        # đây là nguyên nhân khiến app rerun toàn bộ mỗi lần người dùng chỉ kéo/phóng bản đồ. Vì tab
-        # này không cần đọc lại tương tác trên bản đồ (chỉ hiển thị), tắt hẳn để tránh rerun thừa.
-        st_folium(smart_map, width=1000, height=600, returned_objects=[])
+        # `returned_objects=["last_clicked"]`: BẮT BUỘC phải đọc lại tọa độ click để hỗ trợ chọn điểm
+        # tùy ý trên bản đồ - đánh đổi là app sẽ rerun mỗi khi người dùng click/pan/zoom bản đồ (khác
+        # với bản trước dùng `returned_objects=[]` để tắt hẳn, khi đó không thể đọc được click).
+        map_state = st_folium(
+            smart_map, width=1000, height=600, returned_objects=["last_clicked"], key="smart_routing_folium_map"
+        )
+
+    # ==============================================================================================
+    # BƯỚC 4: XỬ LÝ CLICK MỚI - so sánh với click đã xử lý gần nhất (lưu trong session_state) để chỉ
+    # cập nhật điểm đi/đến ĐÚNG 1 LẦN cho mỗi lượt click thật, tránh việc `st_folium` trả lại cùng 1
+    # tọa độ ở các lần rerun tiếp theo (do tương tác widget khác) làm điểm bị "đặt lại" ngoài ý muốn.
+    # ==============================================================================================
+    last_clicked = (map_state or {}).get("last_clicked")
+    if last_clicked:
+        clicked_point = (round(last_clicked["lat"], 6), round(last_clicked["lng"], 6))
+        if clicked_point != st.session_state.get("routing_last_processed_click"):
+            st.session_state["routing_last_processed_click"] = clicked_point
+            if click_target == "🏁 Điểm xuất phát":
+                st.session_state["routing_start_point"] = clicked_point
+            else:
+                st.session_state["routing_end_point"] = clicked_point
+            st.rerun()  # Vẽ lại ngay marker mới + kích hoạt auto-trigger ở BƯỚC 5 với điểm vừa chọn.
+
+    start_point = st.session_state["routing_start_point"]
+    end_point = st.session_state["routing_end_point"]
+
+    # ==============================================================================================
+    # BƯỚC 5: TỰ ĐỘNG GỌI TOMTOM KHI CÓ ĐỊA PHƯƠNG ĐANG NGẬP - không cần người dùng bấm nút. Dùng
+    # "chữ ký" (điểm đi, điểm đến, danh sách địa phương đang ngập) để CHỈ tính lại khi có gì đó THẬT
+    # SỰ thay đổi (điểm mới, hoặc tình trạng ngập vừa cập nhật) - tránh gọi lại TomTom vô ích ở những
+    # lần rerun không liên quan (đổi radio, mở tab khác...), vẫn giữ đúng tinh thần tiết kiệm API.
+    # ==============================================================================================
+    same_point_error = start_point == end_point
+    current_signature = (start_point, end_point, tuple(sorted(flooded_location_names)))
+    should_auto_fetch = (
+        bool(flooded_location_names)
+        and not same_point_error
+        and st.session_state.get("smart_route_signature") != current_signature
+    )
+
+    if (find_route_clicked or should_auto_fetch) and not same_point_error:
+        spinner_text = (
+            "🌊 Phát hiện ngập - đang tự động tính tuyến né vùng ngập..."
+            if should_auto_fetch and not find_route_clicked
+            else "Đang tính toán tuyến đường..."
+        )
+        with st.spinner(spinner_text):
+            st.session_state["smart_route_result"] = fetch_tomtom_route(
+                start_point, end_point, flooded_polygons=real_flooded_polygons
+            )
+        st.session_state["smart_route_signature"] = current_signature
+        st.session_state["smart_route_auto_triggered"] = should_auto_fetch and not find_route_clicked
+        st.rerun()  # Vẽ lại bản đồ với tuyến đường vừa tính (tuyến hiển thị ở BƯỚC 3 lấy từ session_state).
+
+    route_result = st.session_state.get("smart_route_result")
+
+    with control_center:
+        if same_point_error:
+            st.warning("⚠️ Điểm xuất phát và điểm đến đang trùng nhau - hãy click lại để chọn 2 vị trí khác nhau.")
+        elif route_result is None:
+            st.info("Click lên bản đồ để đặt điểm đi/đến, hoặc bấm **Tính lại tuyến đường**.")
+        elif not route_result["success"]:
+            st.error(f"Không thể lấy tuyến đường từ TomTom: {route_result['error']}")
+        else:
+            metric_col_1, metric_col_2, metric_col_3 = st.columns(3)
+            metric_col_1.metric("Quãng đường", f"{route_result['distance_km']} km")
+            metric_col_2.metric("Thời gian di chuyển", f"{route_result['travel_time_min']} phút")
+            metric_col_3.metric("Vùng ngập đã né", f"{len(real_flooded_polygons)}")
+            if route_result["used_avoid_areas"]:
+                auto_note = (
+                    " (tự động - phát hiện ngập)" if st.session_state.get("smart_route_auto_triggered") else ""
+                )
+                st.success(f"✅ Đã tính tuyến đường né vùng ngập thành công bằng TomTom Routing API{auto_note}.")
+            else:
+                st.success(
+                    "✅ Không địa phương nào đang có nguy cơ ngập - TomTom tính tuyến đường bình "
+                    "thường (không kèm avoidAreas)."
+                )
 
 
 # ==================================================================================================
