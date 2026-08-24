@@ -1468,7 +1468,9 @@ def predict_flood_class(deployed_model: dict, location_df: pd.DataFrame, feature
 
     if model_type == "sklearn_tabular":
         latest_features = location_df[feature_columns].iloc[[-1]]
-        scaled_features = scaler.transform(latest_features)
+        # Giữ tên cột (DataFrame) khi đưa vào model.predict() - tránh warning "X does not have valid
+        # feature names" từ sklearn, xem giải thích tương tự trong `predict_4_days_forecast()`.
+        scaled_features = pd.DataFrame(scaler.transform(latest_features), columns=feature_columns)
         return int(deployed_model["model"].predict(scaled_features)[0])
 
     window_size = deployed_model.get("window_size") or 24
@@ -1647,7 +1649,13 @@ def predict_4_days_forecast(lat: float, lon: float, model, scaler) -> pd.DataFra
             }
         )
         feature_columns = list(getattr(scaler, "feature_names_in_", FEATURE_COLS))
-        X_scaled = scaler.transform(daily_features_df[feature_columns])
+        # Giữ lại DataFrame (có tên cột) thay vì để `scaler.transform()` trả về ndarray thô - tránh
+        # warning "X does not have valid feature names" khi model.predict() nhận vào numpy array,
+        # dù model đã được fit bằng DataFrame có tên cột lúc huấn luyện (xem `scale_features()` trong
+        # `analyze_and_train.py`).
+        X_scaled = pd.DataFrame(
+            scaler.transform(daily_features_df[feature_columns]), columns=feature_columns
+        )
     except Exception as exc:
         print(f"[predict_4_days_forecast] Lỗi khi tiền xử lý/chuẩn hóa dữ liệu: {exc}")
         return None
@@ -1680,6 +1688,107 @@ def predict_4_days_forecast(lat: float, lon: float, model, scaler) -> pd.DataFra
         for offset in range(FORECAST_DAYS)
     ]
     return pd.DataFrame(result_rows, columns=["Ngày", "Dự báo Lượng mưa (mm)", "Dự đoán Ngập"])
+
+
+def render_forecast_tab() -> None:
+    """
+    Nội dung TRANG ĐẦU TIÊN của app - bảng dự báo nguy cơ ngập 4 ngày tới (T/T+1/T+2/T+3) cho toàn bộ
+    5 địa phương giám sát, dùng chính model đã huấn luyện (không phải số liệu giả lập).
+
+    ĐẶT Ở TRANG ĐẦU (thay vì EDA) vì đây là KẾT QUẢ CUỐI CÙNG, thiết thực nhất mà người xem (chính
+    quyền địa phương khi vận hành, hoặc hội đồng khi bảo vệ luận văn) cần thấy NGAY khi mở app -
+    "mô hình dự báo được gì" - thay vì phải lật qua các tab kỹ thuật nội bộ (khám phá dữ liệu, quy
+    trình huấn luyện) trước mới thấy được giá trị thực tế của hệ thống.
+    """
+    st.subheader("🔮 Dự báo Ngập lụt 4 ngày tới")
+    st.caption(
+        "Kết quả dự báo THẬT từ model đã huấn luyện, cho toàn bộ 5 địa phương giám sát (Ngày T = hôm "
+        "nay, T+1, T+2, T+3), dựa trên dữ liệu thời tiết dự báo mới nhất từ Open-Meteo Forecast API."
+    )
+
+    try:
+        evaluation_metrics, deployment_config, runtime_info = load_evaluation_artifacts()
+    except Exception as exc:
+        st.warning(
+            f"❌ Chưa có model đã triển khai để dự báo: {exc} "
+            "Hãy khởi chạy huấn luyện ở Tab '⚙️ Tiền xử lý & Huấn luyện' trước."
+        )
+        return
+
+    model_type = deployment_config.get("model_type")
+    if model_type != "sklearn_tabular":
+        # `predict_4_days_forecast()` đưa từng ngày dự báo vào model NHƯ 1 DÒNG DỮ LIỆU ĐỘC LẬP (đúng
+        # cách model dạng bảng - sklearn/XGBoost - được huấn luyện). Model dạng chuỗi (keras_sequence)
+        # hoặc Hybrid cần một CỬA SỔ NHIỀU NGÀY QUÁ KHỨ liên tiếp làm đầu vào (xem `predict_flood_class`
+        # ở trên, dùng cho suy luận 1 thời điểm hiện tại) - 4 ngày dự báo tương lai từ Open-Meteo không
+        # đủ tạo lại đúng cửa sổ đó, nên tạm thời CHƯA hỗ trợ dự báo nhiều ngày cho 2 loại model này ở
+        # đây để tránh suy luận sai mà không báo lỗi.
+        st.info(
+            f"Best model hiện tại là `{deployment_config.get('model_name')}` (loại `{model_type}`). "
+            "Bảng dự báo 4 ngày ở trang này hiện chỉ hỗ trợ model dạng bảng (Machine Learning/Statistical "
+            "- sklearn/XGBoost...), vì suy luận nhiều ngày cần cửa sổ dữ liệu quá khứ mà model dạng chuỗi/"
+            "Hybrid yêu cầu, trong khi dữ liệu dự báo tương lai từ Open-Meteo không đủ để dựng lại cửa sổ "
+            "đó. Muốn dùng tính năng này, hãy huấn luyện lại ở Tab 2 và chỉ chọn các mô hình Machine "
+            "Learning/Statistical."
+        )
+        return
+
+    try:
+        deployed_model = load_deployment_model(deployment_config, runtime_info["latest_dir"])
+    except Exception as exc:
+        st.error(f"❌ Không thể nạp model để dự báo: {exc}")
+        return
+
+    forecast_frames = []
+    failed_locations = []
+    with st.spinner("Đang gọi Open-Meteo và suy luận dự báo cho 5 địa phương..."):
+        for location_name, (lat, lon) in REAL_MONITORED_LOCATIONS.items():
+            location_forecast_df = predict_4_days_forecast(
+                lat, lon, deployed_model["model"], deployed_model["scaler"]
+            )
+            if location_forecast_df is None:
+                failed_locations.append(location_name)
+                continue
+            location_forecast_df = location_forecast_df.copy()
+            location_forecast_df.insert(0, "Địa phương", location_name)
+            forecast_frames.append(location_forecast_df)
+
+    if failed_locations:
+        st.warning(
+            f"Không lấy được dự báo cho: {', '.join(failed_locations)} "
+            "(Open-Meteo/model tạm thời lỗi - hãy thử làm mới lại trang)."
+        )
+
+    if not forecast_frames:
+        st.error("Không lấy được dự báo cho bất kỳ địa phương nào lúc này. Vui lòng thử lại sau.")
+        return
+
+    combined_forecast_df = pd.concat(forecast_frames, ignore_index=True)
+    render_styled_table(
+        build_contrast_styler(combined_forecast_df, numeric_formats={"Dự báo Lượng mưa (mm)": "{:.1f}"}),
+        height=min(120 + 38 * len(combined_forecast_df), 640),
+    )
+
+    at_risk_df = combined_forecast_df[combined_forecast_df["Dự đoán Ngập"] != "An toàn"]
+    if at_risk_df.empty:
+        render_chart_discussion(
+            f"Trong 4 ngày tới, cả {len(REAL_MONITORED_LOCATIONS)}/{len(REAL_MONITORED_LOCATIONS)} địa "
+            "phương giám sát đều được model dự báo AN TOÀN. Vẫn nên theo dõi lại thường xuyên vì dự báo "
+            "thời tiết có thể thay đổi giữa các lần cập nhật."
+        )
+    else:
+        risk_counts_by_location = at_risk_df["Địa phương"].value_counts()
+        render_chart_discussion(
+            f"Có {at_risk_df['Địa phương'].nunique()}/{len(REAL_MONITORED_LOCATIONS)} địa phương xuất "
+            "hiện ít nhất 1 ngày nguy cơ ngập trong 4 ngày tới. Địa phương có số ngày nguy cơ nhiều nhất: "
+            f"**{risk_counts_by_location.index[0]}** ({int(risk_counts_by_location.iloc[0])}/4 ngày). Nên "
+            "ưu tiên theo dõi sát và chuẩn bị phương án ứng phó sớm cho các khu vực này."
+        )
+
+    st.caption(
+        f"Model đang dùng để dự báo: `{deployment_config.get('model_name')}` "
+        f"(F1-Macro={deployment_config.get('f1_macro', 0):.4f})"
+    )
 
 
 def build_smart_routing_map(
@@ -1872,13 +1981,14 @@ def render_smart_routing_tab() -> None:
 # SIDEBAR & ĐIỂM VÀO CHÍNH
 # ==================================================================================================
 def render_sidebar() -> None:
-    """Sidebar tối giản: giới thiệu nhanh 4 bước pipeline + nút làm mới cache toàn cục."""
+    """Sidebar tối giản: giới thiệu nhanh các bước pipeline + nút làm mới cache toàn cục."""
     st.sidebar.markdown("## 🌊 Flood Prediction Pipeline")
     st.sidebar.markdown(
-        "1. 📊 Khám phá Dữ liệu (EDA)\n"
-        "2. ⚙️ Tiền xử lý & Huấn luyện\n"
-        "3. 📈 Đánh giá Mô hình\n"
-        "4. 🗺️ Bản đồ Tránh ngập\n"
+        "1. 🔮 Dự báo 4 ngày tới\n"
+        "2. 📊 Khám phá Dữ liệu (EDA)\n"
+        "3. ⚙️ Tiền xử lý & Huấn luyện\n"
+        "4. 📈 Đánh giá Mô hình\n"
+        "5. 🗺️ Bản đồ Tránh ngập\n"
     )
     st.sidebar.markdown("---")
     if st.sidebar.button("🔄 Làm mới toàn bộ cache", key="clear_all_cache_button", use_container_width=True):
@@ -1888,29 +1998,36 @@ def render_sidebar() -> None:
 
 
 def main():
-    """Điểm vào chính của ứng dụng - 4 tab bám sát đúng vòng đời Data Science (Data Science Lifecycle)."""
+    """Điểm vào chính của ứng dụng - trang đầu là DỰ BÁO thực tế, tiếp theo mới đến các tab kỹ thuật
+    bám sát vòng đời Data Science (Data Science Lifecycle)."""
     apply_global_ui_theme()
     render_sidebar()
 
     st.title("🌊 Hệ thống Dự báo Ngập lụt Thừa Thiên Huế")
     st.caption(
-        "Pipeline: Khám phá dữ liệu → Tiền xử lý & Huấn luyện → Đánh giá mô hình → Bản đồ chỉ đường tránh ngập."
+        "Dự báo 4 ngày tới → Khám phá dữ liệu → Tiền xử lý & Huấn luyện → Đánh giá mô hình → "
+        "Bản đồ chỉ đường tránh ngập."
     )
     st.markdown("---")
 
     # ------------------------------------------------------------------------------------------
-    # BỐ CỤC TOÀN TRANG BẰNG st.tabs: 4 tab bám sát đúng vòng đời Data Science, giúp người xem
-    # (giảng viên/hội đồng) theo dõi mạch pipeline từ dữ liệu thô đến sản phẩm ứng dụng thực tế,
-    # thay vì một trang dashboard vận hành dài dòng, khó tách bạch từng giai đoạn.
+    # BỐ CỤC TOÀN TRANG BẰNG st.tabs: TAB ĐẦU TIÊN là kết quả DỰ BÁO thực tế (giá trị cốt lõi mà
+    # người dùng cuối/hội đồng cần thấy ngay), các tab sau bám sát vòng đời Data Science (EDA ->
+    # Huấn luyện -> Đánh giá) để người xem hiểu được PHƯƠNG PHÁP đứng sau kết quả dự báo đó, và tab
+    # cuối là sản phẩm ứng dụng (bản đồ chỉ đường tránh ngập).
     # ------------------------------------------------------------------------------------------
-    tab_eda, tab_train, tab_eval, tab_map = st.tabs(
+    tab_forecast, tab_eda, tab_train, tab_eval, tab_map = st.tabs(
         [
+            "🔮 Dự báo 4 ngày tới",
             "📊 Khám phá Dữ liệu (EDA)",
             "⚙️ Tiền xử lý & Huấn luyện",
             "📈 Đánh giá Mô hình",
             "🗺️ Bản đồ Tránh ngập",
         ]
     )
+
+    with tab_forecast:
+        render_forecast_tab()
 
     with tab_eda:
         render_eda_tab()
