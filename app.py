@@ -59,6 +59,7 @@ CACHE_DIR = BASE_DIR / "cache"
 TRAINING_WORKER_PATH = BASE_DIR / "training_worker.py"
 TRAINING_STATUS_PATH = CACHE_DIR / "training_status.json"
 TRAINING_LOG_PATH = CACHE_DIR / "training_output.log"
+FORECAST_4DAY_CACHE_PATH = CACHE_DIR / "forecast_4day_cache.json"
 
 # ------------------------------------------------------------------------------------------------
 # QUẢN LÝ API KEY AN TOÀN BẰNG st.secrets - KHÔNG hardcode key thật trong source code nữa (đây chính
@@ -667,6 +668,60 @@ def load_eda_sample_dataframe() -> pd.DataFrame:
     return combined_df
 
 
+def compute_outlier_summary_by_class(
+    df: pd.DataFrame, group_col: str, numeric_columns: list[str]
+) -> pd.DataFrame:
+    """
+    Phát hiện ngoại lai (outlier) bằng CẢ 2 phương pháp IQR và Z-score, tính RIÊNG cho từng lớp
+    `group_col` (Nguy_cơ_ngập: 0/1/2) trên từng cột số - đúng như khuyến nghị đã ghi ở phần nhận xét
+    bên dưới bảng giá trị thiếu: không gộp chung tất cả các lớp lại rồi tính 1 ngưỡng duy nhất, vì
+    ngưỡng "bất thường" của lượng mưa/triều cường ở lớp `Ngập nặng` vốn dĩ CAO HƠN nhiều so với lớp
+    `Không ngập` một cách tự nhiên - nếu tính chung, phần lớn các dòng dữ liệu THẬT của lớp `Ngập nặng`
+    sẽ bị nhầm là ngoại lai.
+
+    - IQR: ngoại lai là giá trị nằm ngoài [Q1 - 1.5*IQR, Q3 + 1.5*IQR].
+    - Z-score: ngoại lai là giá trị có |z| > 3 (lệch hơn 3 độ lệch chuẩn so với trung bình của lớp đó).
+
+    Hàm này CHỈ THỐNG KÊ để hiển thị, KHÔNG tự động loại bỏ dòng nào khỏi dữ liệu.
+    """
+    class_name_map = {0: "Không ngập", 1: "Ngập nhẹ", 2: "Ngập nặng"}
+    result_rows = []
+
+    for class_value, class_df in df.groupby(group_col):
+        class_label = class_name_map.get(int(class_value), f"Lớp {class_value}")
+        for column in numeric_columns:
+            values = class_df[column].dropna()
+            if len(values) < 2:
+                continue
+
+            # ---- IQR ----
+            q1, q3 = values.quantile(0.25), values.quantile(0.75)
+            iqr = q3 - q1
+            lower_bound, upper_bound = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+            iqr_outlier_count = int(((values < lower_bound) | (values > upper_bound)).sum())
+
+            # ---- Z-score ---- (std=0 nghĩa là mọi giá trị trong lớp giống hệt nhau -> không có outlier)
+            std = values.std()
+            if std and std > 0:
+                z_scores = (values - values.mean()) / std
+                zscore_outlier_count = int((z_scores.abs() > 3).sum())
+            else:
+                zscore_outlier_count = 0
+
+            result_rows.append(
+                {
+                    "Lớp nguy cơ": class_label,
+                    "Cột": column,
+                    "Số ngoại lệ (IQR)": iqr_outlier_count,
+                    "Tỷ lệ (%) (IQR)": round(iqr_outlier_count / len(values) * 100, 2),
+                    "Số ngoại lệ (Z-score)": zscore_outlier_count,
+                    "Tỷ lệ (%) (Z-score)": round(zscore_outlier_count / len(values) * 100, 2),
+                }
+            )
+
+    return pd.DataFrame(result_rows)
+
+
 def render_eda_tab() -> None:
     """
     Nội dung Tab 1 - Khám phá Dữ liệu (EDA), bước ĐẦU TIÊN của vòng đời Data Science.
@@ -745,7 +800,6 @@ def render_eda_tab() -> None:
 
     # ---- Hàng 3: xử lý giá trị thiếu / ngoại lai ----
     with st.expander("🧹 Xử lý giá trị thiếu & ngoại lai (Missing Value / Outlier)", expanded=False):
-        # TODO: dán logic phát hiện/xử lý outlier thật của bạn (IQR, Z-score theo từng lớp...) vào đây.
         if eda_df.empty:
             st.info("Chưa có dữ liệu để kiểm tra.")
         else:
@@ -754,11 +808,28 @@ def render_eda_tab() -> None:
             st.dataframe(missing_summary, use_container_width=True)
             render_chart_discussion(
                 "Bảng trên thống kê số lượng và tỷ lệ giá trị thiếu theo từng cột - căn cứ để quyết định "
-                "chiến lược xử lý (loại bỏ, nội suy, hay điền giá trị trung vị) ở Tab 2. Với biến ngoại lai "
-                "(outlier), khuyến nghị dùng phương pháp IQR hoặc Z-score TÍNH RIÊNG cho từng lớp nguy cơ ngập, "
-                "vì giá trị mưa/triều cực đoan trong lớp `Ngập nặng` là TÍN HIỆU THẬT có giá trị dự báo, "
-                "không nên loại bỏ nhầm như outlier thông thường."
+                "chiến lược xử lý (loại bỏ, nội suy, hay điền giá trị trung vị) ở Tab 2."
             )
+
+            st.markdown("---")
+            st.markdown("**Phát hiện ngoại lai (Outlier) bằng IQR & Z-score - tính riêng cho từng lớp**")
+            if "Nguy_cơ_ngập" not in eda_df.columns:
+                st.info("Thiếu cột `Nguy_cơ_ngập` nên không thể tính ngoại lai theo từng lớp.")
+            else:
+                outlier_feature_columns = [
+                    column
+                    for column in eda_df.select_dtypes(include="number").columns
+                    if column != "Nguy_cơ_ngập"
+                ]
+                outlier_summary = compute_outlier_summary_by_class(eda_df, "Nguy_cơ_ngập", outlier_feature_columns)
+                st.dataframe(outlier_summary, use_container_width=True, hide_index=True)
+                render_chart_discussion(
+                    "Bảng trên áp dụng CẢ 2 phương pháp - IQR (ngoài [Q1-1.5·IQR, Q3+1.5·IQR]) và Z-score "
+                    "(|z| > 3) - tính RIÊNG cho từng lớp `Nguy_cơ_ngập` (0/1/2), theo đúng khuyến nghị: gộp "
+                    "chung các lớp sẽ khiến phần lớn dòng dữ liệu THẬT của lớp `Ngập nặng` (mưa/triều cực đoan) "
+                    "bị nhầm là ngoại lai, vì đó chính là TÍN HIỆU THẬT có giá trị dự báo, không nên loại bỏ. "
+                    "Bảng này chỉ THỐNG KÊ để tham khảo, chưa tự động loại bỏ dòng nào khỏi dữ liệu."
+                )
 
 
 # ==================================================================================================
@@ -1809,6 +1880,50 @@ def predict_days_ahead_forecast_sequence(
     return pd.DataFrame(result_rows, columns=["Ngày", "Dự báo Lượng mưa (mm)", "Dự đoán Ngập"])
 
 
+def load_forecast_4day_cache_from_disk() -> dict | None:
+    """
+    Đọc kết quả dự báo 4 ngày đã lưu ở lần chạy TRƯỚC (từ `FORECAST_4DAY_CACHE_PATH`), nếu có.
+
+    Khác với `st.session_state` (chỉ tồn tại trong RAM của 1 phiên trình duyệt, mất khi F5/đóng tab/
+    restart server), cache này ghi ra FILE JSON trên đĩa - nên "sống sót" qua cả việc reload trang hay
+    khởi động lại server Streamlit, giống cơ chế `training_status.json` đã dùng cho tiến trình huấn
+    luyện. Nhờ vậy, người dùng mở lại app không phải chờ gọi lại Open-Meteo + model ngay lập tức nếu
+    dự báo hôm đó đã được tính rồi.
+    """
+    if not FORECAST_4DAY_CACHE_PATH.exists():
+        return None
+    try:
+        payload = json.loads(FORECAST_4DAY_CACHE_PATH.read_text(encoding="utf-8"))
+        return {
+            "combined_df": pd.DataFrame(payload["combined_df_records"]),
+            "failed_locations": payload["failed_locations"],
+            "model_name": payload["model_name"],
+            "f1_macro": payload["f1_macro"],
+            "generated_at": datetime.fromisoformat(payload["generated_at"]),
+        }
+    except Exception as exc:
+        print(f"[load_forecast_4day_cache_from_disk] Cache lỗi/hỏng, sẽ tính lại: {exc}")
+        return None
+
+
+def save_forecast_4day_cache_to_disk(cached_result: dict) -> None:
+    """Ghi kết quả dự báo 4 ngày mới nhất ra file JSON trên đĩa để giữ được qua các lần F5/restart."""
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "combined_df_records": cached_result["combined_df"].to_dict(orient="records"),
+            "failed_locations": cached_result["failed_locations"],
+            "model_name": cached_result["model_name"],
+            "f1_macro": cached_result["f1_macro"],
+            "generated_at": cached_result["generated_at"].isoformat(),
+        }
+        FORECAST_4DAY_CACHE_PATH.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception as exc:
+        print(f"[save_forecast_4day_cache_to_disk] Không ghi được cache: {exc}")
+
+
 def render_forecast_tab() -> None:
     """
     Nội dung TRANG ĐẦU TIÊN của app - bảng dự báo nguy cơ ngập 4 ngày tới (T/T+1/T+2/T+3) cho toàn bộ
@@ -1825,65 +1940,114 @@ def render_forecast_tab() -> None:
         "nay, T+1, T+2, T+3), dựa trên dữ liệu thời tiết dự báo mới nhất từ Open-Meteo Forecast API."
     )
 
-    try:
-        evaluation_metrics, deployment_config, runtime_info = load_evaluation_artifacts()
-    except Exception as exc:
-        st.warning(
-            f"❌ Chưa có model đã triển khai để dự báo: {exc} "
-            "Hãy khởi chạy huấn luyện ở Tab '⚙️ Tiền xử lý & Huấn luyện' trước."
-        )
-        return
-
-    model_type = deployment_config.get("model_type")
-
-    try:
-        deployed_model = load_deployment_model(deployment_config, runtime_info["latest_dir"])
-    except Exception as exc:
-        st.error(f"❌ Không thể nạp model để dự báo: {exc}")
-        return
-
-    # `deployment_config.json` lưu key "feature_cols" (xem `save_deployment_config()` trong
-    # `analyze_and_train.py`) - dùng đúng danh sách/thứ tự cột này thay vì hằng số cố định, để tự
-    # thích ứng nếu sau này bộ đặc trưng của model thay đổi.
-    feature_columns = deployment_config.get("feature_cols") or FEATURE_COLS_FOR_INFERENCE
-
-    forecast_frames = []
-    failed_locations = []
-    with st.spinner("Đang gọi Open-Meteo và suy luận dự báo cho 5 địa phương..."):
-        for location_name, (lat, lon) in REAL_MONITORED_LOCATIONS.items():
-            # DISPATCH THEO ĐÚNG model_type - đây là điểm khác biệt so với bản trước (chỉ hỗ trợ
-            # sklearn_tabular): model dạng bảng dùng `predict_4_days_forecast()` (mỗi ngày 1 dòng độc
-            # lập), model dạng chuỗi/Hybrid dùng `predict_days_ahead_forecast_sequence()` (cửa sổ
-            # nhiều ngày liên tiếp, xem docstring hàm đó để biết chi tiết cách dựng cửa sổ).
-            if model_type == "sklearn_tabular":
-                location_forecast_df = predict_4_days_forecast(
-                    lat, lon, deployed_model["model"], deployed_model["scaler"]
-                )
-            elif model_type in {"keras_sequence", "hybrid_lstm_xgboost"}:
-                location_forecast_df = predict_days_ahead_forecast_sequence(
-                    lat, lon, deployed_model, feature_columns
-                )
-            else:
-                location_forecast_df = None
-
-            if location_forecast_df is None:
-                failed_locations.append(location_name)
-                continue
-            location_forecast_df = location_forecast_df.copy()
-            location_forecast_df.insert(0, "Địa phương", location_name)
-            forecast_frames.append(location_forecast_df)
-
-    if failed_locations:
-        st.warning(
-            f"Không lấy được dự báo cho: {', '.join(failed_locations)} "
-            "(Open-Meteo/model tạm thời lỗi - hãy thử làm mới lại trang)."
+    header_left, header_right = st.columns([5, 1])
+    with header_right:
+        refresh_clicked = st.button(
+            "🔄 Dự báo lại",
+            key="refresh_4day_forecast_button",
+            use_container_width=True,
+            help="Gọi lại Open-Meteo và suy luận model để lấy dự báo mới nhất.",
         )
 
-    if not forecast_frames:
-        st.error("Không lấy được dự báo cho bất kỳ địa phương nào lúc này. Vui lòng thử lại sau.")
-        return
+    # Lần đầu tab này chạy trong phiên hiện tại (session_state trống) -> thử đọc CACHE TRÊN ĐĨA trước
+    # (kết quả của lần chạy trước, có thể từ phiên trước/trước khi restart server) thay vì gọi API
+    # ngay, để F5/mở lại app không phải chờ lại từ đầu nếu dự báo hôm đó đã có sẵn.
+    if "forecast_4day_result" not in st.session_state:
+        disk_cached_result = load_forecast_4day_cache_from_disk()
+        if disk_cached_result is not None:
+            st.session_state["forecast_4day_result"] = disk_cached_result
 
-    combined_forecast_df = pd.concat(forecast_frames, ignore_index=True)
+    cached_result = st.session_state.get("forecast_4day_result")
+    # "Hết hạn" khi cache được tính từ một NGÀY KHÁC (khác ngày dương lịch hiện tại) - tức là cứ qua
+    # 00h00 là lần rerun/mở app KẾ TIẾP sẽ tự động phát hiện cache cũ và gọi lại Open-Meteo + model để
+    # lấy dự báo mới cho ngày hôm đó, không cần người dùng phải nhớ bấm nút. Lưu ý: Streamlit không có
+    # tiến trình nền chạy đúng lúc 00h00 - việc tự làm mới chỉ xảy ra ở lượt tương tác/mở trang ĐẦU
+    # TIÊN sau khi qua ngày mới (đúng bản chất "on-demand" của một app web, không phải cron job thật).
+    is_cache_stale = cached_result is None or cached_result["generated_at"].date() < datetime.now().date()
+
+    # CHỈ thực sự gọi Open-Meteo + suy luận model khi: (1) chưa có cache nào dùng được (kể cả từ đĩa),
+    # (2) cache đã qua ngày mới (is_cache_stale), hoặc (3) người dùng chủ động bấm nút "🔄 Dự báo lại".
+    # Nếu không, dùng lại kết quả đã lưu - tránh gọi lại Open-Meteo (5 địa phương x nhiều request) và
+    # suy luận model MỖI KHI Streamlit rerun toàn bộ script, vốn xảy ra liên tục mỗi lần người dùng
+    # tương tác với BẤT KỲ widget nào trong app (kể cả ở tab khác).
+    if refresh_clicked or is_cache_stale:
+        try:
+            evaluation_metrics, deployment_config, runtime_info = load_evaluation_artifacts()
+        except Exception as exc:
+            st.warning(
+                f"❌ Chưa có model đã triển khai để dự báo: {exc} "
+                "Hãy khởi chạy huấn luyện ở Tab '⚙️ Tiền xử lý & Huấn luyện' trước."
+            )
+            return
+
+        model_type = deployment_config.get("model_type")
+
+        try:
+            deployed_model = load_deployment_model(deployment_config, runtime_info["latest_dir"])
+        except Exception as exc:
+            st.error(f"❌ Không thể nạp model để dự báo: {exc}")
+            return
+
+        # `deployment_config.json` lưu key "feature_cols" (xem `save_deployment_config()` trong
+        # `analyze_and_train.py`) - dùng đúng danh sách/thứ tự cột này thay vì hằng số cố định, để tự
+        # thích ứng nếu sau này bộ đặc trưng của model thay đổi.
+        feature_columns = deployment_config.get("feature_cols") or FEATURE_COLS_FOR_INFERENCE
+
+        forecast_frames = []
+        failed_locations = []
+        with st.spinner("Đang gọi Open-Meteo và suy luận dự báo cho 5 địa phương..."):
+            for location_name, (lat, lon) in REAL_MONITORED_LOCATIONS.items():
+                # DISPATCH THEO ĐÚNG model_type - đây là điểm khác biệt so với bản trước (chỉ hỗ trợ
+                # sklearn_tabular): model dạng bảng dùng `predict_4_days_forecast()` (mỗi ngày 1 dòng độc
+                # lập), model dạng chuỗi/Hybrid dùng `predict_days_ahead_forecast_sequence()` (cửa sổ
+                # nhiều ngày liên tiếp, xem docstring hàm đó để biết chi tiết cách dựng cửa sổ).
+                if model_type == "sklearn_tabular":
+                    location_forecast_df = predict_4_days_forecast(
+                        lat, lon, deployed_model["model"], deployed_model["scaler"]
+                    )
+                elif model_type in {"keras_sequence", "hybrid_lstm_xgboost"}:
+                    location_forecast_df = predict_days_ahead_forecast_sequence(
+                        lat, lon, deployed_model, feature_columns
+                    )
+                else:
+                    location_forecast_df = None
+
+                if location_forecast_df is None:
+                    failed_locations.append(location_name)
+                    continue
+                location_forecast_df = location_forecast_df.copy()
+                location_forecast_df.insert(0, "Địa phương", location_name)
+                forecast_frames.append(location_forecast_df)
+
+        if not forecast_frames:
+            st.error("Không lấy được dự báo cho bất kỳ địa phương nào lúc này. Vui lòng thử lại sau.")
+            return
+
+        # Lưu kết quả + thời điểm tính vào CẢ session_state (dùng ngay cho các lần rerun trong phiên
+        # này) LẪN file cache trên đĩa (dùng lại được ở phiên sau/sau khi restart server) - không gọi
+        # lại API/model cho tới khi qua ngày mới hoặc người dùng bấm "🔄 Dự báo lại" lần nữa.
+        cached_result = {
+            "combined_df": pd.concat(forecast_frames, ignore_index=True),
+            "failed_locations": failed_locations,
+            "model_name": deployment_config.get("model_name"),
+            "f1_macro": deployment_config.get("f1_macro", 0),
+            "generated_at": datetime.now(),
+        }
+        st.session_state["forecast_4day_result"] = cached_result
+        save_forecast_4day_cache_to_disk(cached_result)
+
+    cached_result = st.session_state["forecast_4day_result"]
+    combined_forecast_df = cached_result["combined_df"]
+
+    with header_left:
+        st.caption(f"🕒 Cập nhật lần cuối: {cached_result['generated_at'].strftime('%H:%M:%S %d/%m/%Y')}")
+
+    if cached_result["failed_locations"]:
+        st.warning(
+            f"Không lấy được dự báo cho: {', '.join(cached_result['failed_locations'])} "
+            "(Open-Meteo/model tạm thời lỗi - hãy thử bấm '🔄 Dự báo lại')."
+        )
+
     render_styled_table(
         build_contrast_styler(combined_forecast_df, numeric_formats={"Dự báo Lượng mưa (mm)": "{:.1f}"}),
         height=min(120 + 38 * len(combined_forecast_df), 640),
@@ -1906,8 +2070,8 @@ def render_forecast_tab() -> None:
         )
 
     st.caption(
-        f"Model đang dùng để dự báo: `{deployment_config.get('model_name')}` "
-        f"(F1-Macro={deployment_config.get('f1_macro', 0):.4f})"
+        f"Model đang dùng để dự báo: `{cached_result['model_name']}` "
+        f"(F1-Macro={cached_result['f1_macro']:.4f})"
     )
 
 
