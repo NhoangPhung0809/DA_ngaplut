@@ -15,6 +15,8 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 
+from shared_constants import FEATURE_COLS
+
 warnings.filterwarnings("ignore")
 
 try:
@@ -55,13 +57,7 @@ MODELS_DIR = BASE_DIR / "models"
 SOURCE_COL = "Nguồn_dữ_liệu"
 DATE_COL = "Ngày"
 
-FEATURE_COLS = [
-    "Nhiệt_độ_C",
-    "Độ_ẩm_%",
-    "Lượng_mưa_mm",
-    "Độ_ẩm_đất",
-    "Chiều_cao_triều_m",
-]
+# FEATURE_COLS import từ shared_constants.py (dùng chung cho toàn bộ pipeline).
 TARGET_COL = "Nguy_cơ_ngập"
 TIME_COL = "Thời_gian"
 APP_COMPATIBLE_MODELS = {
@@ -96,15 +92,47 @@ def load_and_concat_data(data_dir: Path = DATA_DIR) -> pd.DataFrame:
     return full_df
 
 
+def compute_train_only_medians(
+    df: pd.DataFrame, feature_columns: list[str], train_ratio: float = 0.8
+) -> pd.Series:
+    """
+    Tính median của từng cột trong `feature_columns` CHỈ TRÊN PHẦN DỮ LIỆU SẼ THUỘC TẬP TRAIN, mô
+    phỏng lại ĐÚNG ranh giới thời gian mà `split_groupwise_time_series()` sẽ dùng sau này (80% dòng
+    ĐẦU TIÊN theo thời gian của MỖI nguồn/địa phương) - dùng để điền giá trị thiếu (NaN).
+
+    TẠI SAO CẦN HÀM NÀY (ngăn rò rỉ dữ liệu tập test - data leakage): `create_rule_based_label()` và
+    `preprocess_data()` bắt buộc phải điền NaN TRƯỚC KHI `split_groupwise_time_series()` chạy. Nếu
+    điền bằng `df[column].median()` tính trên TOÀN BỘ dữ liệu (gồm cả phần sẽ thuộc tập test), các
+    dòng thuộc tập TRAIN có thể vô tình được điền bằng 1 giá trị đã "biết trước" thống kê của tập
+    test - đúng định nghĩa rò rỉ dữ liệu. Hàm này tính lại đúng ranh giới train/test cho TỪNG nguồn dữ
+    liệu rồi chỉ lấy median trên phần "sẽ là train" (xem hàm cùng tên trong `analyze_and_train.py`).
+    """
+    if SOURCE_COL not in df.columns or TIME_COL not in df.columns:
+        return df[feature_columns].median()
+
+    sortable_time = pd.to_datetime(df[TIME_COL], errors="coerce")
+    train_rows = []
+    for _, group_df in df.assign(**{f"__{TIME_COL}_sort": sortable_time}).groupby(SOURCE_COL):
+        group_df = group_df.sort_values(f"__{TIME_COL}_sort")
+        split_index = max(1, int(len(group_df) * train_ratio))
+        train_rows.append(group_df.iloc[:split_index])
+
+    train_only_df = pd.concat(train_rows, ignore_index=True) if train_rows else df
+    return train_only_df[feature_columns].median()
+
+
 def create_rule_based_label(df: pd.DataFrame) -> pd.DataFrame:
     """Tạo nhãn lại theo luật chuyên gia để đảm bảo nhất quán trước khi huấn luyện."""
     labeled = df.copy()
     if "Chiều_cao_triều_m" not in labeled.columns:
         labeled["Chiều_cao_triều_m"] = 0.0
 
+    # Dùng median TÍNH RIÊNG trên phần dữ liệu sẽ thuộc tập TRAIN để điền NaN - xem docstring
+    # `compute_train_only_medians()` để biết lý do (ngăn rò rỉ thống kê của tập test vào tập train).
+    train_only_medians = compute_train_only_medians(labeled, ["Chiều_cao_triều_m"])
     labeled["Chiều_cao_triều_m"] = pd.to_numeric(
         labeled["Chiều_cao_triều_m"], errors="coerce"
-    ).fillna(labeled["Chiều_cao_triều_m"].median())
+    ).fillna(train_only_medians["Chiều_cao_triều_m"])
 
     labeled[TARGET_COL] = (
         (pd.to_numeric(labeled["Lượng_mưa_mm"], errors="coerce").fillna(0) > 25)
@@ -130,11 +158,15 @@ def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
     if SOURCE_COL not in processed.columns:
         processed[SOURCE_COL] = "Unknown"
 
+    # Dùng median TÍNH RIÊNG trên phần dữ liệu sẽ thuộc tập TRAIN để điền NaN - xem docstring
+    # `compute_train_only_medians()` để biết lý do (ngăn rò rỉ thống kê của tập test vào tập train).
+    # Tính SAU khi TIME_COL đã parse datetime + SOURCE_COL đã đảm bảo tồn tại (ở trên).
+    train_only_medians = compute_train_only_medians(processed, FEATURE_COLS)
     for column in FEATURE_COLS:
         if column not in processed.columns:
             processed[column] = 0.0
         processed[column] = pd.to_numeric(processed[column], errors="coerce")
-        processed[column] = processed[column].fillna(processed[column].median())
+        processed[column] = processed[column].fillna(train_only_medians[column])
 
     processed[TARGET_COL] = (
         pd.to_numeric(processed[TARGET_COL], errors="coerce").fillna(0).astype(int)

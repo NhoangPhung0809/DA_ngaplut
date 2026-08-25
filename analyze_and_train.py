@@ -35,6 +35,8 @@ from sklearn.svm import SVC
 from sklearn.preprocessing import label_binarize
 from xgboost import XGBClassifier
 
+from shared_constants import FEATURE_COLS
+
 try:
     from imblearn.over_sampling import RandomOverSampler, SMOTE
 except ImportError as exc:
@@ -108,13 +110,8 @@ TIME_COL = "Thời_gian"
 DATE_COL = "Ngày"
 LOCATION_COL = "Địa phương"
 TARGET_COL = "Nguy_cơ_ngập"
-FEATURE_COLS = [
-    "Nhiệt_độ_C",
-    "Độ_ẩm_%",
-    "Lượng_mưa_mm",
-    "Độ_ẩm_đất",
-    "Chiều_cao_triều_m",
-]
+# FEATURE_COLS import từ shared_constants.py - xem docstring file đó để biết lý do (trước đây định
+# nghĩa độc lập ở 5 file, dễ lệch nhau khi đổi bộ đặc trưng).
 CLASS_LABELS = [0, 1, 2]
 CLASS_NAME_MAP = {
     0: "Safe",
@@ -266,15 +263,54 @@ def build_daily_feature_dataset(df: pd.DataFrame) -> pd.DataFrame:
     return daily_df
 
 
+def compute_train_only_medians(
+    df: pd.DataFrame, feature_columns: list[str], train_ratio: float = 0.8
+) -> pd.Series:
+    """
+    Tính median của từng cột trong `feature_columns` CHỈ TRÊN PHẦN DỮ LIỆU SẼ THUỘC TẬP TRAIN, mô
+    phỏng lại ĐÚNG ranh giới thời gian mà `chronological_train_test_split()` sẽ dùng sau này (80%
+    dòng ĐẦU TIÊN theo thời gian của MỖI địa phương) - dùng để điền giá trị thiếu (NaN).
+
+    ----------------------------------------------------------------------------------------------
+    TẠI SAO CẦN HÀM NÀY (ngăn rò rỉ dữ liệu tập test - data leakage)?
+    ----------------------------------------------------------------------------------------------
+    `create_multiclass_flood_label()` và `preprocess_features()` bắt buộc phải điền NaN TRƯỚC KHI
+    `chronological_train_test_split()` chạy (vì nhãn rule-based và tập đặc trưng cần có mặt đầy đủ ở
+    CẢ 2 phía trước khi tách train/test). Nếu điền bằng `df[column].median()` tính trên TOÀN BỘ dữ
+    liệu (bao gồm cả những dòng SẼ thuộc tập test), các dòng thuộc tập TRAIN có thể vô tình được điền
+    bằng 1 giá trị đã "biết trước" thống kê của tập test - đúng định nghĩa rò rỉ dữ liệu (data
+    leakage), dù mức ảnh hưởng thường nhỏ vì chỉ tác động tới các dòng thực sự bị thiếu dữ liệu.
+
+    Hàm này tính lại đúng ranh giới train/test theo thời gian cho TỪNG địa phương (giống hệt logic
+    trong `chronological_train_test_split()`), rồi chỉ lấy median trên phần "sẽ là train" đó - đảm bảo
+    giá trị dùng để điền không phụ thuộc vào bất kỳ dòng nào của tập test, dù được gọi TRƯỚC khi tách
+    train/test thật.
+    """
+    if LOCATION_COL not in df.columns or TIME_COL not in df.columns:
+        return df[feature_columns].median()
+
+    train_rows = []
+    for _, location_df in df.groupby(LOCATION_COL):
+        location_df = location_df.sort_values(TIME_COL)
+        split_index = max(1, int(len(location_df) * train_ratio))
+        train_rows.append(location_df.iloc[:split_index])
+
+    train_only_df = pd.concat(train_rows, ignore_index=True) if train_rows else df
+    return train_only_df[feature_columns].median()
+
+
 def create_multiclass_flood_label(df: pd.DataFrame) -> pd.DataFrame:
     """Tạo nhãn 3 lớp dựa trên luật chuyên gia."""
     labeled_df = df.copy()
 
+    # Dùng median TÍNH RIÊNG trên phần dữ liệu sẽ thuộc tập TRAIN để điền NaN - xem docstring
+    # `compute_train_only_medians()` để biết lý do (ngăn rò rỉ thống kê của tập test vào tập train).
+    train_only_medians = compute_train_only_medians(labeled_df, FEATURE_COLS)
     for column in FEATURE_COLS:
         if column not in labeled_df.columns:
             labeled_df[column] = 0.0
         labeled_df[column] = pd.to_numeric(labeled_df[column], errors="coerce")
-        labeled_df[column] = labeled_df[column].fillna(labeled_df[column].median())
+        labeled_df[column] = labeled_df[column].fillna(train_only_medians[column])
 
     rain = labeled_df["Lượng_mưa_mm"].fillna(0)
     soil = labeled_df["Độ_ẩm_đất"].fillna(0)
@@ -332,9 +368,12 @@ def preprocess_features(df: pd.DataFrame) -> pd.DataFrame:
     processed_df[TIME_COL] = pd.to_datetime(processed_df[TIME_COL], errors="coerce")
     processed_df = processed_df.dropna(subset=[TIME_COL]).sort_values([LOCATION_COL, TIME_COL]).reset_index(drop=True)
 
+    # Dùng median TÍNH RIÊNG trên phần dữ liệu sẽ thuộc tập TRAIN để điền NaN - xem docstring
+    # `compute_train_only_medians()` để biết lý do (ngăn rò rỉ thống kê của tập test vào tập train).
+    train_only_medians = compute_train_only_medians(processed_df, FEATURE_COLS)
     for column in FEATURE_COLS:
         processed_df[column] = pd.to_numeric(processed_df[column], errors="coerce")
-        processed_df[column] = processed_df[column].fillna(processed_df[column].median())
+        processed_df[column] = processed_df[column].fillna(train_only_medians[column])
 
     processed_df[TARGET_COL] = (
         pd.to_numeric(processed_df[TARGET_COL], errors="coerce").fillna(0).astype(int)

@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
+from shared_constants import FEATURE_COLS
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" / "historical"
 PLOTS_DIR = BASE_DIR / "plots"
@@ -13,13 +15,7 @@ LATEST_MODELS_DIR = BASE_DIR / "models" / "latest"
 
 TIME_COL = "Thời_gian"
 TARGET_COL = "Nguy_cơ_ngập"
-FEATURE_COLS = [
-    "Nhiệt_độ_C",
-    "Độ_ẩm_%",
-    "Lượng_mưa_mm",
-    "Độ_ẩm_đất",
-    "Chiều_cao_triều_m",
-]
+# FEATURE_COLS import từ shared_constants.py (dùng chung cho toàn bộ pipeline).
 EDA_COLS = [*FEATURE_COLS, TARGET_COL]
 CLASS_NAME_MAP = {
     0: "An toàn",

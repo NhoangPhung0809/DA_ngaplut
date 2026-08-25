@@ -1,9 +1,12 @@
+import concurrent.futures
+import io
 import json
 import importlib.util
 import math
 import os
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -16,6 +19,8 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 from streamlit_folium import st_folium
+
+from shared_constants import FEATURE_COLS as _SHARED_FEATURE_COLS
 
 # Tải biến môi trường từ file .env nếu có (ví dụ TOMTOM_API_KEY).
 load_dotenv()
@@ -59,7 +64,6 @@ CACHE_DIR = BASE_DIR / "cache"
 TRAINING_WORKER_PATH = BASE_DIR / "training_worker.py"
 TRAINING_STATUS_PATH = CACHE_DIR / "training_status.json"
 TRAINING_LOG_PATH = CACHE_DIR / "training_output.log"
-FORECAST_4DAY_CACHE_PATH = CACHE_DIR / "forecast_4day_cache.json"
 
 # ------------------------------------------------------------------------------------------------
 # QUẢN LÝ API KEY AN TOÀN BẰNG st.secrets - KHÔNG hardcode key thật trong source code nữa (đây chính
@@ -93,6 +97,10 @@ def get_api_secret(secret_key: str, env_var_name: str) -> str | None:
 
 
 TOMTOM_API_KEY = get_api_secret("TOMTOM_KEY", "TOMTOM_API_KEY")
+# LƯU Ý: OPENWEATHER_API_KEY hiện CHƯA được gọi ở bất kỳ đâu trong app - toàn bộ tính năng thời tiết
+# (dự báo 4 ngày, dữ liệu lịch sử) đang dùng Open-Meteo (không cần key). Biến này chỉ đọc sẵn key để
+# dự phòng tích hợp OpenWeather sau này; nếu bạn thấy tab dự báo không phản ứng gì khi đổi key này,
+# đó là lý do - không phải lỗi.
 OPENWEATHER_API_KEY = get_api_secret("OPENWEATHER_KEY", "OPENWEATHER_API_KEY")
 TOMTOM_ROUTING_BASE_URL = "https://api.tomtom.com/routing/1/calculateRoute"
 
@@ -118,14 +126,30 @@ LOCATION_HISTORICAL_FILE: dict[str, str] = {
     "Quảng Điền": "Quang_Dien_10years.csv",
 }
 
-# Danh sách đặc trưng đầu vào của model - PHẢI khớp đúng FEATURE_COLS trong analyze_and_train.py.
-FEATURE_COLS_FOR_INFERENCE = [
-    "Nhiệt_độ_C",
-    "Độ_ẩm_%",
-    "Lượng_mưa_mm",
-    "Độ_ẩm_đất",
-    "Chiều_cao_triều_m",
-]
+# Danh sách đặc trưng đầu vào của model - import từ `shared_constants.py` (dùng CHUNG với
+# analyze_and_train.py, train_model.py, eda_analysis.py, hyperparameter_tuning.py) thay vì tự định
+# nghĩa lại, để không còn nguy cơ lệch nhau giữa các file khi bộ đặc trưng của model thay đổi. Giữ
+# tên biến `FEATURE_COLS_FOR_INFERENCE` (thay vì đổi hết sang `FEATURE_COLS`) để không phải sửa lại
+# mọi chỗ đã dùng tên này trong file - alias đơn giản, không đổi hành vi.
+FEATURE_COLS_FOR_INFERENCE = _SHARED_FEATURE_COLS
+
+# Số bước thời gian (ngày) mặc định cho model tuần tự (keras_sequence/hybrid_lstm_xgboost) khi
+# `deployment_config.json` không có key `window_size` - PHẢI khớp `SEQUENCE_WINDOW` mặc định trong
+# `analyze_and_train.py`, nếu không model sẽ nhận sai shape đầu vào mà không báo lỗi rõ ràng.
+DEFAULT_SEQUENCE_WINDOW_SIZE = 7
+
+# Số ngày dự báo (Ngày T + 3 ngày tới) - DÙNG CHUNG cho `predict_4_days_forecast()` và
+# `predict_days_ahead_forecast_sequence()`, cùng với nhãn hiển thị tương ứng cho từng ngày.
+FORECAST_DAYS_AHEAD = 4
+DAY_LABELS = ["T (Hôm nay)", "T+1", "T+2", "T+3"]
+
+# Khóa (lock) BẢO VỆ lệnh gọi `.predict()` của model Keras (`keras_sequence`/`hybrid_lstm_xgboost`)
+# khi dự báo 5 địa phương chạy SONG SONG bằng ThreadPoolExecutor (xem `_compute_forecast_4day_result()`
+# và `predict_class_from_sequence_window()`). TensorFlow/Keras KHÔNG đảm bảo an toàn khi nhiều thread
+# gọi đồng thời `.predict()` trên CÙNG 1 model instance - dùng lock để nghiêm ngặt hóa chỉ phần suy
+# luận Keras (rẻ, tính bằng mili-giây), trong khi phần TỐN THỜI GIAN THẬT (gọi API Open-Meteo qua
+# mạng) vẫn chạy song song hoàn toàn bình thường - không mất đi lợi ích chính của việc song song hóa.
+_KERAS_INFERENCE_LOCK = threading.Lock()
 
 # Nửa cạnh (độ) của hình vuông xấp xỉ vùng ngập được vẽ quanh 1 điểm giám sát đang có nguy cơ
 # 'Ngập' - khoảng 0.015 độ vĩ/kinh ~ 1.5km, đủ nhỏ để không "nuốt" luôn toàn bộ khu vực lân cận.
@@ -527,6 +551,28 @@ def load_deployment_model(deployment_config: dict, latest_dir: str | Path) -> di
         }
 
     raise ValueError(f"Không hỗ trợ nạp model_type='{model_type}'.")
+
+
+def load_deployed_model_and_features() -> tuple[dict, list[str], dict]:
+    """
+    Nạp model đã triển khai + danh sách `feature_columns` ĐÚNG THỨ TỰ - DÙNG CHUNG cho
+    `get_latest_flood_predictions()` (Tab Bản đồ) và `_compute_forecast_4day_result()` (Tab Dự báo).
+    Trước đây mỗi hàm tự lặp lại y hệt chuỗi `load_evaluation_artifacts()` -> `load_deployment_model()`
+    -> đọc `deployment_config["feature_cols"]` (fallback `FEATURE_COLS_FOR_INFERENCE`) - đúng đoạn
+    code mà comment cũ từng ghi nhận đã có lần đọc SAI tên khóa ("feature_columns" thay vì
+    "feature_cols"), nay chỉ còn 1 chỗ duy nhất để sửa nếu lỗi tương tự lặp lại.
+
+    KHÔNG tự bắt exception - bên gọi tự try/except theo đúng nhu cầu riêng của mình (ví dụ
+    `get_latest_flood_predictions()` cần rơi xuống nhánh dự phòng lịch sử khi lỗi, còn
+    `_compute_forecast_4day_result()` cần báo lỗi rõ ràng cho người dùng).
+
+    Trả về `(deployed_model, feature_columns, deployment_config)` - `deployment_config` được trả kèm
+    vì bên gọi thường còn cần thêm `model_name`/`model_type`/`f1_macro` từ đó.
+    """
+    evaluation_metrics, deployment_config, runtime_info = load_evaluation_artifacts()
+    deployed_model = load_deployment_model(deployment_config, runtime_info["latest_dir"])
+    feature_columns = deployment_config.get("feature_cols") or FEATURE_COLS_FOR_INFERENCE
+    return deployed_model, feature_columns, deployment_config
 
 
 # ==================================================================================================
@@ -1477,6 +1523,24 @@ def fetch_tomtom_route(
          "travel_time_min": float, "used_avoid_areas": bool, "error": str | None}
     """
     has_flood_zones = bool(flooded_polygons)
+
+    # Kiểm tra API key TRƯỚC khi gọi mạng - `get_api_secret()` trả `None` nếu máy chưa cấu hình
+    # `.streamlit/secrets.toml` lẫn biến môi trường. Nếu không chặn ở đây, request vẫn được gửi với
+    # `key=None` (requests tự bỏ qua param `None`), TomTom trả lỗi 403 mơ hồ khiến người dùng khó
+    # đoán nguyên nhân thật - chặn sớm để báo đúng lỗi "chưa cấu hình API key".
+    if not api_key:
+        return {
+            "success": False,
+            "route_points": [],
+            "distance_km": None,
+            "travel_time_min": None,
+            "used_avoid_areas": has_flood_zones,
+            "error": (
+                "Chưa cấu hình TOMTOM_API_KEY - hãy khai báo trong `.streamlit/secrets.toml` "
+                "(key `TOMTOM_KEY`) hoặc biến môi trường `TOMTOM_API_KEY`."
+            ),
+        }
+
     locations = f"{start_point[0]},{start_point[1]}:{end_point[0]},{end_point[1]}"
 
     request_url = f"{TOMTOM_ROUTING_BASE_URL}/{locations}/json"
@@ -1545,6 +1609,57 @@ def build_flood_zone_polygon(
     ]
 
 
+def nudge_point_outside_flood_zones(
+    point: tuple[float, float], flooded_polygons: list[list[tuple[float, float]]]
+) -> tuple[float, float]:
+    """
+    Nếu `point` rơi ĐÚNG vào bên trong 1 vùng ngập (hình vuông do `build_flood_zone_polygon` sinh
+    ra), dịch điểm đó ra khỏi biên Bắc của vùng ngập trước khi gửi cho TomTom.
+
+    TẠI SAO CẦN HÀM NÀY: điểm đi/đến MẶC ĐỊNH ban đầu (trước khi người dùng click chọn lại) trùng
+    CHÍNH XÁC tọa độ 1 trong 5 địa phương giám sát (`REAL_MONITORED_LOCATIONS`). Nếu đúng lúc đó địa
+    phương này đang 'Ngập', điểm xuất phát/đến sẽ nằm NGAY TÂM của chính vùng `avoidAreas` gửi cho
+    TomTom - TomTom không thể định tuyến ĐI TỪ/ĐẾN một điểm nằm trong vùng bị cấm, gây lỗi định tuyến
+    ngay từ lần mở tab đầu tiên dù người dùng chưa hề click gì. Chỉ dịch điểm dùng để GỌI TomTom -
+    KHÔNG ghi đè lại `st.session_state`, nên marker hiển thị trên bản đồ vẫn đúng vị trí gốc.
+    """
+    for polygon in flooded_polygons:
+        latitudes = [p[0] for p in polygon]
+        longitudes = [p[1] for p in polygon]
+        min_lat, max_lat, min_lon, max_lon = min(latitudes), max(latitudes), min(longitudes), max(longitudes)
+        if min_lat <= point[0] <= max_lat and min_lon <= point[1] <= max_lon:
+            return (max_lat + 0.005, point[1])  # Dịch lên phía Bắc, ra khỏi biên vùng ngập.
+    return point
+
+
+def predict_class_from_sequence_window(deployed_model: dict, window_input: np.ndarray) -> int:
+    """
+    Suy luận nhãn lớp (0/1/2) từ 1 CỬA SỔ chuỗi thời gian ĐÃ chuẩn hóa + reshape sẵn thành
+    `(1, window_size, n_features)`, dùng CHUNG cho model dạng `keras_sequence`/`hybrid_lstm_xgboost`.
+
+    Tách riêng khỏi `predict_flood_class()` vì đúng đoạn dispatch model_type này (keras_sequence dùng
+    `argmax` trên xác suất softmax, hybrid dùng feature_extractor -> classifier) trước đây bị LẶP LẠI
+    y hệt ở 2 nơi: `predict_flood_class()` (dự báo tức thời, 1 cửa sổ) và
+    `predict_days_ahead_forecast_sequence()` (dự báo nhiều ngày, N cửa sổ trượt) - dễ sửa 1 chỗ quên
+    chỗ kia (đúng nguyên nhân khiến `window_size` fallback từng lệch nhau giữa 2 hàm).
+    """
+    model_type = deployed_model["model_type"]
+
+    # Khóa TOÀN BỘ lệnh gọi Keras (`.predict()`) bằng `_KERAS_INFERENCE_LOCK` - xem comment tại nơi
+    # khai báo lock để biết lý do (an toàn khi 5 địa phương suy luận song song bằng ThreadPoolExecutor).
+    if model_type == "keras_sequence":
+        with _KERAS_INFERENCE_LOCK:
+            class_probabilities = deployed_model["model"].predict(window_input, verbose=0)
+        return int(class_probabilities.argmax(axis=-1)[0])
+
+    if model_type == "hybrid_lstm_xgboost":
+        with _KERAS_INFERENCE_LOCK:
+            embedding = deployed_model["feature_extractor"].predict(window_input, verbose=0)
+        return int(deployed_model["classifier"].predict(embedding)[0])
+
+    raise ValueError(f"model_type không được hỗ trợ cho suy luận theo cửa sổ: {model_type}")
+
+
 def predict_flood_class(deployed_model: dict, location_df: pd.DataFrame, feature_columns: list[str]) -> int:
     """
     Suy luận nhãn nguy cơ ngập (0 = An toàn, 1 = Ngập nhẹ, 2 = Ngập nặng) mới nhất bằng model THẬT
@@ -1561,26 +1676,81 @@ def predict_flood_class(deployed_model: dict, location_df: pd.DataFrame, feature
         scaled_features = pd.DataFrame(scaler.transform(latest_features), columns=feature_columns)
         return int(deployed_model["model"].predict(scaled_features)[0])
 
-    window_size = deployed_model.get("window_size") or 24
+    # Fallback dùng hằng số `DEFAULT_SEQUENCE_WINDOW_SIZE` (đầu file) - đúng `SEQUENCE_WINDOW` dùng
+    # lúc huấn luyện trong `analyze_and_train.py`. TRƯỚC ĐÂY hardcode `24` ở đây - nếu
+    # `deployment_config.json` thiếu key `window_size`, model
+    # tuần tự sẽ nhận sai shape đầu vào (24 bước thay vì 7), suy luận sai lệch mà không có lỗi rõ
+    # ràng nào cảnh báo - CHỈ lộ ra gián tiếp qua bug khác (risk bị báo nhầm "An toàn").
+    window_size = deployed_model.get("window_size") or DEFAULT_SEQUENCE_WINDOW_SIZE
     if len(location_df) < window_size:
         raise ValueError("Không đủ dữ liệu quan trắc để tạo chuỗi thời gian cho model tuần tự.")
     window_features = location_df[feature_columns].iloc[-window_size:]
     scaled_window = scaler.transform(window_features)
     model_input = scaled_window.reshape(1, window_size, len(feature_columns))
-
-    if model_type == "keras_sequence":
-        class_probabilities = deployed_model["model"].predict(model_input, verbose=0)
-        return int(class_probabilities.argmax(axis=-1)[0])
-
-    if model_type == "hybrid_lstm_xgboost":
-        embedding = deployed_model["feature_extractor"].predict(model_input, verbose=0)
-        return int(deployed_model["classifier"].predict(embedding)[0])
-
-    raise ValueError(f"model_type không được hỗ trợ cho suy luận thời gian thực: {model_type}")
+    return predict_class_from_sequence_window(deployed_model, model_input)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def get_latest_flood_predictions() -> pd.DataFrame:
+def read_csv_tail(csv_path: Path, num_rows: int, chunk_bytes: int = 65536) -> pd.DataFrame:
+    """
+    Đọc CHỈ `num_rows` dòng CUỐI của 1 file CSV lớn, KHÔNG dùng `pd.read_csv()` để parse toàn bộ file
+    - dùng cho nhánh suy luận real-time của `get_latest_flood_predictions()`, vốn chỉ cần 1 dòng
+    (model dạng bảng) hoặc vài dòng gần nhất (model tuần tự) trong số hàng chục nghìn dòng của mỗi
+    file CSV lịch sử 10 năm (~88 nghìn dòng/địa phương).
+
+    CÁCH LÀM: đọc HEADER (dòng đầu, rẻ) riêng một lần, rồi `seek()` tới `chunk_bytes` cuối cùng của
+    file thay vì đọc từ đầu - nếu đoạn đọc được chưa đủ `num_rows` dòng trọn vẹn (hiếm, chỉ xảy ra khi
+    dòng CSV bất thường dài), tăng gấp đôi kích thước đọc và thử lại. Dòng đầu tiên trong đoạn đọc
+    được LUÔN bị bỏ vì có thể bị cắt cụt giữa dòng (điểm `seek()` không đảm bảo rơi đúng ranh giới
+    dòng). Nhanh hơn nhiều so với đọc + ép kiểu toàn bộ file chỉ để lấy vài dòng cuối.
+    """
+    file_size = csv_path.stat().st_size
+    with csv_path.open("rb") as file:
+        header_line = file.readline()
+        header_end = file.tell()  # Vị trí byte NGAY SAU header - phần dữ liệu thật bắt đầu từ đây.
+        data_size = max(file_size - header_end, 0)
+
+        read_size = min(chunk_bytes, data_size)
+        lines: list[bytes] = []
+        while True:
+            file.seek(header_end + (data_size - read_size))
+            tail_bytes = file.read()
+            candidate_lines = tail_bytes.split(b"\n")
+            if read_size < data_size:
+                candidate_lines = candidate_lines[1:]  # Dòng đầu có thể bị cắt cụt - bỏ đi cho an toàn.
+            lines = [line for line in candidate_lines if line.strip()]
+            if len(lines) >= num_rows or read_size >= data_size:
+                break
+            read_size = min(read_size * 4, data_size)
+
+    tail_lines = lines[-num_rows:]
+    csv_text = header_line.decode("utf-8-sig") + b"\n".join(tail_lines).decode("utf-8", errors="replace")
+    return pd.read_csv(io.StringIO(csv_text))
+
+
+def _get_flood_predictions_dependency_signature() -> tuple:
+    """
+    "Chữ ký" (mtime) của các file mà `get_latest_flood_predictions()` phụ thuộc vào
+    (`deployment_config.json` + 5 file CSV lịch sử) - dùng làm THAM SỐ CACHE để Streamlit tự biết
+    khi nào cần tính lại (file đổi -> chữ ký đổi -> cache miss tự nhiên).
+
+    THAY THẾ cho `ttl=300` cũ (tính lại MÙ QUÁNG mỗi 5 phút bất kể có gì thay đổi hay không - dữ liệu
+    thật ra chỉ đổi khi có lần huấn luyện mới hoặc `fetch_data.py` chạy xong, thường là theo GIỜ/NGÀY
+    chứ không phải theo phút): với cách này, nếu không có gì thay đổi, hàm luôn trả cache tức thì dù
+    người dùng mở app cả tiếng đồng hồ; nếu vừa huấn luyện xong hoặc vừa có dữ liệu mới, lần gọi KẾ
+    TIẾP sẽ tự nhận ra ngay (không cần đợi hết 5 phút cũ).
+
+    Tính `os.stat()` cho 6 file rất rẻ (không đọc nội dung file) nên gọi hàm này mỗi lần rerun không
+    tốn kém - phần ĐẮT (đọc CSV + suy luận model) chỉ chạy khi chữ ký thực sự đổi.
+    """
+    signature = [DEPLOYMENT_CONFIG_PATH.stat().st_mtime if DEPLOYMENT_CONFIG_PATH.exists() else None]
+    for csv_filename in LOCATION_HISTORICAL_FILE.values():
+        csv_path = HISTORICAL_DIR / csv_filename
+        signature.append(csv_path.stat().st_mtime if csv_path.exists() else None)
+    return tuple(signature)
+
+
+@st.cache_data(show_spinner=False)
+def _get_latest_flood_predictions_cached(_dependency_signature: tuple) -> pd.DataFrame:
     """
     ĐỌC ĐỘNG trạng thái nguy cơ ngập MỚI NHẤT cho 5 địa phương giám sát thực tế - đây chính là
     `df_predictions` mà bản đồ định tuyến bên dưới dựa vào, với 2 cột ['Địa phương', 'Nguy cơ'].
@@ -1596,36 +1766,53 @@ def get_latest_flood_predictions() -> pd.DataFrame:
       2. Nếu CHƯA huấn luyện model nào -> dự phòng bằng chính nhãn `Nguy_cơ_ngập` THỰC TẾ ở dòng dữ
          liệu quan trắc gần nhất trong data/historical/*.csv (vẫn là dữ liệu thật, không phải số
          ngẫu nhiên) để bản đồ luôn phản ánh tình trạng có cơ sở dữ liệu, không bao giờ "đứng im".
+
+    Cột 'Nguy cơ' có 3 giá trị: 'An toàn' / 'Ngập' / 'Không xác định'. FAIL-SAFE THEO THIẾT KẾ: khi
+    suy luận cho 1 địa phương bị lỗi (thiếu CSV, model hỏng, không đủ dòng cho `window_size`, sai cột
+    feature...), KHÔNG mặc định về 'An toàn' như bản trước - với hệ thống cảnh báo ngập, báo nhầm
+    "an toàn" trong khi thực ra không xác định được là hướng lỗi NGUY HIỂM HƠN nhiều so với hiển thị
+    rõ "không xác định, cần kiểm tra thủ công" cho người vận hành.
     """
     deployed_model = None
     feature_columns = FEATURE_COLS_FOR_INFERENCE
     try:
-        evaluation_metrics, deployment_config, runtime_info = load_evaluation_artifacts()
-        deployed_model = load_deployment_model(deployment_config, runtime_info["latest_dir"])
-        # Lưu ý: `deployment_config.json` lưu key "feature_cols" (xem `save_deployment_config()` trong
-        # `analyze_and_train.py`), không phải "feature_columns" - đã từng đọc sai tên khóa ở đây khiến
-        # luôn rơi về giá trị mặc định `FEATURE_COLS_FOR_INFERENCE` (vô hại vì trùng giá trị, nhưng dễ
-        # gây lỗi khó phát hiện nếu 2 danh sách này lệch nhau sau này).
-        feature_columns = deployment_config.get("feature_cols") or feature_columns
+        deployed_model, feature_columns, _deployment_config = load_deployed_model_and_features()
     except Exception:
         deployed_model = None  # Chưa có model triển khai -> dùng nhánh dự phòng bên dưới.
 
+    # Chỉ cần đọc vài dòng CUỐI của mỗi CSV (window_size cho model tuần tự, hoặc 1 dòng cho model
+    # bảng/nhánh dự phòng) - xem `read_csv_tail()` để biết vì sao không đọc + parse toàn bộ file.
+    if deployed_model is not None and deployed_model.get("model_type") in {
+        "keras_sequence",
+        "hybrid_lstm_xgboost",
+    }:
+        required_rows = (deployed_model.get("window_size") or DEFAULT_SEQUENCE_WINDOW_SIZE) + 2
+    else:
+        required_rows = 3
+
     records = []
     for location_name, csv_filename in LOCATION_HISTORICAL_FILE.items():
-        risk_status = "An toàn"
         try:
-            location_df = pd.read_csv(HISTORICAL_DIR / csv_filename).sort_values("Thời_gian")
+            location_df = read_csv_tail(HISTORICAL_DIR / csv_filename, required_rows).sort_values("Thời_gian")
             if deployed_model is not None:
                 predicted_class = predict_flood_class(deployed_model, location_df, feature_columns)
             else:
                 predicted_class = int(location_df["Nguy_cơ_ngập"].iloc[-1])
             risk_status = "An toàn" if predicted_class == 0 else "Ngập"
-        except Exception:
-            risk_status = "An toàn"  # Thiếu dữ liệu/model lỗi -> mặc định an toàn, không chặn UI.
+        except Exception as exc:
+            # FAIL-SAFE: xem docstring - CỐ Ý không rơi về "An toàn" khi lỗi.
+            risk_status = "Không xác định"
+            print(f"[get_latest_flood_predictions] Lỗi suy luận cho '{location_name}': {exc}")
 
         records.append({"Địa phương": location_name, "Nguy cơ": risk_status})
 
     return pd.DataFrame(records, columns=["Địa phương", "Nguy cơ"])
+
+
+def get_latest_flood_predictions() -> pd.DataFrame:
+    """Wrapper mỏng: tính chữ ký phụ thuộc (rẻ) rồi gọi hàm đã cache thật - xem docstring
+    `_get_flood_predictions_dependency_signature()` và `_get_latest_flood_predictions_cached()`."""
+    return _get_latest_flood_predictions_cached(_get_flood_predictions_dependency_signature())
 
 
 # ==================================================================================================
@@ -1640,14 +1827,20 @@ def _fetch_or_estimate_tide_heights(
     `predict_days_ahead_forecast_sequence()`).
 
     Ưu tiên dữ liệu THẬT từ Open-Meteo Marine API (`wave_height_max`) tại chính tọa độ (lat, lon).
-    Marine API CHỈ có dữ liệu tại các điểm lưới nằm trên/gần biển - với tọa độ NỘI ĐỊA (ví dụ TP Huế,
-    Hương Trà, Quảng Điền), API trả về `null` cho toàn bộ ngày, khi đó hàm dùng công thức triều tổng
-    hợp (bán nhật triều chu kỳ ~12.42 giờ + chu kỳ mặt trăng ~29.53 ngày) làm giá trị xấp xỉ - ĐÚNG
-    phương pháp đã dùng để sinh cột `Chiều_cao_triều_m` khi xây dựng dữ liệu huấn luyện lịch sử (xem
-    `calculate_synthetic_tide()` trong `fetch_data.py`), giúp đầu vào suy luận nhất quán về mặt phân
-    phối với dữ liệu mà model đã học, thay vì dùng một hằng số mặc định tùy tiện. Công thức tổng hợp
-    này tính trực tiếp từ giá trị NGÀY THÁNG (không phụ thuộc gọi API), nên áp dụng được cho cả ngày
-    quá khứ lẫn tương lai mà không cần phân biệt.
+    Marine API CHỈ có dữ liệu tại các điểm lưới nằm trên/gần biển - với tọa độ NỘI ĐỊA THỰC SỰ (đã
+    kiểm chứng bằng gọi API sống: TP Huế, Hương Trà), API trả về `null` cho toàn bộ ngày, khi đó hàm
+    dùng công thức triều tổng hợp (bán nhật triều chu kỳ ~12.42 giờ + chu kỳ mặt trăng ~29.53 ngày)
+    làm giá trị xấp xỉ - ĐÚNG phương pháp đã dùng để sinh cột `Chiều_cao_triều_m` khi xây dựng dữ liệu
+    huấn luyện lịch sử (xem `calculate_synthetic_tide()` trong `fetch_data.py`), giúp đầu vào suy luận
+    nhất quán về mặt phân phối với dữ liệu mà model đã học, thay vì dùng một hằng số mặc định tùy
+    tiện. Công thức tổng hợp này tính trực tiếp từ giá trị NGÀY THÁNG (không phụ thuộc gọi API), nên
+    áp dụng được cho cả ngày quá khứ lẫn tương lai mà không cần phân biệt.
+
+    LƯU Ý: KHÔNG hardcode danh sách "địa phương nội địa -> bỏ qua Marine API" để tiết kiệm 1 lượt gọi
+    mạng, dù có vẻ hợp lý - lưới dữ liệu của Marine API khá thô (~0.25 độ) nên vẫn "chụp" được điểm
+    biển gần nhất cho một số tọa độ tưởng chừng nội địa (ví dụ Quảng Điền, Phú Vang, Hương Thủy trong
+    5 địa phương giám sát THỰC RA vẫn nhận được dữ liệu triều thật, chỉ TP Huế/Hương Trà là luôn
+    `null`) - hardcode sai sẽ âm thầm hạ chất lượng đầu vào của đúng những địa phương có dữ liệu thật.
     """
     forecast_days_needed = len(forecast_dates) - past_days
     try:
@@ -1680,31 +1873,31 @@ def _fetch_or_estimate_tide_heights(
     return synthetic_heights
 
 
-def predict_4_days_forecast(lat: float, lon: float, model, scaler) -> pd.DataFrame | None:
+def _fetch_daily_weather_and_tide(
+    lat: float, lon: float, forecast_days: int, past_days: int = 0
+) -> tuple[dict, pd.DatetimeIndex, list[float]] | None:
     """
-    Dự báo nguy cơ ngập cho 4 NGÀY LIÊN TIẾP - Ngày T (hôm nay), T+1, T+2, T+3 - tại 1 tọa độ
-    (lat, lon) bất kỳ, dùng `model` + `scaler` ĐÃ HUẤN LUYỆN SẴN được truyền vào (không tự nạp model
-    trong hàm này, để hàm dùng được với bất kỳ model nào - XGBoost, RandomForest, hay Deep Learning).
+    Gọi Open-Meteo FORECAST API lấy dữ liệu khí tượng THEO NGÀY (nhiệt độ, độ ẩm, mưa, độ ẩm đất) cho
+    `forecast_days` ngày tương lai - cộng thêm `past_days` ngày QUÁ KHỨ THẬT nếu > 0 (cần cho model
+    dạng chuỗi phải dựng cửa sổ nhiều ngày, xem `predict_days_ahead_forecast_sequence()`) - và chiều
+    cao triều tương ứng (qua `_fetch_or_estimate_tide_heights()`).
 
-    Trả về DataFrame gồm 3 cột: ['Ngày', 'Dự báo Lượng mưa (mm)', 'Dự đoán Ngập'], hoặc `None` nếu
-    gọi API/model lỗi (đã được xử lý gracefully bằng try-except, không raise exception ra ngoài).
+    DÙNG CHUNG cho `predict_4_days_forecast()` (`past_days=0`) và
+    `predict_days_ahead_forecast_sequence()` (`past_days=window_size-1`) - trước đây mỗi hàm tự lặp
+    lại y hệt đoạn gọi API + kiểm tra/cắt độ dài này (~20 dòng mỗi bản), từng có 1 bản QUÊN cắt đúng
+    độ dài `forecast_dates` trước khi tính triều, gây lỗi ghép DataFrame lệch độ dài.
+
+    GIẢI THÍCH XỬ LÝ CỬA SỔ THỜI GIAN (datetime window) - để đưa vào báo cáo luận văn: tham số
+    `forecast_days`/`past_days` kết hợp `timezone="auto"` khiến Open-Meteo tự suy ra múi giờ ĐỊA
+    PHƯƠNG của tọa độ (lat, lon) - với Huế là Asia/Ho_Chi_Minh (UTC+7) - rồi trả về mảng `daily.time`
+    LUÔN kết thúc đúng ở Ngày T+3 (hôm nay + 3), mà KHÔNG cần tự tính `datetime.now() + timedelta`
+    thủ công - cách làm thủ công dễ bị lệch 1 ngày nếu server chạy ở múi giờ UTC trong khi vị trí cần
+    dự báo lại ở múi giờ khác (UTC+7).
+
+    Trả về `(daily_weather, all_dates, tide_heights)` - `all_dates`/`tide_heights` đã được CẮT ĐÚNG
+    `past_days + forecast_days` phần tử - hoặc `None` nếu gọi API lỗi/thiếu ngày dữ liệu.
     """
-    FEATURE_COLS = ["Nhiệt_độ_C", "Độ_ẩm_%", "Lượng_mưa_mm", "Độ_ẩm_đất", "Chiều_cao_triều_m"]
-    FORECAST_DAYS = 4
-
-    # ==============================================================================================
-    # BƯỚC A - FETCH DATA: gọi Open-Meteo FORECAST API (dự báo tương lai - khác với Archive API chỉ
-    # có dữ liệu QUÁ KHỨ mà fetch_data.py dùng để xây tập huấn luyện) để lấy dữ liệu khí tượng THEO
-    # NGÀY cho đúng 4 ngày kể từ hôm nay.
-    #
-    # GIẢI THÍCH XỬ LÝ CỬA SỔ THỜI GIAN (datetime window) - để đưa vào báo cáo luận văn:
-    # Tham số `forecast_days=4` kết hợp `timezone="auto"` khiến Open-Meteo tự suy ra múi giờ ĐỊA
-    # PHƯƠNG của tọa độ (lat, lon) - với Huế là Asia/Ho_Chi_Minh (UTC+7) - rồi trả về mảng `daily.time`
-    # LUÔN bắt đầu từ NGÀY HIỆN TẠI theo múi giờ đó. Nhờ vậy, index 0 của mảng chính xác là Ngày T
-    # (hôm nay), index 1/2/3 lần lượt là T+1/T+2/T+3, mà KHÔNG cần tự tính `datetime.now() + timedelta`
-    # thủ công - cách làm thủ công dễ bị lệch 1 ngày nếu server chạy ở múi giờ UTC trong khi vị trí
-    # cần dự báo lại ở múi giờ khác (UTC+7).
-    # ==============================================================================================
+    total_days_needed = past_days + forecast_days
     try:
         weather_response = requests.get(
             "https://api.open-meteo.com/v1/forecast",
@@ -1715,22 +1908,55 @@ def predict_4_days_forecast(lat: float, lon: float, model, scaler) -> pd.DataFra
                     "precipitation_sum,rain_sum,temperature_2m_mean,"
                     "relative_humidity_2m_mean,soil_moisture_0_to_7cm_mean"
                 ),
-                "forecast_days": FORECAST_DAYS,
+                "past_days": past_days,
+                "forecast_days": forecast_days,
                 "timezone": "auto",
             },
             timeout=15,
         )
         weather_response.raise_for_status()
         daily_weather = weather_response.json()["daily"]
-        forecast_dates = pd.to_datetime(daily_weather["time"])
-        if len(forecast_dates) < FORECAST_DAYS:
-            raise ValueError(f"API chỉ trả về {len(forecast_dates)}/{FORECAST_DAYS} ngày dữ liệu.")
+        all_dates = pd.to_datetime(daily_weather["time"])
+        if len(all_dates) < total_days_needed:
+            raise ValueError(f"API chỉ trả về {len(all_dates)}/{total_days_needed} ngày dữ liệu.")
+        # Cắt CHÍNH XÁC còn total_days_needed phần tử - đề phòng Open-Meteo trả về NHIỀU HƠN yêu cầu
+        # (hiếm nhưng có thể) - nếu không cắt, `tide_heights` (tính theo `len(all_dates)`) sẽ DÀI HƠN
+        # các cột khác (vốn tự cắt theo `total_days_needed`), gây lỗi ghép DataFrame lệch độ dài.
+        all_dates = all_dates[:total_days_needed]
     except (requests.exceptions.RequestException, KeyError, ValueError, TypeError) as exc:
-        print(f"[predict_4_days_forecast] Lỗi khi gọi Open-Meteo Forecast API: {exc}")
+        print(f"[_fetch_daily_weather_and_tide] Lỗi khi gọi Open-Meteo Forecast API: {exc}")
         return None
 
-    # Chiều cao triều lấy riêng (Forecast API thường không có biến này) - xem docstring hàm phụ trợ.
-    tide_heights = _fetch_or_estimate_tide_heights(lat, lon, forecast_dates)
+    tide_heights = _fetch_or_estimate_tide_heights(lat, lon, all_dates, past_days=past_days)
+    return daily_weather, all_dates, tide_heights
+
+
+def _build_forecast_row(day_label: str, forecast_date: pd.Timestamp, rain_mm: float, predicted_class: int) -> dict:
+    """Đóng gói 1 dòng kết quả dự báo (['Ngày', 'Dự báo Lượng mưa (mm)', 'Dự đoán Ngập']) - DÙNG CHUNG
+    cho `predict_4_days_forecast()` và `predict_days_ahead_forecast_sequence()` để đảm bảo định dạng
+    ngày/nhãn nhất quán giữa 2 hàm (trước đây mỗi hàm tự viết riêng 1 bản)."""
+    return {
+        "Ngày": f"{forecast_date.strftime('%d/%m/%Y')} ({day_label})",
+        "Dự báo Lượng mưa (mm)": round(float(rain_mm), 1),
+        "Dự đoán Ngập": "An toàn" if int(predicted_class) == 0 else "Nguy cơ ngập",
+    }
+
+
+def predict_4_days_forecast(lat: float, lon: float, model, scaler) -> pd.DataFrame | None:
+    """
+    Dự báo nguy cơ ngập cho 4 NGÀY LIÊN TIẾP - Ngày T (hôm nay), T+1, T+2, T+3 - tại 1 tọa độ
+    (lat, lon) bất kỳ, dùng `model` + `scaler` ĐÃ HUẤN LUYỆN SẴN được truyền vào (không tự nạp model
+    trong hàm này, để hàm dùng được với bất kỳ model nào - XGBoost, RandomForest, hay Deep Learning).
+
+    Trả về DataFrame gồm 3 cột: ['Ngày', 'Dự báo Lượng mưa (mm)', 'Dự đoán Ngập'], hoặc `None` nếu
+    gọi API/model lỗi (đã được xử lý gracefully bằng try-except, không raise exception ra ngoài).
+    """
+    # BƯỚC A - FETCH DATA: xem docstring `_fetch_daily_weather_and_tide()` (giải thích đầy đủ cách xử
+    # lý cửa sổ thời gian datetime, đúng chuẩn báo cáo luận văn).
+    fetch_result = _fetch_daily_weather_and_tide(lat, lon, forecast_days=FORECAST_DAYS_AHEAD, past_days=0)
+    if fetch_result is None:
+        return None
+    daily_weather, forecast_dates, tide_heights = fetch_result
 
     # ==============================================================================================
     # BƯỚC B - PREPROCESSING: gộp toàn bộ đặc trưng vào 1 DataFrame theo ĐÚNG THỨ TỰ CỘT mà `scaler`
@@ -1741,14 +1967,14 @@ def predict_4_days_forecast(lat: float, lon: float, model, scaler) -> pd.DataFra
     try:
         daily_features_df = pd.DataFrame(
             {
-                "Nhiệt_độ_C": daily_weather["temperature_2m_mean"][:FORECAST_DAYS],
-                "Độ_ẩm_%": daily_weather["relative_humidity_2m_mean"][:FORECAST_DAYS],
-                "Lượng_mưa_mm": daily_weather["rain_sum"][:FORECAST_DAYS],
-                "Độ_ẩm_đất": daily_weather["soil_moisture_0_to_7cm_mean"][:FORECAST_DAYS],
+                "Nhiệt_độ_C": daily_weather["temperature_2m_mean"][:FORECAST_DAYS_AHEAD],
+                "Độ_ẩm_%": daily_weather["relative_humidity_2m_mean"][:FORECAST_DAYS_AHEAD],
+                "Lượng_mưa_mm": daily_weather["rain_sum"][:FORECAST_DAYS_AHEAD],
+                "Độ_ẩm_đất": daily_weather["soil_moisture_0_to_7cm_mean"][:FORECAST_DAYS_AHEAD],
                 "Chiều_cao_triều_m": tide_heights,
             }
         )
-        feature_columns = list(getattr(scaler, "feature_names_in_", FEATURE_COLS))
+        feature_columns = list(getattr(scaler, "feature_names_in_", FEATURE_COLS_FOR_INFERENCE))
         # Giữ lại DataFrame (có tên cột) thay vì để `scaler.transform()` trả về ndarray thô - tránh
         # warning "X does not have valid feature names" khi model.predict() nhận vào numpy array,
         # dù model đã được fit bằng DataFrame có tên cột lúc huấn luyện (xem `scale_features()` trong
@@ -1774,23 +2000,14 @@ def predict_4_days_forecast(lat: float, lon: float, model, scaler) -> pd.DataFra
         print(f"[predict_4_days_forecast] Lỗi khi suy luận bằng model: {exc}")
         return None
 
-    # ==============================================================================================
-    # BƯỚC D - OUTPUT: đóng gói kết quả thành DataFrame dễ đọc - gắn nhãn ngày thứ (T/T+1/T+2/T+3) và
-    # ánh xạ nhãn số sang văn bản tiếng Việt dễ hiểu (0 -> 'An toàn', khác 0 -> 'Nguy cơ ngập').
-    # ==============================================================================================
-    day_labels = ["T (Hôm nay)", "T+1", "T+2", "T+3"]
+    # BƯỚC D - OUTPUT: xem docstring `_build_forecast_row()`.
     result_rows = [
-        {
-            "Ngày": f"{forecast_dates[offset].strftime('%d/%m/%Y')} ({day_labels[offset]})",
-            "Dự báo Lượng mưa (mm)": round(float(daily_features_df["Lượng_mưa_mm"].iloc[offset]), 1),
-            "Dự đoán Ngập": "An toàn" if int(predicted_classes[offset]) == 0 else "Nguy cơ ngập",
-        }
-        for offset in range(FORECAST_DAYS)
+        _build_forecast_row(
+            DAY_LABELS[offset], forecast_dates[offset], daily_features_df["Lượng_mưa_mm"].iloc[offset], predicted_classes[offset]
+        )
+        for offset in range(FORECAST_DAYS_AHEAD)
     ]
     return pd.DataFrame(result_rows, columns=["Ngày", "Dự báo Lượng mưa (mm)", "Dự đoán Ngập"])
-
-
-DEFAULT_SEQUENCE_WINDOW_SIZE = 7  # Khớp SEQUENCE_WINDOW mặc định trong analyze_and_train.py.
 
 
 def predict_days_ahead_forecast_sequence(
@@ -1814,39 +2031,18 @@ def predict_days_ahead_forecast_sequence(
     (chưa xảy ra) của các ngày trước đó trong cùng đợt dự báo, đây là cách làm hợp lý duy nhất vì
     tại thời điểm dự đoán, dữ liệu THẬT của những ngày đó chưa tồn tại.
     """
-    model_type = deployed_model["model_type"]
     scaler = deployed_model["scaler"]
     window_size = deployed_model.get("window_size") or DEFAULT_SEQUENCE_WINDOW_SIZE
-    FORECAST_DAYS = 4
     past_days_needed = window_size - 1
-    total_days_needed = past_days_needed + FORECAST_DAYS
+    total_days_needed = past_days_needed + FORECAST_DAYS_AHEAD
 
-    try:
-        weather_response = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": lat,
-                "longitude": lon,
-                "daily": (
-                    "precipitation_sum,rain_sum,temperature_2m_mean,"
-                    "relative_humidity_2m_mean,soil_moisture_0_to_7cm_mean"
-                ),
-                "past_days": past_days_needed,
-                "forecast_days": FORECAST_DAYS,
-                "timezone": "auto",
-            },
-            timeout=15,
-        )
-        weather_response.raise_for_status()
-        daily_weather = weather_response.json()["daily"]
-        all_dates = pd.to_datetime(daily_weather["time"])
-        if len(all_dates) < total_days_needed:
-            raise ValueError(f"API chỉ trả về {len(all_dates)}/{total_days_needed} ngày dữ liệu.")
-    except (requests.exceptions.RequestException, KeyError, ValueError, TypeError) as exc:
-        print(f"[predict_days_ahead_forecast_sequence] Lỗi khi gọi Open-Meteo Forecast API: {exc}")
+    # BƯỚC A - FETCH DATA: xem docstring `_fetch_daily_weather_and_tide()`.
+    fetch_result = _fetch_daily_weather_and_tide(
+        lat, lon, forecast_days=FORECAST_DAYS_AHEAD, past_days=past_days_needed
+    )
+    if fetch_result is None:
         return None
-
-    tide_heights = _fetch_or_estimate_tide_heights(lat, lon, all_dates, past_days=past_days_needed)
+    daily_weather, all_dates, tide_heights = fetch_result
 
     try:
         daily_features_df = pd.DataFrame(
@@ -1866,29 +2062,19 @@ def predict_days_ahead_forecast_sequence(
         print(f"[predict_days_ahead_forecast_sequence] Lỗi khi tiền xử lý/chuẩn hóa dữ liệu: {exc}")
         return None
 
-    day_labels = ["T (Hôm nay)", "T+1", "T+2", "T+3"]
     result_rows = []
     try:
-        for offset in range(FORECAST_DAYS):
+        for offset in range(FORECAST_DAYS_AHEAD):
             end_idx = past_days_needed + offset  # Vị trí ngày T/T+1/T+2/T+3 trong chuỗi đã ghép.
             start_idx = end_idx - window_size + 1
             window_input = scaled_all_days[start_idx : end_idx + 1].reshape(1, window_size, len(feature_columns))
-
-            if model_type == "keras_sequence":
-                class_probabilities = deployed_model["model"].predict(window_input, verbose=0)
-                predicted_class = int(np.argmax(class_probabilities, axis=-1)[0])
-            elif model_type == "hybrid_lstm_xgboost":
-                embedding = deployed_model["feature_extractor"].predict(window_input, verbose=0)
-                predicted_class = int(deployed_model["classifier"].predict(embedding)[0])
-            else:
-                raise ValueError(f"model_type không được hỗ trợ: {model_type}")
-
+            # Dispatch model_type dùng CHUNG với `predict_flood_class()` - xem
+            # `predict_class_from_sequence_window()`.
+            predicted_class = predict_class_from_sequence_window(deployed_model, window_input)
             result_rows.append(
-                {
-                    "Ngày": f"{all_dates[end_idx].strftime('%d/%m/%Y')} ({day_labels[offset]})",
-                    "Dự báo Lượng mưa (mm)": round(float(daily_features_df["Lượng_mưa_mm"].iloc[end_idx]), 1),
-                    "Dự đoán Ngập": "An toàn" if predicted_class == 0 else "Nguy cơ ngập",
-                }
+                _build_forecast_row(
+                    DAY_LABELS[offset], all_dates[end_idx], daily_features_df["Lượng_mưa_mm"].iloc[end_idx], predicted_class
+                )
             )
     except Exception as exc:
         print(f"[predict_days_ahead_forecast_sequence] Lỗi khi suy luận bằng model: {exc}")
@@ -1897,48 +2083,88 @@ def predict_days_ahead_forecast_sequence(
     return pd.DataFrame(result_rows, columns=["Ngày", "Dự báo Lượng mưa (mm)", "Dự đoán Ngập"])
 
 
-def load_forecast_4day_cache_from_disk() -> dict | None:
+@st.cache_data(persist="disk", show_spinner="Đang gọi Open-Meteo và suy luận dự báo cho 5 địa phương...")
+def _compute_forecast_4day_result() -> dict:
     """
-    Đọc kết quả dự báo 4 ngày đã lưu ở lần chạy TRƯỚC (từ `FORECAST_4DAY_CACHE_PATH`), nếu có.
+    Tính bảng dự báo 4 ngày cho toàn bộ 5 địa phương giám sát (gọi Open-Meteo + suy luận model).
 
-    Khác với `st.session_state` (chỉ tồn tại trong RAM của 1 phiên trình duyệt, mất khi F5/đóng tab/
-    restart server), cache này ghi ra FILE JSON trên đĩa - nên "sống sót" qua cả việc reload trang hay
-    khởi động lại server Streamlit, giống cơ chế `training_status.json` đã dùng cho tiến trình huấn
-    luyện. Nhờ vậy, người dùng mở lại app không phải chờ gọi lại Open-Meteo + model ngay lập tức nếu
-    dự báo hôm đó đã được tính rồi.
+    Cache bằng `st.cache_data(persist="disk", ...)` - Streamlit TỰ lưu kết quả (kể cả DataFrame và
+    `datetime`) ra đĩa và tự nạp lại ở lần chạy sau (F5, restart server), THAY vì tự viết tay ~40 dòng
+    JSON serialize/deserialize (`to_dict(orient="records")` / `pd.DataFrame(...)` / `isoformat()` /
+    `datetime.fromisoformat()`) như bản trước - vừa ít code hơn, vừa tránh lỗi âm thầm nếu sau này đổi
+    shape của `cached_result` mà quên cập nhật đồng bộ cả 2 hàm đọc/ghi.
+
+    ĐỂ LÀM MỚI: gọi `_compute_forecast_4day_result.clear()` TRƯỚC khi gọi lại hàm này - xem
+    `render_forecast_tab()` (khi bấm nút "🔄 Dự báo lại" hoặc phát hiện cache đã qua ngày mới) và
+    `render_sidebar()` (nút "🔄 Làm mới toàn bộ cache").
+
+    Raise `RuntimeError` với thông điệp rõ ràng nếu chưa có model triển khai hoặc không lấy được dự
+    báo cho địa phương nào - KHÔNG tự bắt lỗi ở đây, để `render_forecast_tab()` tự quyết định hiển thị
+    gì (báo lỗi trắng nếu chưa từng có cache, hay giữ cache cũ + cảnh báo nếu đã có).
     """
-    if not FORECAST_4DAY_CACHE_PATH.exists():
-        return None
     try:
-        payload = json.loads(FORECAST_4DAY_CACHE_PATH.read_text(encoding="utf-8"))
-        return {
-            "combined_df": pd.DataFrame(payload["combined_df_records"]),
-            "failed_locations": payload["failed_locations"],
-            "model_name": payload["model_name"],
-            "f1_macro": payload["f1_macro"],
-            "generated_at": datetime.fromisoformat(payload["generated_at"]),
-        }
+        deployed_model, feature_columns, deployment_config = load_deployed_model_and_features()
     except Exception as exc:
-        print(f"[load_forecast_4day_cache_from_disk] Cache lỗi/hỏng, sẽ tính lại: {exc}")
+        raise RuntimeError(
+            f"Không thể nạp model để dự báo (có thể chưa huấn luyện model nào, hoặc lỗi tạm thời khi "
+            f"đọc artifact): {exc}"
+        ) from exc
+
+    model_type = deployment_config.get("model_type")
+
+    def _forecast_one_location(location_name: str, lat: float, lon: float) -> pd.DataFrame | None:
+        # DISPATCH THEO ĐÚNG model_type: model dạng bảng dùng `predict_4_days_forecast()` (mỗi ngày 1
+        # dòng độc lập), model dạng chuỗi/Hybrid dùng `predict_days_ahead_forecast_sequence()` (cửa sổ
+        # nhiều ngày liên tiếp, xem docstring hàm đó để biết chi tiết cách dựng cửa sổ).
+        if model_type == "sklearn_tabular":
+            return predict_4_days_forecast(lat, lon, deployed_model["model"], deployed_model["scaler"])
+        if model_type in {"keras_sequence", "hybrid_lstm_xgboost"}:
+            return predict_days_ahead_forecast_sequence(lat, lon, deployed_model, feature_columns)
         return None
 
-
-def save_forecast_4day_cache_to_disk(cached_result: dict) -> None:
-    """Ghi kết quả dự báo 4 ngày mới nhất ra file JSON trên đĩa để giữ được qua các lần F5/restart."""
-    try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "combined_df_records": cached_result["combined_df"].to_dict(orient="records"),
-            "failed_locations": cached_result["failed_locations"],
-            "model_name": cached_result["model_name"],
-            "f1_macro": cached_result["f1_macro"],
-            "generated_at": cached_result["generated_at"].isoformat(),
+    # CHẠY SONG SONG 5 địa phương bằng ThreadPoolExecutor - mỗi địa phương tốn tới 2 lệnh gọi mạng
+    # chặn (Open-Meteo Forecast + Marine API), worst case ~10 lượt gọi NỐI TIẾP nếu chạy tuần tự
+    # (có thể lên tới hàng chục giây - hàng phút nếu mạng chậm). Vì phần tốn thời gian là I/O mạng
+    # (không phải tính toán CPU), GIL của Python được nhả ra trong lúc chờ `requests.get()`, nên
+    # ThreadPoolExecutor mang lại lợi ích thật (không bị GIL chặn) - phần suy luận Keras (nếu có)
+    # được bảo vệ riêng bằng `_KERAS_INFERENCE_LOCK` (xem `predict_class_from_sequence_window()`).
+    forecast_by_location: dict[str, pd.DataFrame | None] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(REAL_MONITORED_LOCATIONS)) as executor:
+        future_to_location = {
+            executor.submit(_forecast_one_location, location_name, lat, lon): location_name
+            for location_name, (lat, lon) in REAL_MONITORED_LOCATIONS.items()
         }
-        FORECAST_4DAY_CACHE_PATH.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-    except Exception as exc:
-        print(f"[save_forecast_4day_cache_to_disk] Không ghi được cache: {exc}")
+        for future in concurrent.futures.as_completed(future_to_location):
+            location_name = future_to_location[future]
+            try:
+                forecast_by_location[location_name] = future.result()
+            except Exception as exc:
+                print(f"[_compute_forecast_4day_result] Lỗi dự báo cho '{location_name}': {exc}")
+                forecast_by_location[location_name] = None
+
+    # Ghép kết quả theo ĐÚNG thứ tự REAL_MONITORED_LOCATIONS (không phải thứ tự hoàn thành song song,
+    # vốn không xác định trước) - giữ bảng dự báo hiển thị ổn định, dễ đọc giữa các lần làm mới.
+    forecast_frames = []
+    failed_locations = []
+    for location_name in REAL_MONITORED_LOCATIONS:
+        location_forecast_df = forecast_by_location.get(location_name)
+        if location_forecast_df is None:
+            failed_locations.append(location_name)
+            continue
+        location_forecast_df = location_forecast_df.copy()
+        location_forecast_df.insert(0, "Địa phương", location_name)
+        forecast_frames.append(location_forecast_df)
+
+    if not forecast_frames:
+        raise RuntimeError("Không lấy được dự báo cho bất kỳ địa phương nào lúc này.")
+
+    return {
+        "combined_df": pd.concat(forecast_frames, ignore_index=True),
+        "failed_locations": failed_locations,
+        "model_name": deployment_config.get("model_name"),
+        "f1_macro": deployment_config.get("f1_macro", 0),
+        "generated_at": datetime.now(),
+    }
 
 
 def render_forecast_tab() -> None:
@@ -1966,15 +2192,15 @@ def render_forecast_tab() -> None:
             help="Gọi lại Open-Meteo và suy luận model để lấy dự báo mới nhất.",
         )
 
-    # Lần đầu tab này chạy trong phiên hiện tại (session_state trống) -> thử đọc CACHE TRÊN ĐĨA trước
-    # (kết quả của lần chạy trước, có thể từ phiên trước/trước khi restart server) thay vì gọi API
-    # ngay, để F5/mở lại app không phải chờ lại từ đầu nếu dự báo hôm đó đã có sẵn.
-    if "forecast_4day_result" not in st.session_state:
-        disk_cached_result = load_forecast_4day_cache_from_disk()
-        if disk_cached_result is not None:
-            st.session_state["forecast_4day_result"] = disk_cached_result
+    # `_compute_forecast_4day_result()` cache bằng `st.cache_data(persist="disk")` - lần gọi ĐẦU TIÊN
+    # trong phiên này chỉ tốn kém nếu cache trên đĩa CHƯA có (F5/restart server sẽ đọc lại cache cũ
+    # gần như tức thì, không gọi lại Open-Meteo). Bọc try/except vì hàm raise RuntimeError khi chưa có
+    # model triển khai hoặc gọi API thất bại hoàn toàn.
+    try:
+        cached_result = _compute_forecast_4day_result()
+    except Exception:
+        cached_result = None
 
-    cached_result = st.session_state.get("forecast_4day_result")
     # "Hết hạn" khi cache được tính từ một NGÀY KHÁC (khác ngày dương lịch hiện tại) - tức là cứ qua
     # 00h00 là lần rerun/mở app KẾ TIẾP sẽ tự động phát hiện cache cũ và gọi lại Open-Meteo + model để
     # lấy dự báo mới cho ngày hôm đó, không cần người dùng phải nhớ bấm nút. Lưu ý: Streamlit không có
@@ -1982,78 +2208,31 @@ def render_forecast_tab() -> None:
     # TIÊN sau khi qua ngày mới (đúng bản chất "on-demand" của một app web, không phải cron job thật).
     is_cache_stale = cached_result is None or cached_result["generated_at"].date() < datetime.now().date()
 
-    # CHỈ thực sự gọi Open-Meteo + suy luận model khi: (1) chưa có cache nào dùng được (kể cả từ đĩa),
-    # (2) cache đã qua ngày mới (is_cache_stale), hoặc (3) người dùng chủ động bấm nút "🔄 Dự báo lại".
-    # Nếu không, dùng lại kết quả đã lưu - tránh gọi lại Open-Meteo (5 địa phương x nhiều request) và
-    # suy luận model MỖI KHI Streamlit rerun toàn bộ script, vốn xảy ra liên tục mỗi lần người dùng
-    # tương tác với BẤT KỲ widget nào trong app (kể cả ở tab khác).
+    # CHỈ thực sự gọi lại Open-Meteo + suy luận model khi: (1) chưa có cache nào dùng được (kể cả từ
+    # đĩa), (2) cache đã qua ngày mới (is_cache_stale), hoặc (3) người dùng chủ động bấm "🔄 Dự báo
+    # lại" - gọi `.clear()` để buộc `_compute_forecast_4day_result()` tính lại thay vì trả cache cũ.
+    #
+    # FAIL-SAFE: hễ làm mới thất bại (lỗi đọc artifact/model TẠM THỜI, ví dụ file đang được ghi dở lúc
+    # training worker chạy song song), KHÔNG xóa mất bảng dự báo hợp lệ đang có trong `cached_result`
+    # (biến này giữ nguyên giá trị CŨ vì except bên dưới không gán lại nó) - chỉ `return` báo lỗi trắng
+    # khi thực sự CHƯA TỪNG có cache nào để hiển thị thay thế.
+    refresh_error: str | None = None
     if refresh_clicked or is_cache_stale:
+        _compute_forecast_4day_result.clear()
         try:
-            evaluation_metrics, deployment_config, runtime_info = load_evaluation_artifacts()
+            cached_result = _compute_forecast_4day_result()
         except Exception as exc:
-            st.warning(
-                f"❌ Chưa có model đã triển khai để dự báo: {exc} "
-                "Hãy khởi chạy huấn luyện ở Tab '⚙️ Tiền xử lý & Huấn luyện' trước."
-            )
+            refresh_error = str(exc)
+
+    if refresh_error is not None:
+        if cached_result is None:
+            st.error(f"❌ {refresh_error} Hãy khởi chạy huấn luyện ở Tab '⚙️ Tiền xử lý & Huấn luyện' trước.")
             return
+        st.warning(
+            f"⚠️ Không làm mới được dự báo mới ({refresh_error}) - đang hiển thị kết quả gần nhất "
+            f"còn lưu (xem thời điểm cập nhật bên dưới)."
+        )
 
-        model_type = deployment_config.get("model_type")
-
-        try:
-            deployed_model = load_deployment_model(deployment_config, runtime_info["latest_dir"])
-        except Exception as exc:
-            st.error(f"❌ Không thể nạp model để dự báo: {exc}")
-            return
-
-        # `deployment_config.json` lưu key "feature_cols" (xem `save_deployment_config()` trong
-        # `analyze_and_train.py`) - dùng đúng danh sách/thứ tự cột này thay vì hằng số cố định, để tự
-        # thích ứng nếu sau này bộ đặc trưng của model thay đổi.
-        feature_columns = deployment_config.get("feature_cols") or FEATURE_COLS_FOR_INFERENCE
-
-        forecast_frames = []
-        failed_locations = []
-        with st.spinner("Đang gọi Open-Meteo và suy luận dự báo cho 5 địa phương..."):
-            for location_name, (lat, lon) in REAL_MONITORED_LOCATIONS.items():
-                # DISPATCH THEO ĐÚNG model_type - đây là điểm khác biệt so với bản trước (chỉ hỗ trợ
-                # sklearn_tabular): model dạng bảng dùng `predict_4_days_forecast()` (mỗi ngày 1 dòng độc
-                # lập), model dạng chuỗi/Hybrid dùng `predict_days_ahead_forecast_sequence()` (cửa sổ
-                # nhiều ngày liên tiếp, xem docstring hàm đó để biết chi tiết cách dựng cửa sổ).
-                if model_type == "sklearn_tabular":
-                    location_forecast_df = predict_4_days_forecast(
-                        lat, lon, deployed_model["model"], deployed_model["scaler"]
-                    )
-                elif model_type in {"keras_sequence", "hybrid_lstm_xgboost"}:
-                    location_forecast_df = predict_days_ahead_forecast_sequence(
-                        lat, lon, deployed_model, feature_columns
-                    )
-                else:
-                    location_forecast_df = None
-
-                if location_forecast_df is None:
-                    failed_locations.append(location_name)
-                    continue
-                location_forecast_df = location_forecast_df.copy()
-                location_forecast_df.insert(0, "Địa phương", location_name)
-                forecast_frames.append(location_forecast_df)
-
-        if not forecast_frames:
-            st.error("Không lấy được dự báo cho bất kỳ địa phương nào lúc này. Vui lòng thử lại sau.")
-            return
-
-        # Lưu kết quả + thời điểm tính vào CẢ session_state (dùng ngay cho các lần rerun trong phiên
-        # này) LẪN file cache trên đĩa (dùng lại được ở phiên sau/sau khi restart server) - không gọi
-        # lại API/model cho tới khi qua ngày mới hoặc người dùng bấm "🔄 Dự báo lại" lần nữa.
-        cached_result = {
-            "combined_df": pd.concat(forecast_frames, ignore_index=True),
-            "failed_locations": failed_locations,
-            "model_name": deployment_config.get("model_name"),
-            "f1_macro": deployment_config.get("f1_macro", 0),
-            "generated_at": datetime.now(),
-        }
-        st.session_state["forecast_4day_result"] = cached_result
-        save_forecast_4day_cache_to_disk(cached_result)
-
-    cached_result = st.session_state["forecast_4day_result"]
     combined_forecast_df = cached_result["combined_df"]
 
     with header_left:
@@ -2108,9 +2287,10 @@ def build_smart_routing_map(
     routing_map = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles="OpenStreetMap")
 
     # ---- (1) Giám sát: vẽ 5 địa phương thực tế, màu marker theo đúng 'Nguy cơ' dự báo của AI ----
+    # FAIL-SAFE: thiếu dòng dữ liệu cũng KHÔNG mặc định "An toàn" (xem docstring get_latest_flood_predictions).
     for location_name, coordinates in REAL_MONITORED_LOCATIONS.items():
         risk_rows = df_predictions.loc[df_predictions["Địa phương"] == location_name, "Nguy cơ"]
-        risk_status = risk_rows.iloc[0] if not risk_rows.empty else "An toàn"
+        risk_status = risk_rows.iloc[0] if not risk_rows.empty else "Không xác định"
 
         if risk_status == "Ngập":
             folium.Marker(
@@ -2118,11 +2298,19 @@ def build_smart_routing_map(
                 tooltip=f"🔴 {location_name}: Nguy cơ NGẬP (dự báo AI)",
                 icon=folium.Icon(color="red", icon="exclamation-triangle", prefix="fa"),
             ).add_to(routing_map)
-        else:
+        elif risk_status == "An toàn":
             folium.Marker(
                 location=coordinates,
                 tooltip=f"🟢 {location_name}: An toàn",
                 icon=folium.Icon(color="green", icon="check", prefix="fa"),
+            ).add_to(routing_map)
+        else:
+            # Model/dữ liệu lỗi cho địa phương này - hiển thị RÕ là chưa xác định được, không lẫn
+            # với 2 trạng thái đã được model xác nhận ở trên, để người vận hành biết cần kiểm tra tay.
+            folium.Marker(
+                location=coordinates,
+                tooltip=f"⚪ {location_name}: KHÔNG XÁC ĐỊNH được (lỗi model/dữ liệu - cần kiểm tra thủ công)",
+                icon=folium.Icon(color="gray", icon="question", prefix="fa"),
             ).add_to(routing_map)
 
     # ---- Vẽ vùng ngập THỰC TẾ (đã được suy ra từ df_predictions, không còn là dummy cố định) ----
@@ -2194,14 +2382,27 @@ def render_smart_routing_tab() -> None:
     # thay đổi, phục vụ auto-trigger ở BƯỚC 4).
     real_flooded_polygons: list[list[tuple[float, float]]] = []
     flooded_location_names: list[str] = []
+    unknown_location_names: list[str] = []
     for location_name, coordinates in REAL_MONITORED_LOCATIONS.items():
         risk_rows = df_predictions.loc[df_predictions["Địa phương"] == location_name, "Nguy cơ"]
-        if not risk_rows.empty and risk_rows.iloc[0] == "Ngập":
+        risk_status = risk_rows.iloc[0] if not risk_rows.empty else "Không xác định"
+        if risk_status == "Ngập":
             real_flooded_polygons.append(build_flood_zone_polygon(coordinates))
             flooded_location_names.append(location_name)
+        elif risk_status == "Không xác định":
+            unknown_location_names.append(location_name)
 
     st.markdown("##### 📡 Trạng thái giám sát 5 địa phương (từ dự báo AI mới nhất)")
     st.dataframe(df_predictions, use_container_width=True, hide_index=True)
+    if unknown_location_names:
+        # FAIL-SAFE: cảnh báo RÕ RÀNG thay vì để những địa phương này âm thầm biến thành "An toàn"
+        # (xem docstring get_latest_flood_predictions) - routing engine cũng KHÔNG tự né được các khu
+        # vực này vì không có đủ dữ liệu để dựng vùng ngập, nên cần con người kiểm tra thủ công.
+        st.warning(
+            f"⚪ Không xác định được nguy cơ ngập cho: {', '.join(unknown_location_names)} "
+            "(model/dữ liệu lỗi - xem log server). Các địa phương này KHÔNG được tự động né khi định "
+            "tuyến - vui lòng kiểm tra thủ công trước khi di chuyển qua khu vực này."
+        )
 
     # ==============================================================================================
     # BƯỚC 3: CHỌN ĐIỂM ĐI/ĐẾN BẰNG CÁCH CLICK LÊN BẢN ĐỒ (thay vì chỉ chọn trong 5 điểm cố định).
@@ -2263,7 +2464,14 @@ def render_smart_routing_tab() -> None:
     # BƯỚC 4: XỬ LÝ CLICK MỚI - so sánh với click đã xử lý gần nhất (lưu trong session_state) để chỉ
     # cập nhật điểm đi/đến ĐÚNG 1 LẦN cho mỗi lượt click thật, tránh việc `st_folium` trả lại cùng 1
     # tọa độ ở các lần rerun tiếp theo (do tương tác widget khác) làm điểm bị "đặt lại" ngoài ý muốn.
+    #
+    # SỬA HIỆU NĂNG: bản trước gọi `st.rerun()` NGAY tại đây, rồi BƯỚC 5 (ở lượt render KẾ TIẾP) mới
+    # tính tuyến và `st.rerun()` LẦN NỮA - 1 lượt click tốn tới 2 lần rerun toàn bộ script liên tiếp
+    # (tăng gấp đôi độ trễ cảm nhận được). Nay CHỈ cập nhật session_state + biến local ở đây (không
+    # rerun ngay), để BƯỚC 5 tính tuyến (nếu cần) trong CÙNG 1 lượt chạy này - `st.rerun()` của
+    # BƯỚC 5 (nếu có chạy) sẽ vẽ lại bản đồ với CẢ marker mới LẪN tuyến mới trong đúng 1 lần rerun.
     # ==============================================================================================
+    click_processed_this_run = False
     last_clicked = (map_state or {}).get("last_clicked")
     if last_clicked:
         clicked_point = (round(last_clicked["lat"], 6), round(last_clicked["lng"], 6))
@@ -2273,38 +2481,59 @@ def render_smart_routing_tab() -> None:
                 st.session_state["routing_start_point"] = clicked_point
             else:
                 st.session_state["routing_end_point"] = clicked_point
-            st.rerun()  # Vẽ lại ngay marker mới + kích hoạt auto-trigger ở BƯỚC 5 với điểm vừa chọn.
+            click_processed_this_run = True
 
     start_point = st.session_state["routing_start_point"]
     end_point = st.session_state["routing_end_point"]
 
     # ==============================================================================================
-    # BƯỚC 5: TỰ ĐỘNG GỌI TOMTOM KHI CÓ ĐỊA PHƯƠNG ĐANG NGẬP - không cần người dùng bấm nút. Dùng
-    # "chữ ký" (điểm đi, điểm đến, danh sách địa phương đang ngập) để CHỈ tính lại khi có gì đó THẬT
-    # SỰ thay đổi (điểm mới, hoặc tình trạng ngập vừa cập nhật) - tránh gọi lại TomTom vô ích ở những
-    # lần rerun không liên quan (đổi radio, mở tab khác...), vẫn giữ đúng tinh thần tiết kiệm API.
+    # BƯỚC 5: TỰ ĐỘNG GỌI TOMTOM KHI CÓ GÌ ĐÓ THẬT SỰ THAY ĐỔI - không cần người dùng bấm nút. Dùng
+    # "chữ ký" (điểm đi, điểm đến, danh sách địa phương đang ngập) để CHỈ tính lại khi có thay đổi
+    # thật, tránh gọi lại TomTom vô ích ở những lần rerun không liên quan (đổi radio, mở tab khác...).
+    #
+    # SỬA LỖI: bản trước chỉ auto-fetch khi `bool(flooded_location_names)` = True, gây 2 hệ quả sai:
+    #   (1) Vừa hết ngập (flooded_location_names rỗng trở lại) -> route/thông báo "đã né vùng ngập"
+    #       CŨ vẫn hiển thị y nguyên, mâu thuẫn với "Vùng ngập đã né: 0" đang hiện ngay bên cạnh.
+    #   (2) Click đổi điểm đi/đến trong lúc KHÔNG có ngập -> marker di chuyển nhưng đường kẻ xanh +
+    #       số liệu quãng đường/thời gian vẫn của CẶP ĐIỂM CŨ, sai hoàn toàn so với điểm đang chọn.
+    # Nay auto-fetch theo đúng "chữ ký đã đổi", KHÔNG còn phụ thuộc có ngập hay không - miễn là đã có
+    # 1 tuyến đường được tính trước đó (`has_existing_route`) hoặc đang có ngập, để vẫn giữ tinh thần
+    # tiết kiệm API cho đúng 1 trường hợp hợp lệ: phiên mới mở, chưa từng tính tuyến, chưa có ngập,
+    # chưa ai bấm nút -> không tự ý gọi TomTom.
     # ==============================================================================================
     same_point_error = start_point == end_point
     current_signature = (start_point, end_point, tuple(sorted(flooded_location_names)))
+    has_existing_route = "smart_route_signature" in st.session_state
     should_auto_fetch = (
-        bool(flooded_location_names)
-        and not same_point_error
+        not same_point_error
         and st.session_state.get("smart_route_signature") != current_signature
+        and (bool(flooded_location_names) or has_existing_route)
     )
 
     if (find_route_clicked or should_auto_fetch) and not same_point_error:
         spinner_text = (
-            "🌊 Phát hiện ngập - đang tự động tính tuyến né vùng ngập..."
+            "🌊 Phát hiện thay đổi - đang tự động tính lại tuyến đường..."
             if should_auto_fetch and not find_route_clicked
             else "Đang tính toán tuyến đường..."
         )
         with st.spinner(spinner_text):
+            # Dịch điểm đi/đến ra khỏi vùng ngập (nếu vô tình trùng tâm) TRƯỚC khi gọi TomTom - xem
+            # docstring `nudge_point_outside_flood_zones()`. Chỉ ảnh hưởng lời gọi API, không đổi
+            # marker hiển thị trên bản đồ.
+            safe_start_point = nudge_point_outside_flood_zones(start_point, real_flooded_polygons)
+            safe_end_point = nudge_point_outside_flood_zones(end_point, real_flooded_polygons)
             st.session_state["smart_route_result"] = fetch_tomtom_route(
-                start_point, end_point, flooded_polygons=real_flooded_polygons
+                safe_start_point, safe_end_point, flooded_polygons=real_flooded_polygons
             )
         st.session_state["smart_route_signature"] = current_signature
         st.session_state["smart_route_auto_triggered"] = should_auto_fetch and not find_route_clicked
-        st.rerun()  # Vẽ lại bản đồ với tuyến đường vừa tính (tuyến hiển thị ở BƯỚC 3 lấy từ session_state).
+        st.rerun()  # Vẽ lại bản đồ với CẢ marker mới (nếu vừa click) LẪN tuyến vừa tính, trong 1 lần.
+
+    # Rerun DỰ PHÒNG: chỉ chạy tới đây nếu BƯỚC 5 KHÔNG tự rerun ở trên (ví dụ: vừa click đổi điểm
+    # nhưng chưa đủ điều kiện auto-fetch - không có ngập, chưa từng tính tuyến; hoặc điểm mới trùng
+    # nhau nên bị `same_point_error` chặn) - vẫn cần đúng 1 lần rerun để bản đồ hiển thị marker mới.
+    if click_processed_this_run:
+        st.rerun()
 
     route_result = st.session_state.get("smart_route_result")
 
@@ -2322,7 +2551,7 @@ def render_smart_routing_tab() -> None:
             metric_col_3.metric("Vùng ngập đã né", f"{len(real_flooded_polygons)}")
             if route_result["used_avoid_areas"]:
                 auto_note = (
-                    " (tự động - phát hiện ngập)" if st.session_state.get("smart_route_auto_triggered") else ""
+                    " (tự động cập nhật)" if st.session_state.get("smart_route_auto_triggered") else ""
                 )
                 st.success(f"✅ Đã tính tuyến đường né vùng ngập thành công bằng TomTom Routing API{auto_note}.")
             else:
@@ -2347,6 +2576,10 @@ def render_sidebar() -> None:
     )
     st.sidebar.markdown("---")
     if st.sidebar.button("🔄 Làm mới toàn bộ cache", key="clear_all_cache_button", use_container_width=True):
+        # `st.cache_data.clear()` xóa TẤT CẢ hàm decorate bằng `@st.cache_data` trong app, bao gồm cả
+        # `_compute_forecast_4day_result()` (cache dự báo 4 ngày, persist="disk") - vì cache đó nay
+        # dùng chung cơ chế built-in của Streamlit thay vì tự quản lý file JIT riêng như bản trước, nút
+        # này không cần biết/xóa thủ công từng cache con nữa.
         st.cache_data.clear()
         st.cache_resource.clear()
         st.sidebar.success("Đã xóa cache - dữ liệu sẽ được nạp lại ở lần chạy tiếp theo.")
