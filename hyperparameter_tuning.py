@@ -36,23 +36,19 @@ from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
+from shared_constants import FEATURE_COLS
+
 warnings.filterwarnings("ignore")
 # Optuna mặc định in log rất chi tiết cho từng trial (INFO level), gây rối màn hình console
 # khi chạy hàng chục/hàng trăm trial liên tiếp -> hạ xuống WARNING để chỉ hiện log quan trọng.
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # ---------------------------------------------------------------------------------------------
-# Schema dữ liệu dùng CHUNG với toàn bộ pipeline của đề tài (giống FEATURE_COLS/TARGET_COL trong
-# train_model.py, analyze_and_train.py, eda_analysis.py) để code trong file này có thể "cắm thẳng"
-# vào dữ liệu thật của đề tài mà không cần đổi tên cột.
+# Schema dữ liệu dùng CHUNG với toàn bộ pipeline của đề tài (FEATURE_COLS import từ
+# shared_constants.py, giống TARGET_COL/TIME_COL trong train_model.py, analyze_and_train.py,
+# eda_analysis.py) để code trong file này có thể "cắm thẳng" vào dữ liệu thật của đề tài mà không
+# cần đổi tên cột.
 # ---------------------------------------------------------------------------------------------
-FEATURE_COLS = [
-    "Nhiệt_độ_C",
-    "Độ_ẩm_%",
-    "Lượng_mưa_mm",
-    "Độ_ẩm_đất",
-    "Chiều_cao_triều_m",
-]
 TARGET_COL = "Nguy_cơ_ngập"
 TIME_COL = "Thời_gian"
 NUM_CLASSES = 3  # 0: An toàn, 1: Ngập nhẹ, 2: Ngập nặng
