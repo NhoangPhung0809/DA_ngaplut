@@ -667,6 +667,60 @@ def load_eda_sample_dataframe() -> pd.DataFrame:
     return combined_df
 
 
+def compute_outlier_summary_by_class(
+    df: pd.DataFrame, group_col: str, numeric_columns: list[str]
+) -> pd.DataFrame:
+    """
+    Phát hiện ngoại lai (outlier) bằng CẢ 2 phương pháp IQR và Z-score, tính RIÊNG cho từng lớp
+    `group_col` (Nguy_cơ_ngập: 0/1/2) trên từng cột số - đúng như khuyến nghị đã ghi ở phần nhận xét
+    bên dưới bảng giá trị thiếu: không gộp chung tất cả các lớp lại rồi tính 1 ngưỡng duy nhất, vì
+    ngưỡng "bất thường" của lượng mưa/triều cường ở lớp `Ngập nặng` vốn dĩ CAO HƠN nhiều so với lớp
+    `Không ngập` một cách tự nhiên - nếu tính chung, phần lớn các dòng dữ liệu THẬT của lớp `Ngập nặng`
+    sẽ bị nhầm là ngoại lai.
+
+    - IQR: ngoại lai là giá trị nằm ngoài [Q1 - 1.5*IQR, Q3 + 1.5*IQR].
+    - Z-score: ngoại lai là giá trị có |z| > 3 (lệch hơn 3 độ lệch chuẩn so với trung bình của lớp đó).
+
+    Hàm này CHỈ THỐNG KÊ để hiển thị, KHÔNG tự động loại bỏ dòng nào khỏi dữ liệu.
+    """
+    class_name_map = {0: "Không ngập", 1: "Ngập nhẹ", 2: "Ngập nặng"}
+    result_rows = []
+
+    for class_value, class_df in df.groupby(group_col):
+        class_label = class_name_map.get(int(class_value), f"Lớp {class_value}")
+        for column in numeric_columns:
+            values = class_df[column].dropna()
+            if len(values) < 2:
+                continue
+
+            # ---- IQR ----
+            q1, q3 = values.quantile(0.25), values.quantile(0.75)
+            iqr = q3 - q1
+            lower_bound, upper_bound = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+            iqr_outlier_count = int(((values < lower_bound) | (values > upper_bound)).sum())
+
+            # ---- Z-score ---- (std=0 nghĩa là mọi giá trị trong lớp giống hệt nhau -> không có outlier)
+            std = values.std()
+            if std and std > 0:
+                z_scores = (values - values.mean()) / std
+                zscore_outlier_count = int((z_scores.abs() > 3).sum())
+            else:
+                zscore_outlier_count = 0
+
+            result_rows.append(
+                {
+                    "Lớp nguy cơ": class_label,
+                    "Cột": column,
+                    "Số ngoại lệ (IQR)": iqr_outlier_count,
+                    "Tỷ lệ (%) (IQR)": round(iqr_outlier_count / len(values) * 100, 2),
+                    "Số ngoại lệ (Z-score)": zscore_outlier_count,
+                    "Tỷ lệ (%) (Z-score)": round(zscore_outlier_count / len(values) * 100, 2),
+                }
+            )
+
+    return pd.DataFrame(result_rows)
+
+
 def render_eda_tab() -> None:
     """
     Nội dung Tab 1 - Khám phá Dữ liệu (EDA), bước ĐẦU TIÊN của vòng đời Data Science.
@@ -745,7 +799,6 @@ def render_eda_tab() -> None:
 
     # ---- Hàng 3: xử lý giá trị thiếu / ngoại lai ----
     with st.expander("🧹 Xử lý giá trị thiếu & ngoại lai (Missing Value / Outlier)", expanded=False):
-        # TODO: dán logic phát hiện/xử lý outlier thật của bạn (IQR, Z-score theo từng lớp...) vào đây.
         if eda_df.empty:
             st.info("Chưa có dữ liệu để kiểm tra.")
         else:
@@ -754,11 +807,28 @@ def render_eda_tab() -> None:
             st.dataframe(missing_summary, use_container_width=True)
             render_chart_discussion(
                 "Bảng trên thống kê số lượng và tỷ lệ giá trị thiếu theo từng cột - căn cứ để quyết định "
-                "chiến lược xử lý (loại bỏ, nội suy, hay điền giá trị trung vị) ở Tab 2. Với biến ngoại lai "
-                "(outlier), khuyến nghị dùng phương pháp IQR hoặc Z-score TÍNH RIÊNG cho từng lớp nguy cơ ngập, "
-                "vì giá trị mưa/triều cực đoan trong lớp `Ngập nặng` là TÍN HIỆU THẬT có giá trị dự báo, "
-                "không nên loại bỏ nhầm như outlier thông thường."
+                "chiến lược xử lý (loại bỏ, nội suy, hay điền giá trị trung vị) ở Tab 2."
             )
+
+            st.markdown("---")
+            st.markdown("**Phát hiện ngoại lai (Outlier) bằng IQR & Z-score - tính riêng cho từng lớp**")
+            if "Nguy_cơ_ngập" not in eda_df.columns:
+                st.info("Thiếu cột `Nguy_cơ_ngập` nên không thể tính ngoại lai theo từng lớp.")
+            else:
+                outlier_feature_columns = [
+                    column
+                    for column in eda_df.select_dtypes(include="number").columns
+                    if column != "Nguy_cơ_ngập"
+                ]
+                outlier_summary = compute_outlier_summary_by_class(eda_df, "Nguy_cơ_ngập", outlier_feature_columns)
+                st.dataframe(outlier_summary, use_container_width=True, hide_index=True)
+                render_chart_discussion(
+                    "Bảng trên áp dụng CẢ 2 phương pháp - IQR (ngoài [Q1-1.5·IQR, Q3+1.5·IQR]) và Z-score "
+                    "(|z| > 3) - tính RIÊNG cho từng lớp `Nguy_cơ_ngập` (0/1/2), theo đúng khuyến nghị: gộp "
+                    "chung các lớp sẽ khiến phần lớn dòng dữ liệu THẬT của lớp `Ngập nặng` (mưa/triều cực đoan) "
+                    "bị nhầm là ngoại lai, vì đó chính là TÍN HIỆU THẬT có giá trị dự báo, không nên loại bỏ. "
+                    "Bảng này chỉ THỐNG KÊ để tham khảo, chưa tự động loại bỏ dòng nào khỏi dữ liệu."
+                )
 
 
 # ==================================================================================================
