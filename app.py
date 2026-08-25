@@ -1015,6 +1015,23 @@ def render_training_controls_panel() -> None:
         st.caption("Chưa có log huấn luyện nào - log sẽ xuất hiện tại đây sau khi bấm 'Bắt đầu Huấn luyện Nền'.")
 
 
+@st.cache_data(show_spinner="Đang gộp và làm sạch dữ liệu lịch sử...")
+def load_cleaned_training_dataframe() -> pd.DataFrame:
+    """
+    Nạp dữ liệu THẬT qua ĐÚNG pipeline tiền xử lý dùng lúc huấn luyện: `load_and_concatenate_csvs()`
+    (gộp toàn bộ `data/historical/*.csv`) rồi `preprocess_features()` (ép kiểu số, điền giá trị thiếu
+    bằng TRUNG VỊ từng cột, giữ đúng các cột cần cho model) trong `analyze_and_train.py` - gọi lại
+    ĐÚNG 2 hàm đó thay vì viết lại logic làm sạch riêng ở `app.py`, để tránh tình trạng 2 nơi xử lý
+    lệch nhau (app hiển thị 1 kiểu, lúc train thật lại ra kết quả khác).
+
+    Cache bằng `st.cache_data` vì gộp + làm sạch ~440 nghìn dòng khá tốn, không cần chạy lại mỗi khi
+    Streamlit rerun (ví dụ khi người dùng tương tác widget ở tab khác).
+    """
+    train_module = get_train_module()
+    raw_df = train_module.load_and_concatenate_csvs()
+    return train_module.preprocess_features(raw_df)
+
+
 def render_preprocessing_training_tab() -> None:
     """
     Nội dung Tab 2 - Tiền xử lý & Huấn luyện, bước THỨ HAI của vòng đời Data Science.
@@ -1031,20 +1048,20 @@ def render_preprocessing_training_tab() -> None:
 
     with col_clean:
         with st.expander("🧼 Dữ liệu đã làm sạch (Cleaned Data)", expanded=True):
-            # TODO: dán code hiển thị dữ liệu SAU khi qua preprocess_data()/preprocess_features()
-            # (xem `analyze_and_train.py`) vào đây, ví dụ: st.dataframe(cleaned_df.head(20)).
-            st.info(
-                "Placeholder: hiển thị `df.head()` của dữ liệu SAU khi xử lý missing values, ép kiểu dữ liệu, "
-                "và tạo lại nhãn 3 lớp theo rule-based (xem hàm `preprocess_data()` trong `analyze_and_train.py`)."
-            )
-            st.code(
-                "# Ví dụ dán code thật của bạn vào đây:\n"
-                "# from analyze_and_train import load_and_concatenate_csvs, preprocess_features\n"
-                "# raw_df = load_and_concatenate_csvs()\n"
-                "# cleaned_df = preprocess_features(raw_df)\n"
-                "# st.dataframe(cleaned_df.head(20))",
-                language="python",
-            )
+            try:
+                cleaned_df = load_cleaned_training_dataframe()
+            except Exception as exc:
+                st.error(f"Không nạp/làm sạch được dữ liệu: {exc}")
+            else:
+                st.dataframe(cleaned_df.head(20), use_container_width=True, hide_index=True)
+                render_chart_discussion(
+                    f"Bảng trên là {len(cleaned_df):,} dòng SAU khi qua `preprocess_features()` trong "
+                    "`analyze_and_train.py`: ép kiểu số, điền giá trị thiếu bằng TRUNG VỊ của từng cột "
+                    "(median - ít bị lệch bởi outlier hơn trung bình), và chỉ giữ lại các cột thật sự "
+                    "cần cho huấn luyện. LƯU Ý: nhãn `Nguy_cơ_ngập` ở bước này LẤY THẲNG từ dữ liệu gốc "
+                    "(không tạo lại theo rule-based) - việc gán nhãn rule-based chỉ áp dụng cho dữ liệu "
+                    "tổng hợp CTGAN ở khối 'Cân bằng dữ liệu' bên dưới, không áp dụng ở bước làm sạch này."
+                )
 
     with col_split:
         with st.expander("✂️ Chia tập Train / Test (Data Splitting)", expanded=True):
