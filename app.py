@@ -1,9 +1,18 @@
+import os
+
+# PHẢI set TRƯỚC bất kỳ import nào có thể kéo theo `protobuf` (kể cả `streamlit` chính nó) - server
+# đang cài tensorflow==2.10.1 (cần protobuf<3.20) CÙNG LÚC với streamlit bản mới (cần protobuf>=3.20),
+# 2 yêu cầu xung đột trực tiếp nên không thể hạ/nâng version `protobuf` cho vừa cả 2. Nếu thiếu dòng
+# này, lúc `load_deployed_model_and_features()` gọi `from tensorflow.keras.models import load_model`
+# (model dạng chuỗi/Hybrid) sẽ crash với lỗi "Descriptors cannot not be created directly" ngay trên
+# server - xem thêm giải thích chi tiết ở đầu `analyze_and_train.py` (cùng nguyên nhân, cùng cách sửa).
+os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+
 import concurrent.futures
 import io
 import json
 import importlib.util
 import math
-import os
 import subprocess
 import sys
 import threading
@@ -1288,10 +1297,19 @@ def render_ctgan_section() -> None:
     summary = artifacts["summary"]
     method_used = summary.get("method_used", "Unknown")
     status = summary.get("status", "unknown")
+    error_detail = summary.get("error_detail")
     if method_used != "CTGAN":
         st.warning(
             f"Kết quả export gần nhất không hoàn tất bằng CTGAN thuần. Method dùng thực tế: `{method_used}` | trạng thái: `{status}`."
         )
+        if error_detail:
+            st.error(f"Lý do fallback (lỗi thực tế từ lần chạy CTGAN gần nhất): {error_detail}")
+        else:
+            st.caption(
+                "Chưa có chi tiết lỗi cho lần fallback này (bản export cũ, trước khi tính năng ghi lại "
+                "lý do lỗi được thêm vào) - hãy chạy lại huấn luyện để lần fallback tiếp theo (nếu có) "
+                "ghi kèm lý do cụ thể."
+            )
     else:
         st.success(f"Export CTGAN sẵn sàng. Trạng thái gần nhất: `{status}`.")
 

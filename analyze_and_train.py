@@ -1,7 +1,18 @@
+import os
+
+# PHẢI set TRƯỚC bất kỳ import nào có thể kéo theo `protobuf` (vd tensorflow) - server đang cài
+# tensorflow==2.10.1 (cần protobuf<3.20) CÙNG LÚC với streamlit bản mới (cần protobuf>=3.20), 2 yêu
+# cầu xung đột trực tiếp nên không thể hạ/nâng version `protobuf` cho vừa cả 2. Ép dùng cài đặt Python
+# thuần (thay vì C++ backend mặc định) là cách chính thức Google khuyến nghị cho đúng tình huống này -
+# tránh lỗi "Descriptors cannot not be created directly" khi import `tensorflow.keras`. Chậm hơn 1 chút
+# nhưng không cần đổi version package nào, không phá streamlit.
+os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+
 import glob
 import gc
 import json
 import shutil
+import traceback
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -558,8 +569,16 @@ def export_ctgan_comparison_artifacts(
     y_after: pd.Series | None = None,
     method_used: str = "CTGAN",
     status: str = "completed",
+    error_detail: str | None = None,
 ) -> None:
-    """Export dữ liệu và phân phối lớp trước/sau augmentation cho UI Streamlit."""
+    """
+    Export dữ liệu và phân phối lớp trước/sau augmentation cho UI Streamlit.
+
+    `error_detail` (nếu có) là thông điệp lỗi THẬT (kiểu lỗi + message) khiến CTGAN fallback sang
+    SMOTE/RandomOverSampler - trước đây lỗi này chỉ in ra console/log server nên người dùng đọc UI
+    không biết vì sao luôn fallback; nay lưu kèm vào `ctgan_class_distribution.json` để hiển thị
+    thẳng trên Streamlit, không cần SSH vào server đọc log mỗi lần muốn biết nguyên nhân.
+    """
     before_df = build_training_snapshot_dataframe(X_before, y_before)
     before_sample_rows = export_ctgan_snapshot_csv(before_df, CTGAN_BEFORE_PATH)
 
@@ -573,6 +592,7 @@ def export_ctgan_comparison_artifacts(
     summary_payload = {
         "method_used": method_used,
         "status": status,
+        "error_detail": error_detail,
         "target_column": TARGET_COL,
         "feature_columns": FEATURE_COLS,
         "before": {
@@ -656,6 +676,10 @@ def apply_gan_data_augmentation(
                 y_after=y_fallback,
                 method_used="SMOTE_FALLBACK",
                 status="fallback_from_small_class",
+                error_detail=(
+                    f"Lớp {class_label} chỉ có {len(class_features)} mẫu trong tập train (< 10) - "
+                    "quá ít để CTGAN học phân phối ổn định."
+                ),
             )
             return X_fallback, y_fallback
 
@@ -689,6 +713,7 @@ def apply_gan_data_augmentation(
                 f"CTGAN generated {len(synthetic_features)} synthetic samples for class {class_label}."
             )
         except MemoryError as exc:
+            error_detail = f"MemoryError: {exc}"
             print(
                 f"Friendly warning: CTGAN hit MemoryError for class {class_label} ({exc}). "
                 "Fallback về RandomOverSampler."
@@ -702,13 +727,13 @@ def apply_gan_data_augmentation(
                 y_after=y_fallback,
                 method_used="RandomOverSampler_FALLBACK",
                 status="fallback_from_memory_error",
+                error_detail=error_detail,
             )
             return X_fallback, y_fallback
         except Exception as exc:
-            print(
-                f"Friendly warning: CTGAN failed for class {class_label} ({exc}). "
-                "Fallback về SMOTE."
-            )
+            error_detail = f"{type(exc).__name__}: {exc}"
+            print(f"Friendly warning: CTGAN failed for class {class_label} ({error_detail}). Fallback về SMOTE.")
+            print(traceback.format_exc())  # full stack trace ra console/log server để debug sâu hơn nếu cần
             gc.collect()
             X_fallback, y_fallback = apply_smote_to_training_data(X_train, y_train)
             export_ctgan_comparison_artifacts(
@@ -718,6 +743,7 @@ def apply_gan_data_augmentation(
                 y_after=y_fallback,
                 method_used="SMOTE_FALLBACK",
                 status="fallback_from_exception",
+                error_detail=error_detail,
             )
             return X_fallback, y_fallback
         finally:
