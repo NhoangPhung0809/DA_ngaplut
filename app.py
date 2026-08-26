@@ -16,6 +16,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 import toml
@@ -986,6 +987,101 @@ def compute_outlier_summary_by_class(
     return pd.DataFrame(result_rows)
 
 
+def compute_monthly_trend_stats(df: pd.DataFrame) -> pd.DataFrame:
+    """Gộp theo tháng (1-12): lượng mưa trung bình + tỷ lệ ngập (%) - dùng chung logic với
+    `eda_analysis.py::save_monthly_trend_plot()` để 2 nơi luôn cho cùng 1 con số."""
+    monthly_df = df.copy()
+    monthly_df["Tháng"] = monthly_df["Thời_gian"].dt.month
+    return (
+        monthly_df.groupby("Tháng")
+        .agg(
+            Lượng_mưa_TB=("Lượng_mưa_mm", "mean"),
+            Tỷ_lệ_ngập=("Nguy_cơ_ngập", lambda values: (values > 0).mean() * 100),
+        )
+        .reindex(range(1, 13))
+    )
+
+
+def render_interactive_monthly_trend_chart(eda_df: pd.DataFrame) -> None:
+    """
+    Biểu đồ TƯƠNG TÁC (Plotly, thay cho ảnh PNG tĩnh `monthly_trend.png` do `eda_analysis.py` sinh
+    sẵn) - cho phép ZOOM/PAN/HOVER xem số liệu chính xác từng điểm, và chọn XEM THEO TỪNG NĂM riêng lẻ
+    (thay vì chỉ gộp cả 10 năm như bản ảnh tĩnh cũ) qua ô chọn năm bên dưới.
+    """
+    if eda_df.empty or "Thời_gian" not in eda_df.columns or "Lượng_mưa_mm" not in eda_df.columns:
+        st.info("Chưa có dữ liệu lịch sử trong `data/historical/` để vẽ biểu đồ xu hướng theo tháng.")
+        return
+
+    available_years = sorted(eda_df["Thời_gian"].dt.year.dropna().astype(int).unique().tolist())
+    year_options = ["Gộp tất cả các năm"] + [str(year) for year in available_years]
+    selected_year_label = st.selectbox("Chọn năm để xem", year_options, key="monthly_trend_year_select")
+
+    filtered_df = (
+        eda_df
+        if selected_year_label == "Gộp tất cả các năm"
+        else eda_df[eda_df["Thời_gian"].dt.year == int(selected_year_label)]
+    )
+    if filtered_df.empty:
+        st.info(f"Không có dữ liệu cho năm {selected_year_label}.")
+        return
+
+    monthly_stats = compute_monthly_trend_stats(filtered_df).reset_index()
+    month_labels = [f"Th{month}" for month in monthly_stats["Tháng"]]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=month_labels,
+            y=monthly_stats["Lượng_mưa_TB"],
+            name="Lượng mưa TB (mm)",
+            mode="lines+markers",
+            line=dict(color="#4C78A8", width=2.5),
+            marker=dict(size=8),
+            yaxis="y1",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=month_labels,
+            y=monthly_stats["Tỷ_lệ_ngập"],
+            name="Tỷ lệ ngập (%)",
+            mode="lines+markers",
+            line=dict(color="#E45756", width=2.5, dash="dash"),
+            marker=dict(size=8, symbol="square"),
+            yaxis="y2",
+        )
+    )
+    fig.update_layout(
+        title=(
+            "Xu hướng lượng mưa & tỷ lệ ngập theo tháng - "
+            + ("gộp toàn bộ các năm" if selected_year_label == "Gộp tất cả các năm" else f"năm {selected_year_label}")
+        ),
+        xaxis=dict(title="Tháng"),
+        yaxis=dict(
+            title=dict(text="Lượng mưa TB (mm)", font=dict(color="#4C78A8")),
+            tickfont=dict(color="#4C78A8"),
+        ),
+        yaxis2=dict(
+            title=dict(text="Tỷ lệ ngập (%)", font=dict(color="#E45756")),
+            tickfont=dict(color="#E45756"),
+            overlaying="y",
+            side="right",
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        hovermode="x unified",
+        height=440,
+        margin=dict(t=70),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    render_chart_discussion(
+        "Biểu đồ tương tác - có thể zoom/kéo thả để xem chi tiết từng tháng, hoặc dùng ô chọn năm phía "
+        "trên để xem riêng 1 năm thay vì số liệu gộp cả 10 năm. Xu hướng lượng mưa và tỷ lệ ngập thường "
+        "đồng biến theo mùa mưa (tháng 9-12 ở khu vực Huế) - cơ sở để khuyến nghị tăng cường giám sát "
+        "vào các tháng cao điểm này."
+    )
+
+
 def render_eda_tab() -> None:
     """
     Nội dung Tab 1 - Khám phá Dữ liệu (EDA), bước ĐẦU TIÊN của vòng đời Data Science.
@@ -1035,6 +1131,13 @@ def render_eda_tab() -> None:
 
     st.markdown("---")
 
+    # ---- Hàng 1.5: biểu đồ xu hướng mưa & tỷ lệ ngập theo tháng - TƯƠNG TÁC (thay cho ảnh tĩnh
+    # `monthly_trend.png` cũ), cho phép chọn xem từng năm riêng lẻ hoặc gộp toàn bộ như trước ----
+    with st.expander("📊 Xu hướng mưa & tỷ lệ ngập theo tháng (biểu đồ tương tác)", expanded=True):
+        render_interactive_monthly_trend_chart(eda_df)
+
+    st.markdown("---")
+
     # ---- Hàng 2: biểu đồ phân phối / tương quan (ảnh tĩnh do eda_analysis.py sinh sẵn) ----
     with st.expander("📈 Phân phối dữ liệu & Ma trận tương quan (Distribution / Heatmap)", expanded=True):
         # TODO: đây là placeholder hiển thị ẢNH TĨNH từ `eda_analysis.py` để tránh vẽ lại biểu đồ nặng
@@ -1043,7 +1146,6 @@ def render_eda_tab() -> None:
         eda_chart_files = {
             "Ma trận tương quan (Heatmap)": PLOTS_DIR / "correlation_heatmap.png",
             "Phân bố lớp mục tiêu": PLOTS_DIR / "class_distribution.png",
-            "Xu hướng mưa & tỷ lệ ngập theo tháng": PLOTS_DIR / "monthly_trend.png",
             "Tỷ lệ ngập theo địa phương": PLOTS_DIR / "flood_share_by_location.png",
             "Phân bố lượng mưa theo lớp": PLOTS_DIR / "rain_distribution_by_class.png",
             "Phân bố triều cường theo lớp": PLOTS_DIR / "tide_distribution_by_class.png",
@@ -2518,11 +2620,18 @@ OPEN_METEO_BASELINE_COLUMN = "Open-Meteo (mm) [baseline model]"
 WEATHER_DEVIATION_WARN_MM = 5.0  # lệch tuyệt đối > 5mm so với baseline mới đánh dấu cảnh báo
 
 
-@st.cache_data(ttl=1800, show_spinner="Đang đối chiếu dữ liệu mưa giữa các nguồn API...")
+WEATHER_COMPARISON_CACHE_TTL_SECONDS = 3600  # 1 tiếng - hết hạn thì lần mở tab/rerun kế tiếp tự gọi lại API
+
+
+@st.cache_data(
+    ttl=WEATHER_COMPARISON_CACHE_TTL_SECONDS,
+    show_spinner="Đang đối chiếu dữ liệu mưa giữa các nguồn API...",
+)
 def build_weather_comparison_matrix(active_provider_keys: tuple[tuple[str, str], ...]) -> pd.DataFrame:
     """
-    Dựng ma trận Địa phương x Nguồn API (lượng mưa hôm nay, mm) để đối chiếu Open-Meteo (nguồn model
-    đang dùng để huấn luyện/suy luận) với các nguồn thay thế người dùng đã cấu hình key qua khung admin.
+    Dựng ma trận Địa phương x Nguồn API (LƯỢNG MƯA hôm nay, đơn vị mm) để đối chiếu Open-Meteo (nguồn
+    model đang dùng để huấn luyện/suy luận) với các nguồn thay thế người dùng đã cấu hình key qua khung
+    admin. Chỉ so sánh lượng mưa (biến liên quan trực tiếp đến nguy cơ ngập), KHÔNG so nhiệt độ/độ ẩm.
 
     CHỈ đối chiếu để hiển thị - KHÔNG đưa giá trị từ nguồn khác vào model suy luận, vì model chỉ được
     huấn luyện trên phân phối/cách đo của Open-Meteo, đưa thẳng dữ liệu nguồn khác vào có thể lệch
@@ -2531,6 +2640,11 @@ def build_weather_comparison_matrix(active_provider_keys: tuple[tuple[str, str],
     `active_provider_keys` là tuple (secret_key, api_key) đã sắp xếp - dùng làm 1 phần cache key để
     Streamlit tự làm mới bảng khi người dùng đổi/xoá key qua khung admin, thay vì dùng chung 1 cache
     cho mọi phiên (mỗi phiên có thể đang thử key khác nhau).
+
+    KẾT QUẢ TỰ ĐỘNG LÀM MỚI SAU MỖI `WEATHER_COMPARISON_CACHE_TTL_SECONDS` GIÂY: đây là cache "pull"
+    kiểu Streamlit (không có tiến trình nền chạy độc lập) - nghĩa là API chỉ thực sự được gọi lại khi
+    có người mở/tải lại tab SAU KHI cache đã hết hạn, không tự chạy ngầm khi không ai mở app. Muốn lấy
+    ngay lập tức không cần đợi hết hạn thì bấm nút "🔄 Cập nhật dữ liệu API".
     """
     provider_key_map = dict(active_provider_keys)
     active_providers = [p for p in WEATHER_PROVIDER_OPTIONS if p["secret_key"] in provider_key_map]
@@ -2543,7 +2657,12 @@ def build_weather_comparison_matrix(active_provider_keys: tuple[tuple[str, str],
             row[f"{provider['label']} (mm)"] = fetch_fn(lat, lon, provider_key_map[provider["secret_key"]])
         rows.append(row)
 
-    return pd.DataFrame(rows)
+    comparison_df = pd.DataFrame(rows)
+    numeric_columns = [c for c in comparison_df.columns if c != "Địa phương"]
+    # Ép kiểu số THẬT SỰ (float64 + NaN) thay vì để cột object lẫn `None` - cột object khiến
+    # `st.dataframe`/`Styler.format` hiển thị thẳng chữ "None" ra bảng thay vì ô trống/"—".
+    comparison_df[numeric_columns] = comparison_df[numeric_columns].apply(pd.to_numeric, errors="coerce")
+    return comparison_df
 
 
 def render_weather_comparison_section() -> None:
@@ -2572,6 +2691,14 @@ def render_weather_comparison_section() -> None:
             )
             return
 
+        st.caption(
+            "Bảng so sánh **LƯỢNG MƯA hôm nay (mm)** - biến liên quan trực tiếp đến nguy cơ ngập, KHÔNG "
+            "phải nhiệt độ/độ ẩm. Ô hiện **\"—\"** nghĩa là lần gọi đó THẤT BẠI (key sai/hết hạn/hết "
+            f"quota) chứ không phải trời không mưa - kiểm tra lại key ở khung Admin nếu thấy \"—\" kéo "
+            f"dài. Dữ liệu tự làm mới mỗi khi có người mở lại tab và cache đã quá "
+            f"{WEATHER_COMPARISON_CACHE_TTL_SECONDS // 3600} tiếng (không có tiến trình chạy nền)."
+        )
+
         if st.button("🔄 Cập nhật dữ liệu API", key="weather_comparison_refresh_button"):
             build_weather_comparison_matrix.clear()
             st.rerun()
@@ -2581,20 +2708,25 @@ def render_weather_comparison_section() -> None:
         numeric_columns = [OPEN_METEO_BASELINE_COLUMN, *provider_columns]
 
         def highlight_deviation(row: pd.Series) -> list[str]:
-            baseline_value = row[OPEN_METEO_BASELINE_COLUMN]
+            numeric_row = comparison_df.loc[row.name]
+            baseline_value = numeric_row[OPEN_METEO_BASELINE_COLUMN]
             styles = [""] * len(row)
             for i, col in enumerate(row.index):
-                if col not in provider_columns or pd.isna(row[col]) or pd.isna(baseline_value):
+                if col not in provider_columns or pd.isna(numeric_row[col]) or pd.isna(baseline_value):
                     continue
-                if abs(row[col] - baseline_value) > WEATHER_DEVIATION_WARN_MM:
+                if abs(numeric_row[col] - baseline_value) > WEATHER_DEVIATION_WARN_MM:
                     styles[i] = "background-color: #FEE2E2; color: #991B1B; font-weight: 600;"
             return styles
 
-        comparison_styler = (
-            build_contrast_styler(comparison_df)
-            .format(formatter="{:.1f}", subset=numeric_columns, na_rep="—")
-            .apply(highlight_deviation, axis=1)
+        # Tự format thành chuỗi hiển thị ("—" cho ô lỗi) NGAY TRÊN DATAFRAME, không dựa vào
+        # `Styler.format()` - vì `st.dataframe` không đảm bảo áp dụng format của Styler ở mọi phiên
+        # bản Streamlit, dễ bị lộ ra chữ "None"/số thô lẫn lộn định dạng như đã gặp thực tế.
+        display_df = comparison_df.copy()
+        display_df[numeric_columns] = display_df[numeric_columns].apply(
+            lambda col: col.map(lambda v: "—" if pd.isna(v) else f"{v:.1f}")
         )
+
+        comparison_styler = build_contrast_styler(display_df).apply(highlight_deviation, axis=1)
         render_styled_table(comparison_styler, height=min(90 + 38 * len(comparison_df), 320))
 
         deviation_notes = []
