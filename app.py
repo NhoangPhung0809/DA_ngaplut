@@ -2572,8 +2572,13 @@ def render_weather_comparison_section() -> None:
             )
             return
 
+        if st.button("🔄 Cập nhật dữ liệu API", key="weather_comparison_refresh_button"):
+            build_weather_comparison_matrix.clear()
+            st.rerun()
+
         comparison_df = build_weather_comparison_matrix(active_provider_keys)
         provider_columns = [c for c in comparison_df.columns if c not in ("Địa phương", OPEN_METEO_BASELINE_COLUMN)]
+        numeric_columns = [OPEN_METEO_BASELINE_COLUMN, *provider_columns]
 
         def highlight_deviation(row: pd.Series) -> list[str]:
             baseline_value = row[OPEN_METEO_BASELINE_COLUMN]
@@ -2585,7 +2590,12 @@ def render_weather_comparison_section() -> None:
                     styles[i] = "background-color: #FEE2E2; color: #991B1B; font-weight: 600;"
             return styles
 
-        render_styled_table(comparison_df.style.apply(highlight_deviation, axis=1), height=min(90 + 38 * len(comparison_df), 320))
+        comparison_styler = (
+            build_contrast_styler(comparison_df)
+            .format(formatter="{:.1f}", subset=numeric_columns, na_rep="—")
+            .apply(highlight_deviation, axis=1)
+        )
+        render_styled_table(comparison_styler, height=min(90 + 38 * len(comparison_df), 320))
 
         deviation_notes = []
         for _, row in comparison_df.iterrows():
