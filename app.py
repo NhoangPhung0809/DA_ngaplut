@@ -115,6 +115,13 @@ REAL_MONITORED_LOCATIONS: dict[str, tuple[float, float]] = {
     "Quảng Điền": (16.5925, 107.5256),
 }
 
+# Ranh giới hành chính THẬT (polygon) của 5 địa phương giám sát - sinh bằng `download_geo.py`, đối
+# chiếu qua reverse-geocode ĐÚNG toạ độ ở REAL_MONITORED_LOCATIONS phía trên với OpenStreetMap
+# Nominatim (không dùng ID quan hệ OSM cứng như bản cũ trong download_osm_geo.py - bản đó trỏ NHẦM
+# sang Puerto Rico do ID sai). Property "name" của mỗi feature khớp CHÍNH XÁC với khoá trong
+# REAL_MONITORED_LOCATIONS để tra cứu nguy cơ ngập theo đúng địa phương.
+DISTRICT_BOUNDARY_GEOJSON_PATH = BASE_DIR / "data" / "geo" / "thuathienhue_districts.geojson"
+
 # Ánh xạ tên địa phương (khớp cột 'Địa phương' của df_predictions) -> file CSV lịch sử tương ứng
 # trong data/historical/. Dùng làm dự phòng khi CHƯA có model đã triển khai (xem
 # get_latest_flood_predictions()) và để lấy quan trắc gần nhất phục vụ suy luận model thật.
@@ -1564,9 +1571,43 @@ def fetch_tomtom_route(
         else:
             # Không có vùng ngập cần né -> gọi GET tiêu chuẩn, TomTom tự tính tuyến nhanh nhất.
             response = requests.get(request_url, params=query_params, timeout=15)
-        response.raise_for_status()
-        payload = response.json()
 
+        if not response.ok:
+            # TomTom trả lỗi kèm JSON body có trường 'detailedError' rõ nghĩa hơn nhiều so với để
+            # `raise_for_status()` ném HTTPError chung chung (ví dụ chỉ ghi "400 Client Error") - lỗi
+            # hay gặp NHẤT khi cho phép click BẤT KỲ trên bản đồ là điểm click rơi vào vị trí TomTom
+            # không tìm được đường vào (giữa biển, giữa sông, ruộng không có đường bộ...).
+            try:
+                error_payload = response.json()
+                detailed_message = (
+                    error_payload.get("detailedError", {}).get("message")
+                    or error_payload.get("error", {}).get("description")
+                    or response.text[:300]
+                )
+            except Exception:
+                detailed_message = response.text[:300]
+
+            # Gợi ý "click lại gần đường" chỉ hợp lý cho lỗi 400 (thường là NO_ROUTE_FOUND khi điểm
+            # click rơi vào vị trí không có đường bộ) - lỗi 401/403 là do KEY sai/hết hạn, gợi ý đó sẽ
+            # gây hiểu lầm, nên chỉ thêm khi đúng ngữ cảnh.
+            hint = (
+                " Nếu vừa click điểm giữa biển/sông/khu vực không có đường bộ, hãy click lại vị trí "
+                "khác gần đường thật."
+                if response.status_code == 400
+                else " Có thể TOMTOM_KEY đang sai hoặc đã hết hạn - kiểm tra lại cấu hình key."
+                if response.status_code in (401, 403)
+                else ""
+            )
+            return {
+                "success": False,
+                "route_points": [],
+                "distance_km": None,
+                "travel_time_min": None,
+                "used_avoid_areas": has_flood_zones,
+                "error": f"TomTom trả lỗi HTTP {response.status_code}: {detailed_message}.{hint}",
+            }
+
+        payload = response.json()
         route = payload["routes"][0]
         summary = route["summary"]
         route_points = [
@@ -2271,6 +2312,32 @@ def render_forecast_tab() -> None:
     )
 
 
+@st.cache_data(show_spinner=False)
+def load_district_boundaries() -> dict | None:
+    """
+    Nạp GeoJSON ranh giới hành chính THẬT của 5 địa phương giám sát (thay cho chấm điểm marker) - trả
+    về `None` nếu file thiếu/lỗi cấu trúc, để `build_smart_routing_map()` tự động rơi về vẽ marker
+    điểm như phương án dự phòng, KHÔNG làm crash bản đồ.
+    """
+    try:
+        with DISTRICT_BOUNDARY_GEOJSON_PATH.open("r", encoding="utf-8") as file:
+            geojson_data = json.load(file)
+        if not geojson_data.get("features"):
+            return None
+        return geojson_data
+    except Exception:
+        return None
+
+
+# Màu tô theo trạng thái nguy cơ - dùng chung cho cả nhánh tô ranh giới (GeoJson) lẫn nhánh marker
+# dự phòng, đảm bảo 2 cách hiển thị luôn nhất quán màu sắc với nhau.
+RISK_FILL_COLOR_MAP = {"Ngập": "#EF4444", "An toàn": "#22C55E"}
+RISK_TOOLTIP_LABEL_MAP = {
+    "Ngập": "🔴 Nguy cơ NGẬP (dự báo AI)",
+    "An toàn": "🟢 An toàn",
+}
+
+
 def build_smart_routing_map(
     df_predictions: pd.DataFrame,
     real_flooded_polygons: list,
@@ -2279,39 +2346,66 @@ def build_smart_routing_map(
     route_points: list | None = None,
 ) -> folium.Map:
     """Dựng bản đồ Folium DUY NHẤT gộp cả 2 chức năng:
-    1) Giám sát 5 địa phương thực tế - marker XANH LÁ ('An toàn') / ĐỎ ('Ngập') + vùng ngập tô đỏ.
+    1) Giám sát 5 địa phương thực tế - TÔ RANH GIỚI HÀNH CHÍNH (không phải chấm điểm) màu XANH LÁ
+       ('An toàn') / ĐỎ ('Ngập') theo đúng địa giới thật, thay vì 1 chấm điểm đại diện - trực quan hơn
+       nhiều vì thể hiện đúng PHẠM VI địa phương đang được cảnh báo, không chỉ 1 toạ độ trung tâm.
     2) Định tuyến - marker điểm đi/đến + tuyến đường né ngập vẽ XANH DƯƠNG.
     """
     center_lat = sum(lat for lat, _ in REAL_MONITORED_LOCATIONS.values()) / len(REAL_MONITORED_LOCATIONS)
     center_lon = sum(lon for _, lon in REAL_MONITORED_LOCATIONS.values()) / len(REAL_MONITORED_LOCATIONS)
     routing_map = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles="OpenStreetMap")
 
-    # ---- (1) Giám sát: vẽ 5 địa phương thực tế, màu marker theo đúng 'Nguy cơ' dự báo của AI ----
-    # FAIL-SAFE: thiếu dòng dữ liệu cũng KHÔNG mặc định "An toàn" (xem docstring get_latest_flood_predictions).
-    for location_name, coordinates in REAL_MONITORED_LOCATIONS.items():
-        risk_rows = df_predictions.loc[df_predictions["Địa phương"] == location_name, "Nguy cơ"]
-        risk_status = risk_rows.iloc[0] if not risk_rows.empty else "Không xác định"
+    # ---- (1) Giám sát: TÔ RANH GIỚI HÀNH CHÍNH thật của 5 địa phương, màu theo đúng 'Nguy cơ' dự báo
+    # của AI. FAIL-SAFE: thiếu dòng dữ liệu cũng KHÔNG mặc định "An toàn" (xem docstring
+    # get_latest_flood_predictions) - địa phương "Không xác định" tô màu XÁM để phân biệt rõ.
+    district_boundaries = load_district_boundaries()
 
-        if risk_status == "Ngập":
-            folium.Marker(
-                location=coordinates,
-                tooltip=f"🔴 {location_name}: Nguy cơ NGẬP (dự báo AI)",
-                icon=folium.Icon(color="red", icon="exclamation-triangle", prefix="fa"),
+    if district_boundaries:
+        for feature in district_boundaries["features"]:
+            location_name = feature.get("properties", {}).get("name")
+            risk_rows = df_predictions.loc[df_predictions["Địa phương"] == location_name, "Nguy cơ"]
+            risk_status = risk_rows.iloc[0] if not risk_rows.empty else "Không xác định"
+            fill_color = RISK_FILL_COLOR_MAP.get(risk_status, "#9CA3AF")
+            tooltip_label = RISK_TOOLTIP_LABEL_MAP.get(
+                risk_status, "⚪ KHÔNG XÁC ĐỊNH được (lỗi model/dữ liệu - cần kiểm tra thủ công)"
+            )
+
+            folium.GeoJson(
+                feature,
+                style_function=lambda _feat, fill_color=fill_color: {
+                    "fillColor": fill_color,
+                    "color": fill_color,
+                    "weight": 2,
+                    "fillOpacity": 0.45,
+                },
+                highlight_function=lambda _feat: {"weight": 3, "fillOpacity": 0.65},
+                tooltip=folium.Tooltip(f"{tooltip_label} - {location_name}"),
             ).add_to(routing_map)
-        elif risk_status == "An toàn":
-            folium.Marker(
-                location=coordinates,
-                tooltip=f"🟢 {location_name}: An toàn",
-                icon=folium.Icon(color="green", icon="check", prefix="fa"),
-            ).add_to(routing_map)
-        else:
-            # Model/dữ liệu lỗi cho địa phương này - hiển thị RÕ là chưa xác định được, không lẫn
-            # với 2 trạng thái đã được model xác nhận ở trên, để người vận hành biết cần kiểm tra tay.
-            folium.Marker(
-                location=coordinates,
-                tooltip=f"⚪ {location_name}: KHÔNG XÁC ĐỊNH được (lỗi model/dữ liệu - cần kiểm tra thủ công)",
-                icon=folium.Icon(color="gray", icon="question", prefix="fa"),
-            ).add_to(routing_map)
+    else:
+        # DỰ PHÒNG: thiếu/lỗi file GeoJSON ranh giới -> vẽ lại marker điểm như bản trước, để bản đồ
+        # vẫn hoạt động được thay vì trống trơn.
+        for location_name, coordinates in REAL_MONITORED_LOCATIONS.items():
+            risk_rows = df_predictions.loc[df_predictions["Địa phương"] == location_name, "Nguy cơ"]
+            risk_status = risk_rows.iloc[0] if not risk_rows.empty else "Không xác định"
+
+            if risk_status == "Ngập":
+                folium.Marker(
+                    location=coordinates,
+                    tooltip=f"🔴 {location_name}: Nguy cơ NGẬP (dự báo AI)",
+                    icon=folium.Icon(color="red", icon="exclamation-triangle", prefix="fa"),
+                ).add_to(routing_map)
+            elif risk_status == "An toàn":
+                folium.Marker(
+                    location=coordinates,
+                    tooltip=f"🟢 {location_name}: An toàn",
+                    icon=folium.Icon(color="green", icon="check", prefix="fa"),
+                ).add_to(routing_map)
+            else:
+                folium.Marker(
+                    location=coordinates,
+                    tooltip=f"⚪ {location_name}: KHÔNG XÁC ĐỊNH được (lỗi model/dữ liệu - cần kiểm tra thủ công)",
+                    icon=folium.Icon(color="gray", icon="question", prefix="fa"),
+                ).add_to(routing_map)
 
     # ---- Vẽ vùng ngập THỰC TẾ (đã được suy ra từ df_predictions, không còn là dummy cố định) ----
     for polygon in real_flooded_polygons:
