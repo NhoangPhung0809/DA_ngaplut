@@ -2338,17 +2338,64 @@ RISK_TOOLTIP_LABEL_MAP = {
 }
 
 
+def build_forecast_popup_html(location_name: str, location_forecast_df: pd.DataFrame | None) -> str:
+    """
+    Tạo nội dung HTML cho POPUP hiện ra khi CLICK vào vùng giám sát (khác `tooltip` chỉ hiện lúc rê
+    chuột) - tóm tắt dự báo 4 ngày tới (T/T+1/T+2/T+3) của CHÍNH địa phương đó.
+
+    Tái sử dụng ĐÚNG kết quả đã tính sẵn ở `_compute_forecast_4day_result()` (dùng chung với Tab
+    '🔮 Dự báo 4 ngày tới') - KHÔNG gọi lại Open-Meteo/suy luận model riêng cho việc build popup, để
+    click vào bản đồ luôn phản hồi tức thì thay vì phải chờ gọi API mỗi lần.
+    """
+    if location_forecast_df is None or location_forecast_df.empty:
+        return (
+            f"<b>📍 {location_name}</b><br>"
+            "<i>Chưa có dữ liệu dự báo cho địa phương này (xem Tab '🔮 Dự báo 4 ngày tới' để biết chi "
+            "tiết lỗi, ví dụ chưa huấn luyện model hoặc Open-Meteo tạm thời lỗi).</i>"
+        )
+
+    row_html_parts = []
+    for _, row in location_forecast_df.iterrows():
+        is_risk = str(row["Dự đoán Ngập"]) != "An toàn"
+        risk_icon = "🔴" if is_risk else "🟢"
+        row_html_parts.append(
+            "<tr>"
+            f"<td style='padding:2px 6px;border-bottom:1px solid #e2e8f0;'>{row['Ngày']}</td>"
+            f"<td style='padding:2px 6px;border-bottom:1px solid #e2e8f0;text-align:right;'>"
+            f"{row['Dự báo Lượng mưa (mm)']:.1f} mm</td>"
+            f"<td style='padding:2px 6px;border-bottom:1px solid #e2e8f0;'>{risk_icon} {row['Dự đoán Ngập']}</td>"
+            "</tr>"
+        )
+
+    return (
+        "<div style='font-family: sans-serif; min-width: 260px;'>"
+        f"<b>📍 {location_name} - Dự báo 4 ngày tới</b>"
+        "<table style='width:100%; border-collapse: collapse; margin-top: 6px; font-size: 12px;'>"
+        "<tr style='background:#f1f5f9;'>"
+        "<th style='text-align:left;padding:2px 6px;'>Ngày</th>"
+        "<th style='padding:2px 6px;'>Mưa dự báo</th>"
+        "<th style='text-align:left;padding:2px 6px;'>Nguy cơ</th>"
+        "</tr>"
+        f"{''.join(row_html_parts)}"
+        "</table>"
+        "</div>"
+    )
+
+
 def build_smart_routing_map(
     df_predictions: pd.DataFrame,
     real_flooded_polygons: list,
     start_point: tuple[float, float] | None = None,
     end_point: tuple[float, float] | None = None,
     route_points: list | None = None,
+    forecast_by_location: dict[str, pd.DataFrame] | None = None,
 ) -> folium.Map:
     """Dựng bản đồ Folium DUY NHẤT gộp cả 2 chức năng:
     1) Giám sát 5 địa phương thực tế - TÔ RANH GIỚI HÀNH CHÍNH (không phải chấm điểm) màu XANH LÁ
        ('An toàn') / ĐỎ ('Ngập') theo đúng địa giới thật, thay vì 1 chấm điểm đại diện - trực quan hơn
        nhiều vì thể hiện đúng PHẠM VI địa phương đang được cảnh báo, không chỉ 1 toạ độ trung tâm.
+       CLICK vào 1 vùng sẽ hiện POPUP tóm tắt dự báo 4 ngày tới của địa phương đó (nếu có sẵn dữ liệu
+       trong `forecast_by_location`), TOOLTIP (rê chuột) vẫn giữ nguyên hiển thị trạng thái hiện tại.
     2) Định tuyến - marker điểm đi/đến + tuyến đường né ngập vẽ XANH DƯƠNG.
     """
     center_lat = sum(lat for lat, _ in REAL_MONITORED_LOCATIONS.values()) / len(REAL_MONITORED_LOCATIONS)
@@ -2369,6 +2416,9 @@ def build_smart_routing_map(
             tooltip_label = RISK_TOOLTIP_LABEL_MAP.get(
                 risk_status, "⚪ KHÔNG XÁC ĐỊNH được (lỗi model/dữ liệu - cần kiểm tra thủ công)"
             )
+            location_forecast_df = (
+                forecast_by_location.get(location_name) if forecast_by_location is not None else None
+            )
 
             folium.GeoJson(
                 feature,
@@ -2380,6 +2430,9 @@ def build_smart_routing_map(
                 },
                 highlight_function=lambda _feat: {"weight": 3, "fillOpacity": 0.65},
                 tooltip=folium.Tooltip(f"{tooltip_label} - {location_name}"),
+                popup=folium.Popup(
+                    build_forecast_popup_html(location_name, location_forecast_df), max_width=320
+                ),
             ).add_to(routing_map)
     else:
         # DỰ PHÒNG: thiếu/lỗi file GeoJSON ranh giới -> vẽ lại marker điểm như bản trước, để bản đồ
@@ -2387,23 +2440,30 @@ def build_smart_routing_map(
         for location_name, coordinates in REAL_MONITORED_LOCATIONS.items():
             risk_rows = df_predictions.loc[df_predictions["Địa phương"] == location_name, "Nguy cơ"]
             risk_status = risk_rows.iloc[0] if not risk_rows.empty else "Không xác định"
+            location_forecast_df = (
+                forecast_by_location.get(location_name) if forecast_by_location is not None else None
+            )
+            popup = folium.Popup(build_forecast_popup_html(location_name, location_forecast_df), max_width=320)
 
             if risk_status == "Ngập":
                 folium.Marker(
                     location=coordinates,
                     tooltip=f"🔴 {location_name}: Nguy cơ NGẬP (dự báo AI)",
+                    popup=popup,
                     icon=folium.Icon(color="red", icon="exclamation-triangle", prefix="fa"),
                 ).add_to(routing_map)
             elif risk_status == "An toàn":
                 folium.Marker(
                     location=coordinates,
                     tooltip=f"🟢 {location_name}: An toàn",
+                    popup=popup,
                     icon=folium.Icon(color="green", icon="check", prefix="fa"),
                 ).add_to(routing_map)
             else:
                 folium.Marker(
                     location=coordinates,
                     tooltip=f"⚪ {location_name}: KHÔNG XÁC ĐỊNH được (lỗi model/dữ liệu - cần kiểm tra thủ công)",
+                    popup=popup,
                     icon=folium.Icon(color="gray", icon="question", prefix="fa"),
                 ).add_to(routing_map)
 
@@ -2470,6 +2530,20 @@ def render_smart_routing_tab() -> None:
     # BƯỚC 1: ĐỌC ĐỘNG kết quả dự báo mới nhất (df_predictions) cho 5 địa phương giám sát thực tế.
     # ==============================================================================================
     df_predictions = get_latest_flood_predictions()
+
+    # Dữ liệu dự báo 4 ngày tới (T/T+1/T+2/T+3) CHO TỪNG ĐỊA PHƯƠNG - dùng để hiện popup tóm tắt khi
+    # click vào vùng giám sát trên bản đồ (xem `build_forecast_popup_html`). Tái sử dụng ĐÚNG cache
+    # `_compute_forecast_4day_result()` đã tính cho Tab '🔮 Dự báo 4 ngày tới' - không gọi lại Open-Meteo
+    # riêng cho việc này. Bọc try/except vì tab Bản đồ vẫn phải hoạt động (giám sát + định tuyến) ngay
+    # cả khi chưa có model triển khai hoặc Open-Meteo tạm thời lỗi - lúc đó popup chỉ báo "chưa có dữ
+    # liệu" thay vì làm crash cả tab.
+    try:
+        forecast_by_location = {
+            location_name: location_df.reset_index(drop=True)
+            for location_name, location_df in _compute_forecast_4day_result()["combined_df"].groupby("Địa phương")
+        }
+    except Exception:
+        forecast_by_location = None
 
     # ---- BƯỚC 2: từ df_predictions, suy ra danh sách vùng ngập THỰC TẾ cần né (real_flooded_polygons)
     # và danh sách TÊN các địa phương đang ngập (dùng làm "chữ ký" để biết khi nào tình trạng ngập
@@ -2546,6 +2620,7 @@ def render_smart_routing_tab() -> None:
             start_point=start_point,
             end_point=end_point,
             route_points=route_points_to_draw,
+            forecast_by_location=forecast_by_location,
         )
         # `returned_objects=["last_clicked"]`: BẮT BUỘC phải đọc lại tọa độ click để hỗ trợ chọn điểm
         # tùy ý trên bản đồ - đánh đổi là app sẽ rerun mỗi khi người dùng click/pan/zoom bản đồ (khác
