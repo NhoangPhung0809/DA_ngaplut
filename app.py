@@ -1239,11 +1239,11 @@ def build_ctgan_distribution_discussion(distribution_df: pd.DataFrame, title: st
 
 
 @st.cache_data(show_spinner=False)
-def load_ctgan_comparison_artifacts():
-    """Đọc dữ liệu export trước/sau CTGAN (do `analyze_and_train.py` xuất ra) để hiển thị nhanh trên Streamlit."""
-    if not CTGAN_DISTRIBUTION_PATH.exists():
-        return None
-
+def _load_ctgan_comparison_artifacts_cached(distribution_file_mtime: float):
+    """Đọc dữ liệu export trước/sau CTGAN (do `analyze_and_train.py` xuất ra) để hiển thị nhanh trên
+    Streamlit. `distribution_file_mtime` KHÔNG dùng trong thân hàm - chỉ tồn tại để LÀM CACHE KEY, ép
+    Streamlit tự đọc lại file mỗi khi `analyze_and_train.py` ghi đè file mới (mtime đổi), thay vì cache
+    mãi mãi kết quả của lần train ĐẦU TIÊN cho tới khi ai đó bấm '🔄 Làm mới toàn bộ cache' thủ công."""
     with CTGAN_DISTRIBUTION_PATH.open("r", encoding="utf-8") as file:
         summary = json.load(file)
 
@@ -1255,6 +1255,12 @@ def load_ctgan_comparison_artifacts():
         "before_df": before_df,
         "after_df": after_df,
     }
+
+
+def load_ctgan_comparison_artifacts():
+    if not CTGAN_DISTRIBUTION_PATH.exists():
+        return None
+    return _load_ctgan_comparison_artifacts_cached(CTGAN_DISTRIBUTION_PATH.stat().st_mtime)
 
 
 def render_ctgan_dataset_panel(title: str, subtitle: str, summary: dict | None, dataset_df: pd.DataFrame) -> None:
