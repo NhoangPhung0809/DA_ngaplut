@@ -87,7 +87,17 @@ TRAINING_LOG_PATH = CACHE_DIR / "training_output.log"
 # (revoke/regenerate) key đó trên dashboard TomTom, không chỉ đơn thuần xóa khỏi source code.
 # ------------------------------------------------------------------------------------------------
 def get_api_secret(secret_key: str, env_var_name: str) -> str | None:
-    """Đọc 1 API key theo thứ tự ưu tiên: `st.secrets` (secrets.toml) -> biến môi trường (`.env`)."""
+    """
+    Đọc 1 API key theo thứ tự ưu tiên:
+    1. Key người dùng tự nhập qua khung "🔐 Cấu hình API nâng cao" (chỉ lưu trong `st.session_state`
+       của phiên trình duyệt hiện tại - xem `render_admin_api_key_panel()`) - ưu tiên CAO NHẤT để admin
+       có thể tạm thời ghi đè/thử key mới mà KHÔNG cần sửa `.env`/`secrets.toml` rồi redeploy lại server.
+    2. `st.secrets` (file `.streamlit/secrets.toml` cấu hình sẵn trên server).
+    3. Biến môi trường (`.env`).
+    """
+    session_keys = st.session_state.get("user_api_keys", {})
+    if session_keys.get(secret_key):
+        return session_keys[secret_key]
     try:
         if secret_key in st.secrets:
             return st.secrets[secret_key]
@@ -103,6 +113,155 @@ TOMTOM_API_KEY = get_api_secret("TOMTOM_KEY", "TOMTOM_API_KEY")
 # đó là lý do - không phải lỗi.
 OPENWEATHER_API_KEY = get_api_secret("OPENWEATHER_KEY", "OPENWEATHER_API_KEY")
 TOMTOM_ROUTING_BASE_URL = "https://api.tomtom.com/routing/1/calculateRoute"
+
+# Mật khẩu bảo vệ khung "🔐 Cấu hình API nâng cao" (xem `render_admin_api_key_panel()`) - đọc theo
+# đúng cơ chế `get_api_secret()` như mọi key khác (secrets.toml -> .env). Nếu CHƯA cấu hình mật khẩu
+# này trên server, khung nhập API key sẽ TỰ ĐỘNG khoá hoàn toàn (không có mật khẩu mặc định "rỗng cho
+# qua") - tránh trường hợp public app bị người lạ vào nhập/ghi đè API key tuỳ ý.
+ADMIN_CONFIG_PASSWORD = get_api_secret("ADMIN_PASSWORD", "ADMIN_CONFIG_PASSWORD")
+
+# Danh sách nhà cung cấp API thời tiết/bản đồ có thể cấu hình qua khung admin - mỗi provider gồm:
+# nhãn hiển thị, "secret_key" (tên biến dùng trong get_api_secret/st.secrets), biến môi trường tương
+# ứng trong .env, và link đăng ký để tiện tạo key mới. Đa số CHƯA được nối vào logic fetch dữ liệu
+# thật (xem ghi chú ở OPENWEATHER_API_KEY phía trên) - khung này mới chỉ là nơi NHẬP & LƯU key an
+# toàn cho phiên làm việc, việc dùng key đó để lấy thêm mẫu dữ liệu là bước tích hợp tiếp theo.
+WEATHER_PROVIDER_OPTIONS = [
+    {
+        "label": "TomTom Routing (đã dùng cho Tab Bản đồ)",
+        "secret_key": "TOMTOM_KEY",
+        "env_var_name": "TOMTOM_API_KEY",
+        "signup_url": "https://developer.tomtom.com/",
+    },
+    {
+        "label": "OpenWeatherMap",
+        "secret_key": "OPENWEATHER_KEY",
+        "env_var_name": "OPENWEATHER_API_KEY",
+        "signup_url": "https://openweathermap.org/api",
+    },
+    {
+        "label": "Weatherbit",
+        "secret_key": "WEATHERBIT_KEY",
+        "env_var_name": "WEATHERBIT_API_KEY",
+        "signup_url": "https://www.weatherbit.io/api",
+    },
+    {
+        "label": "Visual Crossing",
+        "secret_key": "VISUALCROSSING_KEY",
+        "env_var_name": "VISUALCROSSING_API_KEY",
+        "signup_url": "https://www.visualcrossing.com/weather-api",
+    },
+    {
+        "label": "Tomorrow.io",
+        "secret_key": "TOMORROW_KEY",
+        "env_var_name": "TOMORROW_API_KEY",
+        "signup_url": "https://www.tomorrow.io/weather-api/",
+    },
+    {
+        "label": "Stormglass (chuyên triều cường/marine)",
+        "secret_key": "STORMGLASS_KEY",
+        "env_var_name": "STORMGLASS_API_KEY",
+        "signup_url": "https://stormglass.io/",
+    },
+    {
+        "label": "WorldTides (chuyên triều cường)",
+        "secret_key": "WORLDTIDES_KEY",
+        "env_var_name": "WORLDTIDES_API_KEY",
+        "signup_url": "https://www.worldtides.info/",
+    },
+    {
+        "label": "WeatherAPI.com",
+        "secret_key": "WEATHERAPI_KEY",
+        "env_var_name": "WEATHERAPI_API_KEY",
+        "signup_url": "https://www.weatherapi.com/",
+    },
+    {
+        "label": "World Weather Online",
+        "secret_key": "WORLDWEATHERONLINE_KEY",
+        "env_var_name": "WORLDWEATHERONLINE_API_KEY",
+        "signup_url": "https://www.worldweatheronline.com/developer/",
+    },
+    {
+        "label": "Goong.io (bản đồ Việt Nam)",
+        "secret_key": "GOONG_KEY",
+        "env_var_name": "GOONG_API_KEY",
+        "signup_url": "https://goong.io/",
+    },
+]
+
+
+def render_admin_api_key_panel() -> None:
+    """
+    Khung "🔐 Cấu hình API nâng cao" trong sidebar - cho phép ADMIN (người biết mật khẩu, không phải
+    khách vãng lai) nhập/ghi đè API key của từng nhà cung cấp NGAY TRÊN WEB, không cần sửa `.env`/
+    `secrets.toml` rồi khởi động lại server.
+
+    NGUYÊN TẮC AN TOÀN:
+    - Key nhập vào CHỈ lưu trong `st.session_state` (bộ nhớ RAM của phiên trình duyệt hiện tại) - KHÔNG
+      bao giờ ghi ra đĩa/log/git, tự động mất khi đóng tab hoặc server restart.
+    - Khung nhập BỊ KHOÁ HOÀN TOÀN nếu server chưa cấu hình `ADMIN_CONFIG_PASSWORD` (không có mật khẩu
+      mặc định) - tránh việc app public bị người lạ vào ghi đè/dò key của người khác.
+    - Ô nhập mật khẩu và ô nhập API key đều dùng `type="password"` để không hiện rõ trên màn hình.
+    """
+    with st.sidebar.expander("🔐 Cấu hình API nâng cao (Admin)", expanded=False):
+        if not ADMIN_CONFIG_PASSWORD:
+            st.info(
+                "Tính năng này đang KHOÁ vì server chưa cấu hình `ADMIN_PASSWORD` (trong "
+                "`.streamlit/secrets.toml`) hoặc `ADMIN_CONFIG_PASSWORD` (trong `.env`). Cấu hình mật "
+                "khẩu đó trước để mở khoá."
+            )
+            return
+
+        if not st.session_state.get("admin_panel_unlocked", False):
+            entered_password = st.text_input(
+                "Mật khẩu admin", type="password", key="admin_panel_password_input"
+            )
+            if st.button("Mở khoá", key="admin_panel_unlock_button", use_container_width=True):
+                if entered_password == ADMIN_CONFIG_PASSWORD:
+                    st.session_state["admin_panel_unlocked"] = True
+                    st.rerun()
+                else:
+                    st.error("Sai mật khẩu.")
+            return
+
+        st.success("Đã mở khoá cho phiên làm việc này.")
+        provider_labels = [provider["label"] for provider in WEATHER_PROVIDER_OPTIONS]
+        selected_label = st.selectbox("Chọn nhà cung cấp API", provider_labels, key="admin_panel_provider_select")
+        selected_provider = next(p for p in WEATHER_PROVIDER_OPTIONS if p["label"] == selected_label)
+
+        st.caption(f"Chưa có key? Đăng ký tại: {selected_provider['signup_url']}")
+        new_key_value = st.text_input(
+            f"API key cho {selected_provider['label']}",
+            type="password",
+            key=f"admin_panel_key_input_{selected_provider['secret_key']}",
+        )
+
+        if st.button("💾 Lưu vào phiên này", key="admin_panel_save_key_button", use_container_width=True):
+            if new_key_value:
+                st.session_state.setdefault("user_api_keys", {})[selected_provider["secret_key"]] = new_key_value
+                st.success(f"Đã lưu key cho {selected_provider['label']} (chỉ tồn tại trong phiên này).")
+                st.rerun()
+            else:
+                st.warning("Vui lòng nhập API key trước khi lưu.")
+
+        session_keys = st.session_state.get("user_api_keys", {})
+        if session_keys:
+            st.markdown("---")
+            st.caption("Key đã cấu hình cho phiên này (chỉ hiện vài ký tự đầu để đối chiếu):")
+            for provider in WEATHER_PROVIDER_OPTIONS:
+                secret_key = provider["secret_key"]
+                if secret_key not in session_keys:
+                    continue
+                masked_value = session_keys[secret_key][:4] + "…" if len(session_keys[secret_key]) > 4 else "…"
+                key_col, remove_col = st.columns([3, 1])
+                key_col.write(f"**{provider['label']}**: `{masked_value}`")
+                if remove_col.button("Xoá", key=f"admin_panel_remove_{secret_key}"):
+                    del st.session_state["user_api_keys"][secret_key]
+                    st.rerun()
+
+        st.markdown("---")
+        if st.button("🔒 Khoá lại panel", key="admin_panel_lock_button", use_container_width=True):
+            st.session_state["admin_panel_unlocked"] = False
+            st.rerun()
 
 # 5 ĐIỂM GIÁM SÁT NGẬP LỤT THỰC TẾ tại Thừa Thiên Huế (tọa độ trung tâm gần đúng của mỗi địa
 # phương) - thay thế hoàn toàn cho dữ liệu giả lập (dummy) trước đây. Đây là DUY NHẤT nguồn tọa độ
@@ -2752,6 +2911,8 @@ def render_sidebar() -> None:
         st.cache_data.clear()
         st.cache_resource.clear()
         st.sidebar.success("Đã xóa cache - dữ liệu sẽ được nạp lại ở lần chạy tiếp theo.")
+
+    render_admin_api_key_panel()
 
 
 def main():
