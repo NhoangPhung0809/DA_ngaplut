@@ -695,9 +695,17 @@ def apply_gan_data_augmentation(
         )
 
         try:
+            # `pac=1` (mặc định thư viện là 10) - CTGAN dùng kỹ thuật PacGAN, discriminator BẮT BUỘC
+            # mỗi batch đưa vào phải chia hết cho `pac`. Với các lớp thiểu số ít mẫu (vd 1133 dòng),
+            # batch CUỐI CÙNG của mỗi epoch gần như luôn KHÔNG chia hết cho 10 dù `batch_size` có chia
+            # hết cho 10 hay không - dẫn tới `AssertionError: input_.size()[0] % self.pac == 0` ngay
+            # trong `discriminator.forward()`. Đặt `pac=1` bỏ hẳn ràng buộc chia hết này (đánh đổi:
+            # PacGAN vốn giúp giảm mode collapse, `pac=1` coi như tắt hẳn cơ chế đó - chấp nhận được ở
+            # đây vì mục tiêu chỉ là sinh thêm mẫu thiểu số, không cần chất lượng GAN tối ưu nhất).
             gan_model = CTGAN(
                 epochs=epochs,
                 batch_size=batch_size,
+                pac=1,
                 verbose=False,
             )
             gan_model.fit(class_features)
