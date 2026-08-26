@@ -9,6 +9,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import folium
 import joblib
@@ -17,6 +18,7 @@ import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
+import toml
 from dotenv import load_dotenv
 from streamlit_folium import st_folium
 
@@ -188,6 +190,33 @@ WEATHER_PROVIDER_OPTIONS = [
     },
 ]
 
+SECRETS_TOML_PATH = BASE_DIR / ".streamlit" / "secrets.toml"
+
+
+def persist_key_to_secrets_toml(secret_key: str, value: str) -> None:
+    """
+    Ghi 1 API key TRỰC TIẾP vào `.streamlit/secrets.toml` trên đĩa - khác với chỉ lưu vào
+    `st.session_state` (mất khi reload trang/restart server). Đọc file hiện có (nếu có) trước, chỉ
+    CẬP NHẬT đúng 1 key được truyền vào, giữ nguyên mọi key khác đã có sẵn (không ghi đè toàn bộ file).
+
+    AN TOÀN: hàm này CHỈ được gọi từ `render_admin_api_key_panel()` - tức người bấm nút đã nhập ĐÚNG
+    `ADMIN_PASSWORD` trước đó, nên về bản chất tương đương việc họ tự SSH vào server sửa file thủ công
+    - không phải tính năng public ai cũng bấm được.
+    """
+    SECRETS_TOML_PATH.parent.mkdir(parents=True, exist_ok=True)
+    existing_data = {}
+    if SECRETS_TOML_PATH.exists():
+        try:
+            existing_data = toml.load(SECRETS_TOML_PATH)
+        except Exception:
+            # File lỗi cú pháp sẵn (ví dụ dùng nhầm dấu ':' thay vì '=') - không cố "sửa hộ", chỉ coi
+            # như rỗng để tránh mất dữ liệu oan nếu nội dung cũ thực ra vẫn đọc được 1 phần; người dùng
+            # cần tự kiểm tra lại file nếu gặp trường hợp này.
+            existing_data = {}
+    existing_data[secret_key] = value
+    with SECRETS_TOML_PATH.open("w", encoding="utf-8") as file:
+        toml.dump(existing_data, file)
+
 
 def render_admin_api_key_panel() -> None:
     """
@@ -234,11 +263,34 @@ def render_admin_api_key_panel() -> None:
             type="password",
             key=f"admin_panel_key_input_{selected_provider['secret_key']}",
         )
+        session_only = st.checkbox(
+            "Chỉ lưu tạm cho phiên này (KHÔNG ghi ra đĩa - mất khi reload)",
+            value=False,
+            key="admin_panel_session_only_checkbox",
+            help=(
+                "Bỏ chọn (mặc định): key được ghi thẳng vào `.streamlit/secrets.toml` trên server - "
+                "vẫn còn sau khi reload trang hoặc restart server, giống hệt việc bạn tự sửa file bằng "
+                "SSH/nano. Chọn ô này nếu chỉ muốn thử key tạm thời, không muốn lưu vĩnh viễn."
+            ),
+        )
 
-        if st.button("💾 Lưu vào phiên này", key="admin_panel_save_key_button", use_container_width=True):
+        if st.button("💾 Lưu API key", key="admin_panel_save_key_button", use_container_width=True):
             if new_key_value:
                 st.session_state.setdefault("user_api_keys", {})[selected_provider["secret_key"]] = new_key_value
-                st.success(f"Đã lưu key cho {selected_provider['label']} (chỉ tồn tại trong phiên này).")
+                if session_only:
+                    st.success(f"Đã lưu key cho {selected_provider['label']} (chỉ tồn tại trong phiên này).")
+                else:
+                    try:
+                        persist_key_to_secrets_toml(selected_provider["secret_key"], new_key_value)
+                        st.success(
+                            f"Đã lưu key cho {selected_provider['label']} vào `.streamlit/secrets.toml` - "
+                            "vẫn còn sau khi reload/restart."
+                        )
+                    except Exception as exc:
+                        st.error(
+                            f"Đã lưu tạm cho phiên này, nhưng GHI RA ĐĨA thất bại ({exc}) - key sẽ mất khi "
+                            "reload. Kiểm tra quyền ghi thư mục `.streamlit/` trên server."
+                        )
                 st.rerun()
             else:
                 st.warning("Vui lòng nhập API key trước khi lưu.")
@@ -2367,6 +2419,205 @@ def _compute_forecast_4day_result() -> dict:
     }
 
 
+def fetch_open_meteo_rain_mm(lat: float, lon: float) -> float | None:
+    """Lượng mưa HÔM NAY (mm) từ Open-Meteo - nguồn baseline mà model đang dùng để huấn luyện/suy luận."""
+    try:
+        response = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={"latitude": lat, "longitude": lon, "daily": "rain_sum", "forecast_days": 1, "timezone": "auto"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return round(float(response.json()["daily"]["rain_sum"][0]), 1)
+    except Exception as exc:
+        print(f"[fetch_open_meteo_rain_mm] Lỗi: {exc}")
+        return None
+
+
+def fetch_weatherbit_rain_mm(lat: float, lon: float, api_key: str) -> float | None:
+    try:
+        response = requests.get(
+            "https://api.weatherbit.io/v2.0/forecast/daily",
+            params={"lat": lat, "lon": lon, "key": api_key, "days": 1, "units": "M"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return round(float(response.json()["data"][0]["precip"]), 1)
+    except Exception as exc:
+        print(f"[fetch_weatherbit_rain_mm] Lỗi: {exc}")
+        return None
+
+
+def fetch_visualcrossing_rain_mm(lat: float, lon: float, api_key: str) -> float | None:
+    try:
+        response = requests.get(
+            f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{lat},{lon}/today",
+            params={"unitGroup": "metric", "key": api_key, "include": "days", "contentType": "json"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return round(float(response.json()["days"][0].get("precip") or 0), 1)
+    except Exception as exc:
+        print(f"[fetch_visualcrossing_rain_mm] Lỗi: {exc}")
+        return None
+
+
+def fetch_tomorrow_io_rain_mm(lat: float, lon: float, api_key: str) -> float | None:
+    try:
+        response = requests.get(
+            "https://api.tomorrow.io/v4/weather/forecast",
+            params={"location": f"{lat},{lon}", "timesteps": "1d", "units": "metric", "apikey": api_key},
+            timeout=10,
+        )
+        response.raise_for_status()
+        values = response.json()["timelines"]["daily"][0]["values"]
+        return round(float(values.get("rainAccumulationSum", 0)), 1)
+    except Exception as exc:
+        print(f"[fetch_tomorrow_io_rain_mm] Lỗi: {exc}")
+        return None
+
+
+def fetch_stormglass_rain_mm(lat: float, lon: float, api_key: str) -> float | None:
+    """
+    Stormglass trả dữ liệu THEO GIỜ (không có tổng ngày sẵn) - cộng dồn 24 giờ tới để ra lượng mưa
+    trong ngày, mỗi giờ ưu tiên nguồn `.sg` (blended, đáng tin nhất), nếu thiếu thì lấy nguồn đầu tiên
+    có sẵn trong dict `precipitation` (mỗi nhà cung cấp phụ trợ 1 field riêng, ví dụ `.noaa`, `.icon`).
+    """
+    try:
+        response = requests.get(
+            "https://api.stormglass.io/v2/weather/point",
+            params={"lat": lat, "lng": lon, "params": "precipitation"},
+            headers={"Authorization": api_key},
+            timeout=10,
+        )
+        response.raise_for_status()
+        hours = response.json().get("hours", [])[:24]
+        if not hours:
+            return None
+        total_mm = 0.0
+        for hour_entry in hours:
+            precip_sources = hour_entry.get("precipitation", {})
+            value = precip_sources.get("sg")
+            if value is None and precip_sources:
+                value = next(iter(precip_sources.values()))
+            total_mm += value or 0
+        return round(total_mm, 1)
+    except Exception as exc:
+        print(f"[fetch_stormglass_rain_mm] Lỗi: {exc}")
+        return None
+
+
+WEATHER_COMPARISON_FETCHERS: dict[str, Callable[[float, float, str], float | None]] = {
+    "WEATHERBIT_KEY": fetch_weatherbit_rain_mm,
+    "VISUALCROSSING_KEY": fetch_visualcrossing_rain_mm,
+    "TOMORROW_KEY": fetch_tomorrow_io_rain_mm,
+    "STORMGLASS_KEY": fetch_stormglass_rain_mm,
+}
+
+OPEN_METEO_BASELINE_COLUMN = "Open-Meteo (mm) [baseline model]"
+WEATHER_DEVIATION_WARN_MM = 5.0  # lệch tuyệt đối > 5mm so với baseline mới đánh dấu cảnh báo
+
+
+@st.cache_data(ttl=1800, show_spinner="Đang đối chiếu dữ liệu mưa giữa các nguồn API...")
+def build_weather_comparison_matrix(active_provider_keys: tuple[tuple[str, str], ...]) -> pd.DataFrame:
+    """
+    Dựng ma trận Địa phương x Nguồn API (lượng mưa hôm nay, mm) để đối chiếu Open-Meteo (nguồn model
+    đang dùng để huấn luyện/suy luận) với các nguồn thay thế người dùng đã cấu hình key qua khung admin.
+
+    CHỈ đối chiếu để hiển thị - KHÔNG đưa giá trị từ nguồn khác vào model suy luận, vì model chỉ được
+    huấn luyện trên phân phối/cách đo của Open-Meteo, đưa thẳng dữ liệu nguồn khác vào có thể lệch
+    calibration và làm sai lệch kết quả dự đoán ngập.
+
+    `active_provider_keys` là tuple (secret_key, api_key) đã sắp xếp - dùng làm 1 phần cache key để
+    Streamlit tự làm mới bảng khi người dùng đổi/xoá key qua khung admin, thay vì dùng chung 1 cache
+    cho mọi phiên (mỗi phiên có thể đang thử key khác nhau).
+    """
+    provider_key_map = dict(active_provider_keys)
+    active_providers = [p for p in WEATHER_PROVIDER_OPTIONS if p["secret_key"] in provider_key_map]
+
+    rows = []
+    for location_name, (lat, lon) in REAL_MONITORED_LOCATIONS.items():
+        row = {"Địa phương": location_name, OPEN_METEO_BASELINE_COLUMN: fetch_open_meteo_rain_mm(lat, lon)}
+        for provider in active_providers:
+            fetch_fn = WEATHER_COMPARISON_FETCHERS[provider["secret_key"]]
+            row[f"{provider['label']} (mm)"] = fetch_fn(lat, lon, provider_key_map[provider["secret_key"]])
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def render_weather_comparison_section() -> None:
+    """
+    Khung "🔍 Đối chiếu dữ liệu mưa giữa các nguồn API" - chỉ hiện khi người dùng đã cấu hình ÍT NHẤT 1
+    API key thay thế qua khung admin sidebar. Mục tiêu: giúp phát hiện Open-Meteo (nguồn model đang
+    dùng) có đang báo lệch nhiều so với các nguồn độc lập khác hay không, để người xem tự cân nhắc thêm
+    khi đọc kết quả dự báo - đây là bước ĐỐI CHIẾU (cross-check hiển thị), CHƯA phải hệ khuyến nghị DSS
+    đầy đủ (chưa tự động ra quyết định/hành động, chỉ hỗ trợ đọc thêm thông tin).
+    """
+    active_provider_keys = tuple(
+        sorted(
+            (provider["secret_key"], api_key)
+            for provider in WEATHER_PROVIDER_OPTIONS
+            if provider["secret_key"] in WEATHER_COMPARISON_FETCHERS
+            and (api_key := get_api_secret(provider["secret_key"], provider["env_var_name"]))
+        )
+    )
+
+    with st.expander("🔍 Đối chiếu dữ liệu mưa giữa các nguồn API (ma trận)", expanded=False):
+        if not active_provider_keys:
+            st.info(
+                "Chưa có nguồn API thay thế nào được cấu hình để đối chiếu với Open-Meteo (nguồn model "
+                "đang dùng). Vào khung **🔐 Cấu hình API nâng cao (Admin)** ở sidebar để thêm key của "
+                "Weatherbit / Visual Crossing / Tomorrow.io / Stormglass."
+            )
+            return
+
+        comparison_df = build_weather_comparison_matrix(active_provider_keys)
+        provider_columns = [c for c in comparison_df.columns if c not in ("Địa phương", OPEN_METEO_BASELINE_COLUMN)]
+
+        def highlight_deviation(row: pd.Series) -> list[str]:
+            baseline_value = row[OPEN_METEO_BASELINE_COLUMN]
+            styles = [""] * len(row)
+            for i, col in enumerate(row.index):
+                if col not in provider_columns or pd.isna(row[col]) or pd.isna(baseline_value):
+                    continue
+                if abs(row[col] - baseline_value) > WEATHER_DEVIATION_WARN_MM:
+                    styles[i] = "background-color: #FEE2E2; color: #991B1B; font-weight: 600;"
+            return styles
+
+        render_styled_table(comparison_df.style.apply(highlight_deviation, axis=1), height=min(90 + 38 * len(comparison_df), 320))
+
+        deviation_notes = []
+        for _, row in comparison_df.iterrows():
+            baseline_value = row[OPEN_METEO_BASELINE_COLUMN]
+            if pd.isna(baseline_value):
+                continue
+            worst_col, worst_diff = None, 0.0
+            for col in provider_columns:
+                if pd.isna(row[col]):
+                    continue
+                diff = abs(row[col] - baseline_value)
+                if diff > worst_diff:
+                    worst_col, worst_diff = col, diff
+            if worst_col and worst_diff > WEATHER_DEVIATION_WARN_MM:
+                deviation_notes.append(
+                    f"**{row['Địa phương']}**: lệch **{worst_diff:.1f}mm** giữa Open-Meteo và {worst_col} - "
+                    "nên xem thêm nguồn khác/theo dõi sát trước khi kết luận."
+                )
+
+        if deviation_notes:
+            render_chart_discussion(
+                f"Có {len(deviation_notes)}/{len(comparison_df)} địa phương đang lệch trên "
+                f"{WEATHER_DEVIATION_WARN_MM:.0f}mm giữa các nguồn:\n\n" + "\n\n".join(deviation_notes)
+            )
+        else:
+            render_chart_discussion(
+                "Các nguồn API đang cho kết quả khá đồng nhất (lệch không quá "
+                f"{WEATHER_DEVIATION_WARN_MM:.0f}mm) - chưa có dấu hiệu Open-Meteo báo sai lệch lớn so "
+                "với nguồn độc lập khác cho các địa phương giám sát hiện tại."
+            )
+
+
 def render_forecast_tab() -> None:
     """
     Nội dung TRANG ĐẦU TIÊN của app - bảng dự báo nguy cơ ngập 4 ngày tới (T/T+1/T+2/T+3) cho toàn bộ
@@ -2469,6 +2720,8 @@ def render_forecast_tab() -> None:
         f"Model đang dùng để dự báo: `{cached_result['model_name']}` "
         f"(F1-Macro={cached_result['f1_macro']:.4f})"
     )
+
+    render_weather_comparison_section()
 
 
 @st.cache_data(show_spinner=False)

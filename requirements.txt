@@ -18,6 +18,7 @@ plotly
 folium
 streamlit
 streamlit-folium
+toml
 geopandas
 osmnx
 networkx
