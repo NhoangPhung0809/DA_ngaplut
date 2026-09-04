@@ -1592,17 +1592,17 @@ def render_preprocessing_training_tab() -> None:
 # ==================================================================================================
 # TAB 3 - ĐÁNH GIÁ MÔ HÌNH
 # ==================================================================================================
-def render_feature_importance_radar_chart(feature_importance_json_path: Path) -> None:
+def render_feature_importance_heatmap(feature_importance_json_path: Path) -> None:
     """
-    Biểu đồ RADAR (Plotly `Scatterpolar`) cho Feature Importance - theo góp ý của GVHD, thay cho bar
-    chart tĩnh (ảnh PNG) trước đây. Đọc dữ liệu số thô từ `feature_importance.json` (do
-    `plot_feature_importance()` trong `analyze_and_train.py` xuất kèm ảnh PNG) - KHÔNG tính lại
-    importance ở đây, tránh chạy lại `permutation_importance` (tốn thời gian) mỗi lần Streamlit rerun.
+    Biểu đồ NHIỆT (heatmap, Plotly `Heatmap`) cho Feature Importance - theo góp ý của GVHD. Đọc dữ
+    liệu số thô từ `feature_importance.json` (do `plot_feature_importance()` trong
+    `analyze_and_train.py` xuất kèm ảnh PNG) - KHÔNG tính lại importance ở đây, tránh chạy lại
+    `permutation_importance` (tốn thời gian) mỗi lần Streamlit rerun.
 
-    Radar phù hợp để so sánh NHIỀU biến trên CÙNG 1 thang đo (ở đây là mức độ đóng góp vào quyết định
-    của model) theo dạng hình học - biến nào "vươn xa" khỏi tâm hơn thì đóng góp nhiều hơn, trực quan
-    hơn bar chart khi số lượng biến ít (5 biến khí tượng - thủy văn của đồ án) và giúp dễ nhận diện
-    "hình dạng" tổng thể của tầm quan trọng giữa các biến.
+    Chỉ có 1 hàng (5 biến khí tượng - thủy văn của đồ án x 1 chỉ số Importance) nên bản chất là
+    "heatmap 1 hàng" - màu càng đậm thì biến đó đóng góp càng nhiều vào quyết định của model, kèm số
+    liệu chính xác hiện thẳng trên từng ô (không cần hover mới thấy được, phù hợp khi trình bày/in
+    báo cáo).
     """
     with feature_importance_json_path.open("r", encoding="utf-8") as file:
         importance_records = json.load(file)
@@ -1611,29 +1611,25 @@ def render_feature_importance_radar_chart(feature_importance_json_path: Path) ->
     if importance_df.empty:
         st.info("File `feature_importance.json` rỗng.")
         return
-    importance_df = importance_df.sort_values("Feature")
+    importance_df = importance_df.sort_values("Importance", ascending=False)
 
-    # Nối lại điểm ĐẦU vào cuối mảng r/theta để khép kín hình radar - Plotly Scatterpolar KHÔNG tự
-    # động khép kín dù đã bật `fill='toself'`, thiếu bước này cạnh cuối/đầu sẽ bị hở.
-    radar_values = list(importance_df["Importance"]) + [importance_df["Importance"].iloc[0]]
-    radar_labels = list(importance_df["Feature"]) + [importance_df["Feature"].iloc[0]]
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatterpolar(
-            r=radar_values,
-            theta=radar_labels,
-            fill="toself",
-            name="Feature Importance",
-            line=dict(color="#4C78A8"),
-            fillcolor="rgba(76, 120, 168, 0.35)",
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=[importance_df["Importance"].tolist()],
+            x=importance_df["Feature"].tolist(),
+            y=["Importance"],
+            colorscale="YlOrRd",
+            text=[[f"{value:.3f}" for value in importance_df["Importance"]]],
+            texttemplate="%{text}",
+            textfont=dict(size=13),
+            hovertemplate="%{x}: %{z:.4f}<extra></extra>",
+            colorbar=dict(title="Mức độ"),
         )
     )
     fig.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, importance_df["Importance"].max() * 1.15])),
-        showlegend=False,
         margin=dict(t=30, b=30),
-        height=380,
+        height=220,
+        yaxis=dict(showticklabels=False),
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -1764,14 +1760,14 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
     with image_col_2:
         st.markdown("**Feature Importance**")
         if feature_importance_json_path.exists():
-            render_feature_importance_radar_chart(feature_importance_json_path)
+            render_feature_importance_heatmap(feature_importance_json_path)
         elif feature_importance_path.exists():
             # Fallback cho artifact từ lần train CŨ (trước khi có `feature_importance.json`) - chỉ có
-            # ảnh bar chart tĩnh, chưa có dữ liệu số thô để tự vẽ radar.
+            # ảnh bar chart tĩnh, chưa có dữ liệu số thô để tự vẽ heatmap.
             render_full_width_image(str(feature_importance_path))
             st.caption(
-                "Chưa có dữ liệu số cho biểu đồ radar (artifact từ lần train cũ) - hãy train lại để có "
-                "bản radar tương tác."
+                "Chưa có dữ liệu số cho biểu đồ nhiệt (artifact từ lần train cũ) - hãy train lại để có "
+                "bản heatmap tương tác."
             )
         else:
             st.info("Chưa có `feature_importance.json`/`feature_importance.png` trong `models/latest/`.")
