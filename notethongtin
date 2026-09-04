@@ -1,0 +1,5 @@
+
+1. Mục tiêu đề tài: mình có thêm mục tiêu gì không, ví dụ như dự báo tránh lụt, hướng dẫn đường tránh ngập, dự báo theo từng quận huyện gì đó
+2. Dữ liệu đầu vào/ đầu ra: có bổ sung thêm gì không, xử lý như nào, cho xin cái ví dụ
+3. Phát biểu bài toán: trong báo cáo trước anh viết là Bài toán được đặt ra trong đề tài là bài toán phân loại đa lớp trên dữ liệu khí tượng - thủy văn. Trong bài tham khảo anh thấy người ta phân ra 2 loại, mình có bài toán thứ 2 không
+4. đối tượng nghiên cứu: Đề tài tập trung nghiên cứu mức độ nguy cơ ngập lụt như một biến mục tiêu phân loại, đồng thời xem xét mối quan hệ giữa nguy cơ ngập với các yếu tố khí tượng - thủy văn như lượng mưa, chiều cao triều, độ ẩm đất, nhiệt độ và độ ẩm không khí. Trên phương diện phương pháp, đối tượng nghiên cứu còn bao gồm các thuật toán phân loại học máy và cáckỹ thuật xử lý dữ liệu mất cân bằng như SMOTE. Bên cạnh đó, đề tài cũng quan tâm đếnkhả năng tích hợp mô hình dự báo vào một hệ thống dashboard trực quan hóa và cảnh báosớm phục vụ người dùng cuối
