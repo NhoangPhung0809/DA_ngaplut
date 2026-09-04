@@ -72,6 +72,12 @@ except ImportError:
     CTGAN = None
 
 try:
+    from hyperparameter_tuning import tune_random_forest_gridsearch, tune_xgboost_optuna
+except ImportError:
+    tune_random_forest_gridsearch = None
+    tune_xgboost_optuna = None
+
+try:
     from statsmodels.tsa.arima.model import ARIMA
 except ImportError:
     ARIMA = None
@@ -111,6 +117,8 @@ LATEST_MODELS_DIR = MODELS_DIR / "latest"
 CTGAN_BEFORE_PATH = BASE_DIR / "data" / "data_before_ctgan.csv"
 CTGAN_AFTER_PATH = BASE_DIR / "data" / "data_after_ctgan.csv"
 CTGAN_DISTRIBUTION_PATH = BASE_DIR / "data" / "ctgan_class_distribution.json"
+HYPERPARAMETER_TUNING_RESULTS_PATH = BASE_DIR / "data" / "hyperparameter_tuning_results.json"
+HYPERPARAMETER_TUNING_TOP_N_ROWS = 15  # chỉ lưu top N tổ hợp/trial tốt nhất ra JSON, tránh file phình to
 INCREMENTAL_CACHE_DIR = BASE_DIR / "cache"
 INCREMENTAL_CURSOR_PATH = INCREMENTAL_CACHE_DIR / "incremental_cursor.json"
 BEST_XGBOOST_PATH = LATEST_MODELS_DIR / "best_xgboost.json"
@@ -146,6 +154,7 @@ ALL_MODEL_NAMES = [
     "1D-CNN",
     "CNN-LSTM",
     "LSTM + XGBoost Hybrid",
+    "LSTM + GRU + XGBoost Hybrid",
 ]
 SEQUENCE_WINDOW = 7
 CTGAN_MAX_TRAIN_ROWS_PER_CLASS = 5000
@@ -608,6 +617,26 @@ def export_ctgan_comparison_artifacts(
     }
     with CTGAN_DISTRIBUTION_PATH.open("w", encoding="utf-8") as file:
         json.dump(summary_payload, file, indent=2, ensure_ascii=False)
+
+
+def export_hyperparameter_tuning_results(tuning_results: dict) -> None:
+    """
+    Lưu kết quả tinh chỉnh siêu tham số THẬT (Random Forest bằng GridSearchCV, XGBoost bằng Optuna)
+    ra `data/hyperparameter_tuning_results.json` để `app.py` đọc và hiển thị lên Tab 'Tiền xử lý &
+    Huấn luyện' - khối 'Log Tinh chỉnh Siêu tham số' TRƯỚC ĐÂY chỉ là placeholder văn bản, giờ hiển
+    thị đúng kết quả từ lần huấn luyện thật gần nhất, không phải demo/mock data.
+
+    `tuning_results` có dạng {model_name: {"best_params":..., "best_score":..., "score_label":...,
+    "trials": [...]}} - xem 2 điểm gọi hàm này trong `train_and_evaluate_models()` để biết cấu trúc
+    cụ thể của từng model (GridSearchCV trả `cv_results_`, Optuna trả `trials_dataframe()`).
+    """
+    HYPERPARAMETER_TUNING_RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "results": tuning_results,
+    }
+    with HYPERPARAMETER_TUNING_RESULTS_PATH.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2, ensure_ascii=False, default=str)
 
 
 def resolve_balancing_method(balancing_method: str = "auto") -> str:
@@ -1732,6 +1761,109 @@ def train_lstm_xgboost_hybrid_model(
         clear_tensorflow_session()
 
 
+def train_lstm_gru_xgboost_hybrid_model(
+    model_name: str, daily_df: pd.DataFrame
+) -> tuple[dict, object, object, XGBClassifier, StandardScaler, np.ndarray, np.ndarray | None]:
+    """
+    Huấn luyện hybrid 3 thành phần: LSTM encoder + GRU encoder (huấn luyện SONG SONG, ĐỘC LẬP nhau
+    trên CÙNG 1 tập cửa sổ 7 ngày) + XGBoost classifier học trên embedding NỐI (concatenate) của cả 2.
+
+    ----------------------------------------------------------------------------------------------
+    TẠI SAO GHÉP 3 MÔ HÌNH THAY VÌ CHỈ 2 (LSTM + XGBoost) NHƯ HYBRID CŨ?
+    ----------------------------------------------------------------------------------------------
+    LSTM và GRU là 2 kiến trúc RNN có cơ chế cổng (gate) khác nhau (LSTM: forget/input/output gate
+    riêng biệt; GRU: gộp lại thành 1 update gate) - dù cùng học trên 1 cửa sổ dữ liệu, chúng có xu
+    hướng học được các ĐẶC TRƯNG BỔ SUNG (complementary features) hơi khác nhau, không hoàn toàn
+    trùng lặp. Nối 2 embedding (16 chiều mỗi nhánh -> 32 chiều tổng) trước khi đưa vào XGBoost cho
+    phép classifier tận dụng CẢ 2 góc nhìn thay vì chỉ 1, tương tự nguyên lý ensemble/stacking trong
+    học máy - đổi lại chi phí huấn luyện cao hơn (phải huấn luyện 2 mạng RNN thay vì 1).
+
+    QUAN TRỌNG: LSTM encoder và GRU encoder mỗi mạng vẫn có ĐẦU RA PHÂN LOẠI RIÊNG (softmax) khi
+    huấn luyện (dùng `build_lstm_classifier`/`build_gru_classifier` y hệt bản độc lập) - đầu phân
+    loại đó CHỈ dùng để huấn luyện encoder học được biểu diễn tốt (qua cross-entropy loss), sau đó bị
+    BỎ ĐI, chỉ giữ lại lớp `dense_features` (embedding) làm đầu vào cho XGBoost - đúng kỹ thuật
+    "encoder pretraining" phổ biến khi kết hợp Deep Learning với Gradient Boosting.
+    """
+    try:
+        X_train_seq, y_train_seq, X_test_seq, y_test_seq, seq_scaler = build_sequence_datasets(daily_df)
+        callbacks = [EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)]
+        class_weights = build_class_weight_mapping(y_train_seq)
+        input_shape = (X_train_seq.shape[1], X_train_seq.shape[2])
+
+        lstm_model = build_lstm_classifier(input_shape)
+        lstm_model.fit(
+            X_train_seq, y_train_seq, validation_split=0.2, epochs=20, batch_size=32,
+            callbacks=callbacks, verbose=0, class_weight=class_weights,
+        )
+        lstm_feature_extractor = Model(
+            inputs=lstm_model.input, outputs=lstm_model.get_layer("dense_features").output,
+        )
+
+        gru_model = build_gru_classifier(input_shape)
+        gru_model.fit(
+            X_train_seq, y_train_seq, validation_split=0.2, epochs=20, batch_size=32,
+            # `callbacks` (EarlyStopping) là stateful (theo dõi best_val_loss RIÊNG cho từng lần
+            # `.fit()`) nên tái sử dụng cùng list object giữa 2 lần `.fit()` liên tiếp (LSTM rồi GRU)
+            # vẫn an toàn - Keras tự reset trạng thái callback ở đầu mỗi lần `.fit()` mới.
+            callbacks=callbacks, verbose=0, class_weight=class_weights,
+        )
+        gru_feature_extractor = Model(
+            inputs=gru_model.input, outputs=gru_model.get_layer("dense_features").output,
+        )
+
+        train_lstm_embeddings = lstm_feature_extractor.predict(X_train_seq, verbose=0)
+        test_lstm_embeddings = lstm_feature_extractor.predict(X_test_seq, verbose=0)
+        train_gru_embeddings = gru_feature_extractor.predict(X_train_seq, verbose=0)
+        test_gru_embeddings = gru_feature_extractor.predict(X_test_seq, verbose=0)
+
+        # NỐI (concatenate) 2 embedding theo chiều đặc trưng (axis=1): (n_samples, 16) + (n_samples, 16)
+        # -> (n_samples, 32) - XGBoost coi 32 chiều này như 32 feature số bình thường, không cần biết
+        # nguồn gốc từ 2 mạng khác nhau.
+        train_combined_embeddings = np.concatenate([train_lstm_embeddings, train_gru_embeddings], axis=1)
+        test_combined_embeddings = np.concatenate([test_lstm_embeddings, test_gru_embeddings], axis=1)
+
+        hybrid_classifier = XGBClassifier(
+            objective="multi:softprob",
+            num_class=3,
+            n_estimators=200,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            random_state=42,
+            eval_metric="mlogloss",
+            n_jobs=-1,
+        )
+        hybrid_classifier.fit(train_combined_embeddings, y_train_seq)
+        hybrid_predictions = hybrid_classifier.predict(test_combined_embeddings)
+        metrics = evaluate_prediction_arrays(
+            model_name=model_name,
+            y_true=y_test_seq,
+            y_pred=hybrid_predictions,
+            category="Hybrid",
+            deployment_compatible=False,
+            evaluation_scope="daily_sequence",
+        )
+        try:
+            hybrid_proba = hybrid_classifier.predict_proba(test_combined_embeddings)
+            metrics["roc_auc_ovr_macro"] = safe_compute_roc_auc_ovr_macro(y_test_seq, hybrid_proba)
+        except Exception:
+            hybrid_proba = None
+            metrics["roc_auc_ovr_macro"] = None
+
+        return (
+            metrics,
+            lstm_feature_extractor,
+            gru_feature_extractor,
+            hybrid_classifier,
+            seq_scaler,
+            np.asarray(y_test_seq, dtype=int),
+            hybrid_proba,
+        )
+    finally:
+        clear_tensorflow_session()
+
+
 def build_model_registry() -> dict:
     """Khai báo các mô hình đại diện theo từng nhóm phương pháp."""
     registry = {
@@ -1869,6 +2001,12 @@ def build_model_registry() -> dict:
             "category": "Hybrid",
             "deployment_compatible": False,
         }
+        if GRU is not None:
+            registry["LSTM + GRU + XGBoost Hybrid"] = {
+                "kind": "lstm_gru_xgboost_hybrid",
+                "category": "Hybrid",
+                "deployment_compatible": False,
+            }
 
     return registry
 
@@ -1898,6 +2036,10 @@ def train_and_evaluate_models(
     trained_models = {}
     evaluation_results = {}
     roc_cache: dict[str, dict[str, np.ndarray]] = {}
+    # Kết quả tinh chỉnh siêu tham số THẬT (GridSearchCV cho Random Forest, Optuna cho XGBoost) -
+    # export ra JSON ngay sau mỗi lần tune xong (không đợi hết cả 16 model) để nếu model sau đó lỗi/
+    # crash, kết quả tuning đã tính vẫn không bị mất - xem `export_hyperparameter_tuning_results()`.
+    tuning_results: dict[str, dict] = {}
 
     print(f"\n=== TRAINING {len(selected_models)} SELECTED MODELS ACROSS MULTIPLE CATEGORIES ===")
     for index, (model_name, model_config) in enumerate(selected_models.items(), start=1):
@@ -1908,6 +2050,63 @@ def train_and_evaluate_models(
 
         if model_kind == "tabular_classifier":
             model = model_config["model"]
+
+            # ---- TINH CHỈNH SIÊU THAM SỐ THẬT (thay vì tham số cố định viết tay trong registry) ----
+            # Chỉ áp dụng cho Random Forest (GridSearchCV) và XGBoost (Optuna) - đúng lý do đã giải
+            # thích trong `hyperparameter_tuning.py`: không gian tham số của Random Forest nhỏ/rời rạc
+            # nên vét cạn được, còn XGBoost lớn/liên tục nên cần Bayesian Optimization. Nếu
+            # `hyperparameter_tuning.py` import lỗi (thiếu optuna/torch) thì rơi về tham số cố định cũ
+            # như trước - KHÔNG làm crash toàn bộ pipeline chỉ vì thiếu 1 dependency tuỳ chọn.
+            if model_name == "Random Forest" and tune_random_forest_gridsearch is not None:
+                print("  -> Tinh chỉnh Random Forest bằng GridSearchCV (48 tổ hợp, cv=3)...")
+                grid_result = tune_random_forest_gridsearch(X_train_balanced, y_train_balanced, cv=3)
+                model = RandomForestClassifier(
+                    **grid_result["best_params"], random_state=42, n_jobs=-1,
+                    class_weight="balanced_subsample",
+                )
+                top_trials_df = (
+                    grid_result["cv_results"][["params", "mean_test_score", "std_test_score", "rank_test_score"]]
+                    .sort_values("rank_test_score")
+                    .head(HYPERPARAMETER_TUNING_TOP_N_ROWS)
+                )
+                tuning_results["Random Forest"] = {
+                    "method": "GridSearchCV",
+                    "best_params": grid_result["best_params"],
+                    "best_score": grid_result["best_cv_f1_macro"],
+                    "score_label": "CV F1-Macro (trung bình 3-fold)",
+                    "trials": top_trials_df.to_dict(orient="records"),
+                }
+                export_hyperparameter_tuning_results(tuning_results)
+                print(f"     Best params: {grid_result['best_params']} | CV F1-Macro={grid_result['best_cv_f1_macro']:.4f}")
+            elif model_name == "XGBoost" and tune_xgboost_optuna is not None:
+                print("  -> Tinh chỉnh XGBoost bằng Optuna (30 trial, TPE)...")
+                # Tách riêng 15% làm tập validation CHỈ để chọn siêu tham số - model CUỐI CÙNG vẫn được
+                # huấn luyện lại trên TOÀN BỘ X_train_balanced (xem `model.fit()` bên dưới, dùng chung
+                # với mọi model tabular khác), không chỉ trên 85% đã tune.
+                X_tune_train, X_tune_valid, y_tune_train, y_tune_valid = train_test_split(
+                    X_train_balanced, y_train_balanced, test_size=0.15, random_state=42, shuffle=True,
+                )
+                optuna_result = tune_xgboost_optuna(
+                    X_tune_train, y_tune_train, X_tune_valid, y_tune_valid, n_trials=30,
+                )
+                model = XGBClassifier(
+                    **optuna_result["best_params"], random_state=42, eval_metric="mlogloss", n_jobs=-1,
+                )
+                trials_df = optuna_result["study"].trials_dataframe()
+                sort_column = "value" if "value" in trials_df.columns else trials_df.columns[0]
+                top_trials_df = trials_df.sort_values(sort_column, ascending=False).head(
+                    HYPERPARAMETER_TUNING_TOP_N_ROWS
+                )
+                tuning_results["XGBoost"] = {
+                    "method": "Optuna (TPE)",
+                    "best_params": optuna_result["best_params"],
+                    "best_score": optuna_result["best_f1_macro"],
+                    "score_label": "Validation F1-Macro (15% tách riêng để tune)",
+                    "trials": top_trials_df.to_dict(orient="records"),
+                }
+                export_hyperparameter_tuning_results(tuning_results)
+                print(f"     Best params: {optuna_result['best_params']} | Val F1-Macro={optuna_result['best_f1_macro']:.4f}")
+
             model.fit(X_train_balanced, y_train_balanced)
             trained_models[model_name] = model
             predictions = model.predict(X_test_scaled)
@@ -2001,6 +2200,28 @@ def train_and_evaluate_models(
             }
             if y_proba_seq is not None:
                 roc_cache[model_name] = {"y_true": y_true_seq, "y_proba": np.asarray(y_proba_seq, dtype=float)}
+        elif model_kind == "lstm_gru_xgboost_hybrid":
+            (
+                metrics,
+                lstm_feature_extractor,
+                gru_feature_extractor,
+                hybrid_classifier,
+                hybrid_seq_scaler,
+                y_true_seq,
+                y_proba_seq,
+            ) = train_lstm_gru_xgboost_hybrid_model(model_name, daily_df)
+            # Hybrid 3 thành phần (LSTM + GRU + XGBoost) nên cấu trúc dict lưu trong `trained_models`
+            # dùng 2 key feature-extractor RIÊNG BIỆT ("lstm_feature_extractor"/"gru_feature_extractor")
+            # để phân biệt với hybrid 2 thành phần cũ (chỉ có 1 key "feature_extractor" duy nhất) -
+            # xem `classify_model_deployment_type()` để biết cách 2 dạng dict này được nhận diện.
+            trained_models[model_name] = {
+                "lstm_feature_extractor": lstm_feature_extractor,
+                "gru_feature_extractor": gru_feature_extractor,
+                "classifier": hybrid_classifier,
+                "seq_scaler": hybrid_seq_scaler,
+            }
+            if y_proba_seq is not None:
+                roc_cache[model_name] = {"y_true": y_true_seq, "y_proba": np.asarray(y_proba_seq, dtype=float)}
         else:
             raise ValueError(f"Unsupported model kind: {model_kind}")
 
@@ -2065,12 +2286,20 @@ def classify_model_deployment_type(model_name: str, evaluation_results: dict, tr
     (đó chính là nguồn gốc bug cũ: cờ tĩnh này được set cứng `False` cho mọi Deep Learning/Hybrid,
     bất kể model thực tế mạnh hay yếu, khiến các model tốt nhất leaderboard không bao giờ được chọn).
 
-    Trả về một trong: "sklearn_tabular" | "keras_sequence" | "hybrid_lstm_xgboost" | "unsupported".
-    "unsupported" dùng cho các model không có MỘT object duy nhất để lưu triển khai (ví dụ ARIMA/
-    SARIMA - được fit RIÊNG cho từng địa phương/từng fold trong vòng lặp, không tồn tại "một model"
-    đại diện chung để đóng gói - đây là giới hạn KIẾN TRÚC thật sự, khác với bug lọc nhầm ở trên).
+    Trả về một trong: "sklearn_tabular" | "keras_sequence" | "hybrid_lstm_xgboost" |
+    "hybrid_lstm_gru_xgboost" | "unsupported". "unsupported" dùng cho các model không có MỘT object
+    duy nhất để lưu triển khai (ví dụ ARIMA/SARIMA - được fit RIÊNG cho từng địa phương/từng fold
+    trong vòng lặp, không tồn tại "một model" đại diện chung để đóng gói - đây là giới hạn KIẾN TRÚC
+    thật sự, khác với bug lọc nhầm ở trên).
     """
     candidate = trained_models.get(model_name)
+    if (
+        isinstance(candidate, dict)
+        and "lstm_feature_extractor" in candidate
+        and "gru_feature_extractor" in candidate
+        and "classifier" in candidate
+    ):
+        return "hybrid_lstm_gru_xgboost"
     if isinstance(candidate, dict) and "feature_extractor" in candidate and "classifier" in candidate:
         return "hybrid_lstm_xgboost"
     if isinstance(candidate, dict) and "model" in candidate and "seq_scaler" in candidate:
@@ -2193,6 +2422,25 @@ def export_deployment_artifacts(
             f"{classifier_path.name} (Keras + XGBoost native save)"
         )
 
+    elif deployment_type == "hybrid_lstm_gru_xgboost":
+        bundle = trained_models[best_model_name]
+        lstm_feature_extractor_path = run_dir / "best_model_lstm_feature_extractor.keras"
+        gru_feature_extractor_path = run_dir / "best_model_gru_feature_extractor.keras"
+        classifier_path = run_dir / "best_model_xgb_head.json"
+        scaler_path = run_dir / "scaler.pkl"
+        bundle["lstm_feature_extractor"].save(str(lstm_feature_extractor_path))
+        bundle["gru_feature_extractor"].save(str(gru_feature_extractor_path))
+        bundle["classifier"].save_model(str(classifier_path))
+        joblib.dump(bundle["seq_scaler"], scaler_path)
+        artifacts["lstm_feature_extractor_path"] = lstm_feature_extractor_path
+        artifacts["gru_feature_extractor_path"] = gru_feature_extractor_path
+        artifacts["classifier_path"] = classifier_path
+        artifacts["scaler_path"] = scaler_path
+        print(
+            f"[Universal Save] hybrid_lstm_gru_xgboost -> {lstm_feature_extractor_path.name} + "
+            f"{gru_feature_extractor_path.name} + {classifier_path.name} (Keras x2 + XGBoost native save)"
+        )
+
     else:
         raise ValueError(f"Không hỗ trợ export cho deployment_type='{deployment_type}'.")
 
@@ -2221,7 +2469,11 @@ def save_deployment_config(
         "category": metrics.get("category"),
         "f1_macro": metrics.get("f1_macro"),
         "accuracy": metrics.get("accuracy"),
-        "window_size": SEQUENCE_WINDOW if deployment_type in {"keras_sequence", "hybrid_lstm_xgboost"} else None,
+        "window_size": (
+            SEQUENCE_WINDOW
+            if deployment_type in {"keras_sequence", "hybrid_lstm_xgboost", "hybrid_lstm_gru_xgboost"}
+            else None
+        ),
         "feature_cols": FEATURE_COLS,
         "class_labels": CLASS_LABELS,
         "class_name_map": CLASS_NAME_MAP,

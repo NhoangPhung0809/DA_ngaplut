@@ -72,6 +72,7 @@ EXPECTED_HISTORICAL_FILES = {
 CTGAN_BEFORE_PATH = BASE_DIR / "data" / "data_before_ctgan.csv"
 CTGAN_AFTER_PATH = BASE_DIR / "data" / "data_after_ctgan.csv"
 CTGAN_DISTRIBUTION_PATH = BASE_DIR / "data" / "ctgan_class_distribution.json"
+HYPERPARAMETER_TUNING_RESULTS_PATH = BASE_DIR / "data" / "hyperparameter_tuning_results.json"
 CACHE_DIR = BASE_DIR / "cache"
 TRAINING_WORKER_PATH = BASE_DIR / "training_worker.py"
 TRAINING_STATUS_PATH = CACHE_DIR / "training_status.json"
@@ -101,7 +102,7 @@ TRAINING_LOG_PATH = CACHE_DIR / "training_output.log"
 def get_api_secret(secret_key: str, env_var_name: str) -> str | None:
     """
     Đọc 1 API key theo thứ tự ưu tiên:
-    1. Key người dùng tự nhập qua khung "🔐 Cấu hình API nâng cao" (chỉ lưu trong `st.session_state`
+    1. Key người dùng tự nhập qua khung "Cấu hình API nâng cao" (chỉ lưu trong `st.session_state`
        của phiên trình duyệt hiện tại - xem `render_admin_api_key_panel()`) - ưu tiên CAO NHẤT để admin
        có thể tạm thời ghi đè/thử key mới mà KHÔNG cần sửa `.env`/`secrets.toml` rồi redeploy lại server.
     2. `st.secrets` (file `.streamlit/secrets.toml` cấu hình sẵn trên server).
@@ -126,7 +127,7 @@ TOMTOM_API_KEY = get_api_secret("TOMTOM_KEY", "TOMTOM_API_KEY")
 OPENWEATHER_API_KEY = get_api_secret("OPENWEATHER_KEY", "OPENWEATHER_API_KEY")
 TOMTOM_ROUTING_BASE_URL = "https://api.tomtom.com/routing/1/calculateRoute"
 
-# Mật khẩu bảo vệ khung "🔐 Cấu hình API nâng cao" (xem `render_admin_api_key_panel()`) - đọc theo
+# Mật khẩu bảo vệ khung "Cấu hình API nâng cao" (xem `render_admin_api_key_panel()`) - đọc theo
 # đúng cơ chế `get_api_secret()` như mọi key khác (secrets.toml -> .env). Nếu CHƯA cấu hình mật khẩu
 # này trên server, khung nhập API key sẽ TỰ ĐỘNG khoá hoàn toàn (không có mật khẩu mặc định "rỗng cho
 # qua") - tránh trường hợp public app bị người lạ vào nhập/ghi đè API key tuỳ ý.
@@ -230,7 +231,7 @@ def persist_key_to_secrets_toml(secret_key: str, value: str) -> None:
 
 def render_admin_api_key_panel() -> None:
     """
-    Khung "🔐 Cấu hình API nâng cao" trong sidebar - cho phép ADMIN (người biết mật khẩu, không phải
+    Khung "Cấu hình API nâng cao" trong sidebar - cho phép ADMIN (người biết mật khẩu, không phải
     khách vãng lai) nhập/ghi đè API key của từng nhà cung cấp NGAY TRÊN WEB, không cần sửa `.env`/
     `secrets.toml` rồi khởi động lại server.
 
@@ -241,7 +242,7 @@ def render_admin_api_key_panel() -> None:
       mặc định) - tránh việc app public bị người lạ vào ghi đè/dò key của người khác.
     - Ô nhập mật khẩu và ô nhập API key đều dùng `type="password"` để không hiện rõ trên màn hình.
     """
-    with st.sidebar.expander("🔐 Cấu hình API nâng cao (Admin)", expanded=False):
+    with st.sidebar.expander("Cấu hình API nâng cao (Admin)", expanded=False):
         if not ADMIN_CONFIG_PASSWORD:
             st.info(
                 "Tính năng này đang KHOÁ vì server chưa cấu hình `ADMIN_PASSWORD` (trong "
@@ -284,7 +285,7 @@ def render_admin_api_key_panel() -> None:
             ),
         )
 
-        if st.button("💾 Lưu API key", key="admin_panel_save_key_button", use_container_width=True):
+        if st.button("Lưu API key", key="admin_panel_save_key_button", use_container_width=True):
             if new_key_value:
                 st.session_state.setdefault("user_api_keys", {})[selected_provider["secret_key"]] = new_key_value
                 if session_only:
@@ -321,7 +322,7 @@ def render_admin_api_key_panel() -> None:
                     st.rerun()
 
         st.markdown("---")
-        if st.button("🔒 Khoá lại panel", key="admin_panel_lock_button", use_container_width=True):
+        if st.button("Khoá lại panel", key="admin_panel_lock_button", use_container_width=True):
             st.session_state["admin_panel_unlocked"] = False
             st.rerun()
 
@@ -366,10 +367,11 @@ FEATURE_COLS_FOR_INFERENCE = _SHARED_FEATURE_COLS
 # `analyze_and_train.py`, nếu không model sẽ nhận sai shape đầu vào mà không báo lỗi rõ ràng.
 DEFAULT_SEQUENCE_WINDOW_SIZE = 7
 
-# Số ngày dự báo (Ngày T + 3 ngày tới) - DÙNG CHUNG cho `predict_4_days_forecast()` và
-# `predict_days_ahead_forecast_sequence()`, cùng với nhãn hiển thị tương ứng cho từng ngày.
-FORECAST_DAYS_AHEAD = 4
-DAY_LABELS = ["T (Hôm nay)", "T+1", "T+2", "T+3"]
+# Số ngày dự báo (Ngày T + 13 ngày tới = 14 ngày) - DÙNG CHUNG cho `predict_4_days_forecast()` và
+# `predict_days_ahead_forecast_sequence()`, cùng với nhãn hiển thị tương ứng cho từng ngày. Open-Meteo
+# Forecast API hỗ trợ tối đa 16 ngày (forecast_days<=16) nên 14 ngày vẫn nằm trong giới hạn miễn phí.
+FORECAST_DAYS_AHEAD = 14
+DAY_LABELS = ["T (Hôm nay)"] + [f"T+{offset}" for offset in range(1, FORECAST_DAYS_AHEAD)]
 
 # Khóa (lock) BẢO VỆ lệnh gọi `.predict()` của model Keras (`keras_sequence`/`hybrid_lstm_xgboost`)
 # khi dự báo 5 địa phương chạy SONG SONG bằng ThreadPoolExecutor (xem `_compute_forecast_4day_result()`
@@ -658,12 +660,12 @@ def initialize_system():
     Khởi tạo hệ thống đúng một lần khi app bắt đầu:
     - Tự tải dữ liệu lịch sử nếu thiếu (gọi lại `fetch_data.py`)
     - KHÔNG tự huấn luyện trong Streamlit nếu thiếu artifact - việc train phải được kích hoạt tường
-      minh từ Tab "⚙️ Tiền xử lý & Huấn luyện" để tránh block giao diện.
+      minh từ Tab "Tiền xử lý & Huấn luyện" để tránh block giao diện.
     """
     ensure_latest_models_dir()
 
     if historical_data_missing():
-        with st.spinner("📥 Đang tải dữ liệu lịch sử 10 năm..."):
+        with st.spinner("Đang tải dữ liệu lịch sử 10 năm..."):
             fetch_module = dynamically_import_module("fetch_data_runtime", FETCH_SCRIPT_PATH)
             if not hasattr(fetch_module, "main"):
                 raise AttributeError("`fetch_data.py` không có hàm `main()` để thực thi.")
@@ -707,7 +709,7 @@ def load_deployment_model(deployment_config: dict, latest_dir: str | Path) -> di
     TẠI SAO CẦN HÀM NÀY (thay vì luôn `joblib.load("best_model.pkl")` như code cũ)?
     ----------------------------------------------------------------------------------------------
     Sau khi sửa bug chọn best model trong `analyze_and_train.py`, best model của một lần huấn luyện
-    có thể là 1 trong 3 dạng hoàn toàn khác nhau về cách lưu/nạp:
+    có thể là 1 trong 4 dạng hoàn toàn khác nhau về cách lưu/nạp:
       - "sklearn_tabular": model + scaler đều là object Python thuần -> nạp bằng `joblib.load()`.
       - "keras_sequence" (GRU/LSTM/1D-CNN/CNN-LSTM): model được lưu bằng định dạng Keras gốc
         (`.keras`), BẮT BUỘC nạp lại bằng `tensorflow.keras.models.load_model()` - `joblib.load()`
@@ -715,13 +717,18 @@ def load_deployment_model(deployment_config: dict, latest_dir: str | Path) -> di
       - "hybrid_lstm_xgboost": có 2 thành phần lưu riêng - LSTM feature-extractor (`.keras`, nạp
         bằng `load_model()`) và đầu phân loại XGBoost (`.json`, nạp bằng `XGBClassifier().load_model()`
         - định dạng native của XGBoost, KHÔNG phải joblib/pickle).
+      - "hybrid_lstm_gru_xgboost": 3 thành phần lưu riêng - LSTM feature-extractor VÀ GRU
+        feature-extractor (mỗi cái 1 file `.keras` riêng) + đầu phân loại XGBoost chung (`.json`) học
+        trên embedding NỐI (concatenate) của cả 2 nhánh.
 
     Hàm này đọc `model_type` trong `deployment_config.json` và tự động dùng ĐÚNG loader tương ứng,
     để phần code gọi (ví dụ nút "Kiểm tra nạp model" ở Tab Đánh giá, hoặc sau này là tab suy luận
     thời gian thực) không cần biết trước hôm nay best model là loại gì.
 
     Trả về dict với khóa `model_type` luôn có mặt, cộng thêm các khóa object tương ứng
-    (`model`+`scaler` cho 2 loại đầu, hoặc `feature_extractor`+`classifier`+`scaler` cho hybrid).
+    (`model`+`scaler` cho 2 loại đầu, `feature_extractor`+`classifier`+`scaler` cho hybrid 2 thành
+    phần, hoặc `lstm_feature_extractor`+`gru_feature_extractor`+`classifier`+`scaler` cho hybrid 3
+    thành phần).
     """
     latest_dir = Path(latest_dir)
     model_type = deployment_config.get("model_type")
@@ -773,6 +780,30 @@ def load_deployment_model(deployment_config: dict, latest_dir: str | Path) -> di
         return {
             "model_type": model_type,
             "feature_extractor": feature_extractor,
+            "classifier": classifier,
+            "scaler": scaler,
+            "window_size": deployment_config.get("window_size"),
+        }
+
+    if model_type == "hybrid_lstm_gru_xgboost":
+        try:
+            from tensorflow.keras.models import load_model as keras_load_model
+        except ImportError as exc:
+            raise ImportError(
+                "Best model hiện tại là Hybrid LSTM+GRU+XGBoost nhưng môi trường đang chạy app.py "
+                "chưa cài TensorFlow. Cài bằng: pip install tensorflow"
+            ) from exc
+        from xgboost import XGBClassifier
+
+        lstm_feature_extractor = keras_load_model(str(latest_dir / artifacts["lstm_feature_extractor_path"]))
+        gru_feature_extractor = keras_load_model(str(latest_dir / artifacts["gru_feature_extractor_path"]))
+        classifier = XGBClassifier()
+        classifier.load_model(str(latest_dir / artifacts["classifier_path"]))
+        scaler = joblib.load(latest_dir / artifacts["scaler_path"])
+        return {
+            "model_type": model_type,
+            "lstm_feature_extractor": lstm_feature_extractor,
+            "gru_feature_extractor": gru_feature_extractor,
             "classifier": classifier,
             "scaler": scaler,
             "window_size": deployment_config.get("window_size"),
@@ -905,7 +936,7 @@ def render_styled_table(styler, height: int = 360):
 
 
 # ==================================================================================================
-# TAB 1 - 📊 KHÁM PHÁ DỮ LIỆU (EDA)
+# TAB 1 - KHÁM PHÁ DỮ LIỆU (EDA)
 # ==================================================================================================
 @st.cache_data(show_spinner=False)
 def load_eda_sample_dataframe() -> pd.DataFrame:
@@ -1098,7 +1129,7 @@ def render_eda_tab() -> None:
     phối/tương quan, và cuối cùng là khối xử lý giá trị thiếu/ngoại lai - mỗi khối đặt trong
     `st.expander` để trang không bị dồn cục, người xem chỉ mở phần mình cần.
     """
-    st.subheader("📊 Khám phá Dữ liệu (EDA)")
+    st.subheader("Khám phá Dữ liệu (EDA)")
     st.caption(
         "Bước 1/4 của pipeline: hiểu dữ liệu trước khi làm sạch và huấn luyện. Các biểu đồ tĩnh bên dưới "
         "được sinh sẵn bởi `eda_analysis.py` (chạy `python eda_analysis.py` để làm mới sau khi có dữ liệu mới)."
@@ -1110,7 +1141,7 @@ def render_eda_tab() -> None:
     col_raw, col_stats = st.columns(2)
 
     with col_raw:
-        with st.expander("🔎 Dữ liệu thô (Raw Data)", expanded=True):
+        with st.expander("Dữ liệu thô (Raw Data)", expanded=True):
             # TODO: nếu bạn có logic đọc dữ liệu thô khác (ví dụ đọc trực tiếp từ 1 file cụ thể),
             # hãy thay `eda_df` bên dưới bằng DataFrame của bạn.
             if eda_df.empty:
@@ -1124,7 +1155,7 @@ def render_eda_tab() -> None:
                 )
 
     with col_stats:
-        with st.expander("📐 Thống kê mô tả (Descriptive Statistics)", expanded=True):
+        with st.expander("Thống kê mô tả (Descriptive Statistics)", expanded=True):
             # TODO: dán code `df.describe()` / thống kê chi tiết hơn của bạn (ví dụ describe theo
             # từng địa phương, theo từng lớp nguy cơ ngập...) vào đây.
             if eda_df.empty:
@@ -1142,13 +1173,13 @@ def render_eda_tab() -> None:
 
     # ---- Hàng 1.5: biểu đồ xu hướng mưa & tỷ lệ ngập theo tháng - TƯƠNG TÁC (thay cho ảnh tĩnh
     # `monthly_trend.png` cũ), cho phép chọn xem từng năm riêng lẻ hoặc gộp toàn bộ như trước ----
-    with st.expander("📊 Xu hướng mưa & tỷ lệ ngập theo tháng (biểu đồ tương tác)", expanded=True):
+    with st.expander("Xu hướng mưa & tỷ lệ ngập theo tháng (biểu đồ tương tác)", expanded=True):
         render_interactive_monthly_trend_chart(eda_df)
 
     st.markdown("---")
 
     # ---- Hàng 2: biểu đồ phân phối / tương quan (ảnh tĩnh do eda_analysis.py sinh sẵn) ----
-    with st.expander("📈 Phân phối dữ liệu & Ma trận tương quan (Distribution / Heatmap)", expanded=True):
+    with st.expander("Phân phối dữ liệu & Ma trận tương quan (Distribution / Heatmap)", expanded=True):
         # TODO: đây là placeholder hiển thị ẢNH TĨNH từ `eda_analysis.py` để tránh vẽ lại biểu đồ nặng
         # mỗi lần Streamlit rerun. Nếu muốn biểu đồ TƯƠNG TÁC, có thể thay bằng `px.imshow()` (heatmap)
         # hoặc `px.histogram()` (phân phối) ngay trong hàm này.
@@ -1174,7 +1205,7 @@ def render_eda_tab() -> None:
         )
 
     # ---- Hàng 3: xử lý giá trị thiếu / ngoại lai ----
-    with st.expander("🧹 Xử lý giá trị thiếu & ngoại lai (Missing Value / Outlier)", expanded=False):
+    with st.expander("Xử lý giá trị thiếu & ngoại lai (Missing Value / Outlier)", expanded=False):
         if eda_df.empty:
             st.info("Chưa có dữ liệu để kiểm tra.")
         else:
@@ -1208,7 +1239,7 @@ def render_eda_tab() -> None:
 
 
 # ==================================================================================================
-# TAB 2 - ⚙️ TIỀN XỬ LÝ & HUẤN LUYỆN
+# TAB 2 - TIỀN XỬ LÝ & HUẤN LUYỆN
 # ==================================================================================================
 def build_ctgan_distribution_dataframe(section_summary: dict | None) -> pd.DataFrame:
     """Chuyển class distribution JSON sang DataFrame gọn cho UI."""
@@ -1243,7 +1274,7 @@ def _load_ctgan_comparison_artifacts_cached(distribution_file_mtime: float):
     """Đọc dữ liệu export trước/sau CTGAN (do `analyze_and_train.py` xuất ra) để hiển thị nhanh trên
     Streamlit. `distribution_file_mtime` KHÔNG dùng trong thân hàm - chỉ tồn tại để LÀM CACHE KEY, ép
     Streamlit tự đọc lại file mỗi khi `analyze_and_train.py` ghi đè file mới (mtime đổi), thay vì cache
-    mãi mãi kết quả của lần train ĐẦU TIÊN cho tới khi ai đó bấm '🔄 Làm mới toàn bộ cache' thủ công."""
+    mãi mãi kết quả của lần train ĐẦU TIÊN cho tới khi ai đó bấm 'Làm mới toàn bộ cache' thủ công."""
     with CTGAN_DISTRIBUTION_PATH.open("r", encoding="utf-8") as file:
         summary = json.load(file)
 
@@ -1336,6 +1367,63 @@ def render_ctgan_section() -> None:
         )
 
 
+@st.cache_data(show_spinner=False)
+def _load_hyperparameter_tuning_results_cached(results_file_mtime: float) -> dict:
+    """Đọc `data/hyperparameter_tuning_results.json` (do `analyze_and_train.py` xuất ra sau khi chạy
+    GridSearchCV/Optuna thật). `results_file_mtime` chỉ dùng làm cache key - xem
+    `_load_ctgan_comparison_artifacts_cached()` để biết lý do (tự làm mới khi file đổi, không cần bấm
+    nút xoá cache thủ công)."""
+    with HYPERPARAMETER_TUNING_RESULTS_PATH.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def load_hyperparameter_tuning_results() -> dict | None:
+    if not HYPERPARAMETER_TUNING_RESULTS_PATH.exists():
+        return None
+    return _load_hyperparameter_tuning_results_cached(HYPERPARAMETER_TUNING_RESULTS_PATH.stat().st_mtime)
+
+
+def render_hyperparameter_tuning_section() -> None:
+    """
+    Khối 'Log Tinh chỉnh Siêu tham số' bên trong Tab 2 - hiển thị kết quả THẬT của GridSearchCV (Random
+    Forest) và Optuna (XGBoost) từ lần chạy `analyze_and_train.py` gần nhất, đọc từ
+    `data/hyperparameter_tuning_results.json` (xem `train_and_evaluate_models()` trong
+    `analyze_and_train.py` - đây KHÔNG phải demo/mock data như `hyperparameter_tuning.py` chạy độc
+    lập, mà là kết quả tune trực tiếp trên dữ liệu train thật của lần huấn luyện đó).
+    """
+    payload = load_hyperparameter_tuning_results()
+    if payload is None:
+        st.info(
+            "Chưa có file `hyperparameter_tuning_results.json`. Hãy chạy `python analyze_and_train.py` "
+            "(hoặc bấm 'Bắt đầu Huấn luyện Nền' bên dưới) - Random Forest sẽ tự tinh chỉnh bằng "
+            "GridSearchCV, XGBoost bằng Optuna, kết quả thật sẽ hiện ở đây sau khi huấn luyện xong."
+        )
+        return
+
+    results = payload.get("results", {})
+    if not results:
+        st.info("File kết quả tồn tại nhưng chưa có model nào được tinh chỉnh.")
+        return
+
+    st.caption(f"Kết quả tinh chỉnh gần nhất: {payload.get('generated_at', 'không rõ thời điểm')}.")
+
+    for model_name, tuning_result in results.items():
+        st.markdown(f"**{model_name} - {tuning_result.get('method', 'Unknown')}**")
+        best_score = tuning_result.get("best_score")
+        score_label = tuning_result.get("score_label", "Điểm tốt nhất")
+        metric_col, params_col = st.columns([1, 2])
+        with metric_col:
+            st.metric(score_label, f"{best_score:.4f}" if best_score is not None else "N/A")
+        with params_col:
+            st.json(tuning_result.get("best_params", {}), expanded=False)
+
+        trials = tuning_result.get("trials", [])
+        if trials:
+            trials_df = pd.DataFrame(trials)
+            st.dataframe(trials_df, use_container_width=True, hide_index=True, height=min(60 + 35 * len(trials_df), 320))
+        st.markdown("---")
+
+
 def render_training_controls_panel() -> None:
     """
     Cụm điều khiển MLOps: chọn mô hình, chạy huấn luyện/tinh chỉnh NỀN (background) và xem log.
@@ -1361,7 +1449,7 @@ def render_training_controls_panel() -> None:
             help="'auto' ưu tiên CTGAN, tự fallback sang SMOTE nếu thiếu thư viện hoặc lỗi khi chạy.",
         )
         if st.button(
-            "⚠️ Bắt đầu Huấn luyện Nền",
+            "Bắt đầu Huấn luyện Nền",
             key="start_training_button",
             use_container_width=True,
             disabled=training_state["status"] in {"starting", "running"},
@@ -1388,7 +1476,7 @@ def render_training_controls_panel() -> None:
             st.success(f"Best model gần nhất: {training_state['best_model_name']}")
         if training_state.get("error"):
             st.error(training_state["error"])
-        if st.button("🔄 Nạp lại artifact mới nhất", key="reload_trained_artifacts_button", use_container_width=True):
+        if st.button("Nạp lại artifact mới nhất", key="reload_trained_artifacts_button", use_container_width=True):
             st.cache_data.clear()
             st.cache_resource.clear()
             st.success("Đã xóa cache - dữ liệu/metrics sẽ được nạp lại ở lần chạy tiếp theo.")
@@ -1428,7 +1516,7 @@ def render_preprocessing_training_tab() -> None:
     Bố cục: 2 cột song song (Dữ liệu đã làm sạch | Chia Train/Test) phía trên, tiếp theo là khối
     Cân bằng dữ liệu (CTGAN) và khối Log Tinh chỉnh siêu tham số - mỗi khối 1 `st.expander`.
     """
-    st.subheader("⚙️ Tiền xử lý & Huấn luyện")
+    st.subheader("Tiền xử lý & Huấn luyện")
     st.caption(
         "Bước 2/4 của pipeline: làm sạch dữ liệu, chia tập train/test đúng đặc thù chuỗi thời gian, "
         "cân bằng lớp thiểu số, và tinh chỉnh siêu tham số (Optuna / GridSearchCV)."
@@ -1437,7 +1525,7 @@ def render_preprocessing_training_tab() -> None:
     col_clean, col_split = st.columns(2)
 
     with col_clean:
-        with st.expander("🧼 Dữ liệu đã làm sạch (Cleaned Data)", expanded=True):
+        with st.expander("Dữ liệu đã làm sạch (Cleaned Data)", expanded=True):
             try:
                 cleaned_df = load_cleaned_training_dataframe()
             except Exception as exc:
@@ -1454,7 +1542,7 @@ def render_preprocessing_training_tab() -> None:
                 )
 
     with col_split:
-        with st.expander("✂️ Chia tập Train / Test (Data Splitting)", expanded=True):
+        with st.expander("Chia tập Train / Test (Data Splitting)", expanded=True):
             st.markdown(
                 "- **Tỷ lệ chia**: 80% Train / 20% Test.\n"
                 "- **Phương pháp**: chia theo MỐC THỜI GIAN (`shuffle=False`) - tập Test luôn nằm SAU "
@@ -1485,30 +1573,24 @@ def render_preprocessing_training_tab() -> None:
 
     st.markdown("---")
 
-    with st.expander("⚖️ Cân bằng dữ liệu (CTGAN Before / After)", expanded=False):
+    with st.expander("Cân bằng dữ liệu (CTGAN Before / After)", expanded=False):
         st.caption(
             "Đọc file export từ `analyze_and_train.py` để so sánh dữ liệu trước/sau khi cân bằng lớp "
             "thiểu số bằng CTGAN (tự fallback sang SMOTE nếu cần)."
         )
         render_ctgan_section()
 
-    with st.expander("🎯 Log Tinh chỉnh Siêu tham số (Optuna / GridSearchCV)", expanded=True):
-        # TODO: dán code hiển thị log/kết quả thật từ Optuna Study hoặc GridSearchCV.cv_results_ vào đây,
-        # ví dụ: st.dataframe(study.trials_dataframe()) hoặc st.dataframe(pd.DataFrame(grid_search.cv_results_)).
-        # Xem file `hyperparameter_tuning.py` (hàm tune_random_forest_gridsearch / tune_xgboost_optuna /
-        # tune_lstm_optuna) để lấy code tuning đầy đủ - GridSearchCV phù hợp cho Random Forest vì không
-        # gian tham số nhỏ, rời rạc; Optuna phù hợp cho XGBoost/LSTM vì không gian tham số lớn, liên tục
-        # và có yếu tố kiến trúc (số lớp/số unit của LSTM) mà GridSearchCV không biểu diễn hiệu quả được.
-        st.info(
-            "Placeholder: dán bảng log/kết quả tuning thật (Optuna `trials_dataframe()` hoặc "
-            "`GridSearchCV.cv_results_`) tại đây. Bên dưới là cụm điều khiển MLOps thật, dùng để "
-            "khởi chạy huấn luyện nền và xem log ngay trong ứng dụng."
+    with st.expander("Log Tinh chỉnh Siêu tham số (Optuna / GridSearchCV)", expanded=True):
+        st.caption(
+            "Random Forest tự tinh chỉnh bằng GridSearchCV, XGBoost bằng Optuna (TPE) - CHẠY THẬT "
+            "trên dữ liệu train của lần huấn luyện gần nhất (`analyze_and_train.py`), không phải demo."
         )
+        render_hyperparameter_tuning_section()
         render_training_controls_panel()
 
 
 # ==================================================================================================
-# TAB 3 - 📈 ĐÁNH GIÁ MÔ HÌNH
+# TAB 3 - ĐÁNH GIÁ MÔ HÌNH
 # ==================================================================================================
 def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) -> None:
     """Hiển thị bảng số liệu, biểu đồ Plotly và ảnh artifact đánh giá mô hình (Model Comparison Metrics)."""
@@ -1650,6 +1732,7 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
         "sklearn_tabular": "Machine Learning (sklearn/XGBoost - joblib)",
         "keras_sequence": "Deep Learning (Keras .keras)",
         "hybrid_lstm_xgboost": "Hybrid LSTM + XGBoost (Keras + XGBoost native)",
+        "hybrid_lstm_gru_xgboost": "Hybrid LSTM + GRU + XGBoost (Keras x2 + XGBoost native)",
     }
     artifact_file_names = ", ".join(
         f"`{name}`" for name in (deployment_config.get("artifacts") or {}).values()
@@ -1665,27 +1748,35 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
     # Nút này giúp xác nhận NGAY TRÊN GIAO DIỆN rằng cơ chế lưu vạn năng ở `analyze_and_train.py` và
     # cơ chế nạp vạn năng ở `app.py` khớp nhau - tức deployment_config.json không chỉ là văn bản mô tả
     # suông mà thực sự dùng để nạp lại được model gốc, sẵn sàng cho bước suy luận sau này.
-    if st.button("🔧 Kiểm tra nạp model triển khai", key="test_load_deployment_model_button"):
+    if st.button("Kiểm tra nạp model triển khai", key="test_load_deployment_model_button"):
         try:
             with st.spinner("Đang nạp model theo deployment_config.json..."):
                 loaded = load_deployment_model(deployment_config, runtime_info["latest_dir"])
             if loaded["model_type"] == "hybrid_lstm_xgboost":
                 st.success(
-                    f"✅ Nạp thành công model_type=`{loaded['model_type']}`: "
+                    f"Nạp thành công model_type=`{loaded['model_type']}`: "
                     f"feature_extractor=`{type(loaded['feature_extractor']).__name__}`, "
+                    f"classifier=`{type(loaded['classifier']).__name__}`, "
+                    f"scaler=`{type(loaded['scaler']).__name__}`."
+                )
+            elif loaded["model_type"] == "hybrid_lstm_gru_xgboost":
+                st.success(
+                    f"Nạp thành công model_type=`{loaded['model_type']}`: "
+                    f"lstm_feature_extractor=`{type(loaded['lstm_feature_extractor']).__name__}`, "
+                    f"gru_feature_extractor=`{type(loaded['gru_feature_extractor']).__name__}`, "
                     f"classifier=`{type(loaded['classifier']).__name__}`, "
                     f"scaler=`{type(loaded['scaler']).__name__}`."
                 )
             else:
                 st.success(
-                    f"✅ Nạp thành công model_type=`{loaded['model_type']}`: "
+                    f"Nạp thành công model_type=`{loaded['model_type']}`: "
                     f"model=`{type(loaded['model']).__name__}`, scaler=`{type(loaded['scaler']).__name__}`."
                 )
         except Exception as exc:
-            st.error(f"❌ Nạp model thất bại: {exc}")
+            st.error(f"Nạp model thất bại: {exc}")
 
     st.markdown("---")
-    st.subheader("📊 Phân tích Đường cong ROC-AUC (One-vs-Rest)")
+    st.subheader("Phân tích Đường cong ROC-AUC (One-vs-Rest)")
     roc_path = Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR))) / "roc_curve_data.json"
     if not roc_path.exists():
         st.info("Chưa có `roc_curve_data.json`. Hãy train lại mô hình để xuất ROC-AUC.")
@@ -1777,22 +1868,22 @@ def render_evaluation_tab() -> None:
     Bố cục: khối so sánh chỉ số (tái sử dụng `render_model_metrics`) rồi đến khối "Kết luận quản trị" -
     phần bắt buộc phải có để nối kết quả kỹ thuật với ý nghĩa thực tiễn cho người ra quyết định.
     """
-    st.subheader("📈 Đánh giá Mô hình")
+    st.subheader("Đánh giá Mô hình")
     st.caption("Bước 3/4 của pipeline: so sánh hiệu năng các mô hình đã huấn luyện và rút ra khuyến nghị quản trị.")
 
     try:
         evaluation_metrics, deployment_config, runtime_info = load_evaluation_artifacts()
     except Exception as exc:
         st.warning(
-            f"❌ Chưa thể nạp evaluation metrics: {exc} "
-            "Hãy khởi chạy huấn luyện ở Tab 2 (⚙️ Tiền xử lý & Huấn luyện) trước."
+            f"Chưa thể nạp evaluation metrics: {exc} "
+            "Hãy khởi chạy huấn luyện ở Tab 2 (Tiền xử lý & Huấn luyện) trước."
         )
         return
 
-    with st.expander("📊 So sánh chỉ số mô hình (F1-Score / Precision / Recall)", expanded=True):
+    with st.expander("So sánh chỉ số mô hình (F1-Score / Precision / Recall)", expanded=True):
         render_model_metrics(evaluation_metrics, deployment_config, runtime_info)
 
-    with st.expander("🏛️ Nhận định & Kết luận quản trị (Managerial Insights)", expanded=True):
+    with st.expander("Nhận định & Kết luận quản trị (Managerial Insights)", expanded=True):
         # TODO: thay nội dung placeholder này bằng nhận định THẬT rút ra từ kết quả mô hình + EDA (Tab 1)
         # của bạn - đây là phần quan trọng nhất khi bảo vệ luận văn vì nối kết quả kỹ thuật với hành động
         # quản trị thực tế, không chỉ dừng lại ở con số.
@@ -1815,7 +1906,7 @@ def render_evaluation_tab() -> None:
 
 
 # ==================================================================================================
-# TAB 4 - 🗺️ BẢN ĐỒ TRÁNH NGẬP (Smart Routing bằng TomTom Routing API)
+# TAB 4 - BẢN ĐỒ TRÁNH NGẬP (Smart Routing bằng TomTom Routing API)
 # ==================================================================================================
 def polygon_to_bounding_rectangle(polygon_points: list[tuple[float, float]]) -> dict:
     """
@@ -2035,6 +2126,16 @@ def predict_class_from_sequence_window(deployed_model: dict, window_input: np.nd
             embedding = deployed_model["feature_extractor"].predict(window_input, verbose=0)
         return int(deployed_model["classifier"].predict(embedding)[0])
 
+    if model_type == "hybrid_lstm_gru_xgboost":
+        # NỐI (concatenate) embedding LSTM + GRU theo ĐÚNG thứ tự đã dùng lúc huấn luyện
+        # (`train_lstm_gru_xgboost_hybrid_model()`: LSTM trước, GRU sau) - đảo thứ tự sẽ khiến XGBoost
+        # nhận nhầm ý nghĩa của từng cột embedding, cho kết quả sai mà không hề báo lỗi.
+        with _KERAS_INFERENCE_LOCK:
+            lstm_embedding = deployed_model["lstm_feature_extractor"].predict(window_input, verbose=0)
+            gru_embedding = deployed_model["gru_feature_extractor"].predict(window_input, verbose=0)
+        combined_embedding = np.concatenate([lstm_embedding, gru_embedding], axis=1)
+        return int(deployed_model["classifier"].predict(combined_embedding)[0])
+
     raise ValueError(f"model_type không được hỗ trợ cho suy luận theo cửa sổ: {model_type}")
 
 
@@ -2163,6 +2264,7 @@ def _get_latest_flood_predictions_cached(_dependency_signature: tuple) -> pd.Dat
     if deployed_model is not None and deployed_model.get("model_type") in {
         "keras_sequence",
         "hybrid_lstm_xgboost",
+        "hybrid_lstm_gru_xgboost",
     }:
         required_rows = (deployed_model.get("window_size") or DEFAULT_SEQUENCE_WINDOW_SIZE) + 2
     else:
@@ -2464,7 +2566,7 @@ def predict_days_ahead_forecast_sequence(
 @st.cache_data(persist="disk", show_spinner="Đang gọi Open-Meteo và suy luận dự báo cho 5 địa phương...")
 def _compute_forecast_4day_result() -> dict:
     """
-    Tính bảng dự báo 4 ngày cho toàn bộ 5 địa phương giám sát (gọi Open-Meteo + suy luận model).
+    Tính bảng dự báo 14 ngày cho toàn bộ 5 địa phương giám sát (gọi Open-Meteo + suy luận model).
 
     Cache bằng `st.cache_data(persist="disk", ...)` - Streamlit TỰ lưu kết quả (kể cả DataFrame và
     `datetime`) ra đĩa và tự nạp lại ở lần chạy sau (F5, restart server), THAY vì tự viết tay ~40 dòng
@@ -2473,8 +2575,8 @@ def _compute_forecast_4day_result() -> dict:
     shape của `cached_result` mà quên cập nhật đồng bộ cả 2 hàm đọc/ghi.
 
     ĐỂ LÀM MỚI: gọi `_compute_forecast_4day_result.clear()` TRƯỚC khi gọi lại hàm này - xem
-    `render_forecast_tab()` (khi bấm nút "🔄 Dự báo lại" hoặc phát hiện cache đã qua ngày mới) và
-    `render_sidebar()` (nút "🔄 Làm mới toàn bộ cache").
+    `render_forecast_tab()` (khi bấm nút "Dự báo lại" hoặc phát hiện cache đã qua ngày mới) và
+    `render_sidebar()` (nút "Làm mới toàn bộ cache").
 
     Raise `RuntimeError` với thông điệp rõ ràng nếu chưa có model triển khai hoặc không lấy được dự
     báo cho địa phương nào - KHÔNG tự bắt lỗi ở đây, để `render_forecast_tab()` tự quyết định hiển thị
@@ -2496,7 +2598,7 @@ def _compute_forecast_4day_result() -> dict:
         # nhiều ngày liên tiếp, xem docstring hàm đó để biết chi tiết cách dựng cửa sổ).
         if model_type == "sklearn_tabular":
             return predict_4_days_forecast(lat, lon, deployed_model["model"], deployed_model["scaler"])
-        if model_type in {"keras_sequence", "hybrid_lstm_xgboost"}:
+        if model_type in {"keras_sequence", "hybrid_lstm_xgboost", "hybrid_lstm_gru_xgboost"}:
             return predict_days_ahead_forecast_sequence(lat, lon, deployed_model, feature_columns)
         return None
 
@@ -2668,7 +2770,7 @@ def build_weather_comparison_matrix(active_provider_keys: tuple[tuple[str, str],
     KẾT QUẢ TỰ ĐỘNG LÀM MỚI SAU MỖI `WEATHER_COMPARISON_CACHE_TTL_SECONDS` GIÂY: đây là cache "pull"
     kiểu Streamlit (không có tiến trình nền chạy độc lập) - nghĩa là API chỉ thực sự được gọi lại khi
     có người mở/tải lại tab SAU KHI cache đã hết hạn, không tự chạy ngầm khi không ai mở app. Muốn lấy
-    ngay lập tức không cần đợi hết hạn thì bấm nút "🔄 Cập nhật dữ liệu API".
+    ngay lập tức không cần đợi hết hạn thì bấm nút "Cập nhật dữ liệu API".
     """
     provider_key_map = dict(active_provider_keys)
     active_providers = [p for p in WEATHER_PROVIDER_OPTIONS if p["secret_key"] in provider_key_map]
@@ -2691,7 +2793,7 @@ def build_weather_comparison_matrix(active_provider_keys: tuple[tuple[str, str],
 
 def render_weather_comparison_section() -> None:
     """
-    Khung "🔍 Đối chiếu dữ liệu mưa giữa các nguồn API" - chỉ hiện khi người dùng đã cấu hình ÍT NHẤT 1
+    Khung "Đối chiếu dữ liệu mưa giữa các nguồn API" - chỉ hiện khi người dùng đã cấu hình ÍT NHẤT 1
     API key thay thế qua khung admin sidebar. Mục tiêu: giúp phát hiện Open-Meteo (nguồn model đang
     dùng) có đang báo lệch nhiều so với các nguồn độc lập khác hay không, để người xem tự cân nhắc thêm
     khi đọc kết quả dự báo - đây là bước ĐỐI CHIẾU (cross-check hiển thị), CHƯA phải hệ khuyến nghị DSS
@@ -2706,11 +2808,11 @@ def render_weather_comparison_section() -> None:
         )
     )
 
-    with st.expander("🔍 Đối chiếu dữ liệu mưa giữa các nguồn API (ma trận)", expanded=False):
+    with st.expander("Đối chiếu dữ liệu mưa giữa các nguồn API (ma trận)", expanded=False):
         if not active_provider_keys:
             st.info(
                 "Chưa có nguồn API thay thế nào được cấu hình để đối chiếu với Open-Meteo (nguồn model "
-                "đang dùng). Vào khung **🔐 Cấu hình API nâng cao (Admin)** ở sidebar để thêm key của "
+                "đang dùng). Vào khung **Cấu hình API nâng cao (Admin)** ở sidebar để thêm key của "
                 "Weatherbit / Visual Crossing / Tomorrow.io / Stormglass."
             )
             return
@@ -2723,7 +2825,7 @@ def render_weather_comparison_section() -> None:
             f"{WEATHER_COMPARISON_CACHE_TTL_SECONDS // 3600} tiếng (không có tiến trình chạy nền)."
         )
 
-        if st.button("🔄 Cập nhật dữ liệu API", key="weather_comparison_refresh_button"):
+        if st.button("Cập nhật dữ liệu API", key="weather_comparison_refresh_button"):
             build_weather_comparison_matrix.clear()
             st.rerun()
 
@@ -2786,7 +2888,7 @@ def render_weather_comparison_section() -> None:
 
 def render_forecast_tab() -> None:
     """
-    Nội dung TRANG ĐẦU TIÊN của app - bảng dự báo nguy cơ ngập 4 ngày tới (T/T+1/T+2/T+3) cho toàn bộ
+    Nội dung TRANG ĐẦU TIÊN của app - bảng dự báo nguy cơ ngập 14 ngày tới (T đến T+13) cho toàn bộ
     5 địa phương giám sát, dùng chính model đã huấn luyện (không phải số liệu giả lập).
 
     ĐẶT Ở TRANG ĐẦU (thay vì EDA) vì đây là KẾT QUẢ CUỐI CÙNG, thiết thực nhất mà người xem (chính
@@ -2794,16 +2896,16 @@ def render_forecast_tab() -> None:
     "mô hình dự báo được gì" - thay vì phải lật qua các tab kỹ thuật nội bộ (khám phá dữ liệu, quy
     trình huấn luyện) trước mới thấy được giá trị thực tế của hệ thống.
     """
-    st.subheader("🔮 Dự báo Ngập lụt 4 ngày tới")
+    st.subheader("Dự báo Ngập lụt 14 ngày tới")
     st.caption(
         "Kết quả dự báo THẬT từ model đã huấn luyện, cho toàn bộ 5 địa phương giám sát (Ngày T = hôm "
-        "nay, T+1, T+2, T+3), dựa trên dữ liệu thời tiết dự báo mới nhất từ Open-Meteo Forecast API."
+        "nay, đến T+13), dựa trên dữ liệu thời tiết dự báo mới nhất từ Open-Meteo Forecast API."
     )
 
     header_left, header_right = st.columns([5, 1])
     with header_right:
         refresh_clicked = st.button(
-            "🔄 Dự báo lại",
+            "Dự báo lại",
             key="refresh_4day_forecast_button",
             use_container_width=True,
             help="Gọi lại Open-Meteo và suy luận model để lấy dự báo mới nhất.",
@@ -2826,7 +2928,7 @@ def render_forecast_tab() -> None:
     is_cache_stale = cached_result is None or cached_result["generated_at"].date() < datetime.now().date()
 
     # CHỈ thực sự gọi lại Open-Meteo + suy luận model khi: (1) chưa có cache nào dùng được (kể cả từ
-    # đĩa), (2) cache đã qua ngày mới (is_cache_stale), hoặc (3) người dùng chủ động bấm "🔄 Dự báo
+    # đĩa), (2) cache đã qua ngày mới (is_cache_stale), hoặc (3) người dùng chủ động bấm "Dự báo
     # lại" - gọi `.clear()` để buộc `_compute_forecast_4day_result()` tính lại thay vì trả cache cũ.
     #
     # FAIL-SAFE: hễ làm mới thất bại (lỗi đọc artifact/model TẠM THỜI, ví dụ file đang được ghi dở lúc
@@ -2843,22 +2945,22 @@ def render_forecast_tab() -> None:
 
     if refresh_error is not None:
         if cached_result is None:
-            st.error(f"❌ {refresh_error} Hãy khởi chạy huấn luyện ở Tab '⚙️ Tiền xử lý & Huấn luyện' trước.")
+            st.error(f"{refresh_error} Hãy khởi chạy huấn luyện ở Tab 'Tiền xử lý & Huấn luyện' trước.")
             return
         st.warning(
-            f"⚠️ Không làm mới được dự báo mới ({refresh_error}) - đang hiển thị kết quả gần nhất "
+            f"Không làm mới được dự báo mới ({refresh_error}) - đang hiển thị kết quả gần nhất "
             f"còn lưu (xem thời điểm cập nhật bên dưới)."
         )
 
     combined_forecast_df = cached_result["combined_df"]
 
     with header_left:
-        st.caption(f"🕒 Cập nhật lần cuối: {cached_result['generated_at'].strftime('%H:%M:%S %d/%m/%Y')}")
+        st.caption(f"Cập nhật lần cuối: {cached_result['generated_at'].strftime('%H:%M:%S %d/%m/%Y')}")
 
     if cached_result["failed_locations"]:
         st.warning(
             f"Không lấy được dự báo cho: {', '.join(cached_result['failed_locations'])} "
-            "(Open-Meteo/model tạm thời lỗi - hãy thử bấm '🔄 Dự báo lại')."
+            "(Open-Meteo/model tạm thời lỗi - hãy thử bấm 'Dự báo lại')."
         )
 
     render_styled_table(
@@ -2869,7 +2971,7 @@ def render_forecast_tab() -> None:
     at_risk_df = combined_forecast_df[combined_forecast_df["Dự đoán Ngập"] != "An toàn"]
     if at_risk_df.empty:
         render_chart_discussion(
-            f"Trong 4 ngày tới, cả {len(REAL_MONITORED_LOCATIONS)}/{len(REAL_MONITORED_LOCATIONS)} địa "
+            f"Trong {FORECAST_DAYS_AHEAD} ngày tới, cả {len(REAL_MONITORED_LOCATIONS)}/{len(REAL_MONITORED_LOCATIONS)} địa "
             "phương giám sát đều được model dự báo AN TOÀN. Vẫn nên theo dõi lại thường xuyên vì dự báo "
             "thời tiết có thể thay đổi giữa các lần cập nhật."
         )
@@ -2877,8 +2979,8 @@ def render_forecast_tab() -> None:
         risk_counts_by_location = at_risk_df["Địa phương"].value_counts()
         render_chart_discussion(
             f"Có {at_risk_df['Địa phương'].nunique()}/{len(REAL_MONITORED_LOCATIONS)} địa phương xuất "
-            "hiện ít nhất 1 ngày nguy cơ ngập trong 4 ngày tới. Địa phương có số ngày nguy cơ nhiều nhất: "
-            f"**{risk_counts_by_location.index[0]}** ({int(risk_counts_by_location.iloc[0])}/4 ngày). Nên "
+            f"hiện ít nhất 1 ngày nguy cơ ngập trong {FORECAST_DAYS_AHEAD} ngày tới. Địa phương có số ngày nguy cơ nhiều nhất: "
+            f"**{risk_counts_by_location.index[0]}** ({int(risk_counts_by_location.iloc[0])}/{FORECAST_DAYS_AHEAD} ngày). Nên "
             "ưu tiên theo dõi sát và chuẩn bị phương án ứng phó sớm cho các khu vực này."
         )
 
@@ -2911,44 +3013,48 @@ def load_district_boundaries() -> dict | None:
 # dự phòng, đảm bảo 2 cách hiển thị luôn nhất quán màu sắc với nhau.
 RISK_FILL_COLOR_MAP = {"Ngập": "#EF4444", "An toàn": "#22C55E"}
 RISK_TOOLTIP_LABEL_MAP = {
-    "Ngập": "🔴 Nguy cơ NGẬP (dự báo AI)",
-    "An toàn": "🟢 An toàn",
+    "Ngập": "Nguy cơ NGẬP (dự báo AI)",
+    "An toàn": "An toàn",
 }
 
 
 def build_forecast_popup_html(location_name: str, location_forecast_df: pd.DataFrame | None) -> str:
     """
     Tạo nội dung HTML cho POPUP hiện ra khi CLICK vào vùng giám sát (khác `tooltip` chỉ hiện lúc rê
-    chuột) - tóm tắt dự báo 4 ngày tới (T/T+1/T+2/T+3) của CHÍNH địa phương đó.
+    chuột) - tóm tắt dự báo `FORECAST_DAYS_AHEAD` ngày tới (T đến T+FORECAST_DAYS_AHEAD-1, hiện là 14
+    ngày) của CHÍNH địa phương đó.
 
     Tái sử dụng ĐÚNG kết quả đã tính sẵn ở `_compute_forecast_4day_result()` (dùng chung với Tab
-    '🔮 Dự báo 4 ngày tới') - KHÔNG gọi lại Open-Meteo/suy luận model riêng cho việc build popup, để
+    'Dự báo N ngày tới') - KHÔNG gọi lại Open-Meteo/suy luận model riêng cho việc build popup, để
     click vào bản đồ luôn phản hồi tức thì thay vì phải chờ gọi API mỗi lần.
+
+    Bảng bọc trong 1 div `max-height` + `overflow-y: auto` vì 14 dòng dễ khiến popup quá dài (khác
+    bản 4 ngày cũ không cần cuộn) - vẫn xem đủ toàn bộ chuỗi ngày mà không đẩy popup tràn ra ngoài
+    khung nhìn bản đồ.
     """
     if location_forecast_df is None or location_forecast_df.empty:
         return (
-            f"<b>📍 {location_name}</b><br>"
-            "<i>Chưa có dữ liệu dự báo cho địa phương này (xem Tab '🔮 Dự báo 4 ngày tới' để biết chi "
-            "tiết lỗi, ví dụ chưa huấn luyện model hoặc Open-Meteo tạm thời lỗi).</i>"
+            f"<b>{location_name}</b><br>"
+            f"<i>Chưa có dữ liệu dự báo cho địa phương này (xem Tab 'Dự báo {FORECAST_DAYS_AHEAD} ngày "
+            "tới' để biết chi tiết lỗi, ví dụ chưa huấn luyện model hoặc Open-Meteo tạm thời lỗi).</i>"
         )
 
     row_html_parts = []
     for _, row in location_forecast_df.iterrows():
-        is_risk = str(row["Dự đoán Ngập"]) != "An toàn"
-        risk_icon = "🔴" if is_risk else "🟢"
         row_html_parts.append(
             "<tr>"
             f"<td style='padding:2px 6px;border-bottom:1px solid #e2e8f0;'>{row['Ngày']}</td>"
             f"<td style='padding:2px 6px;border-bottom:1px solid #e2e8f0;text-align:right;'>"
             f"{row['Dự báo Lượng mưa (mm)']:.1f} mm</td>"
-            f"<td style='padding:2px 6px;border-bottom:1px solid #e2e8f0;'>{risk_icon} {row['Dự đoán Ngập']}</td>"
+            f"<td style='padding:2px 6px;border-bottom:1px solid #e2e8f0;'>{row['Dự đoán Ngập']}</td>"
             "</tr>"
         )
 
     return (
         "<div style='font-family: sans-serif; min-width: 260px;'>"
-        f"<b>📍 {location_name} - Dự báo 4 ngày tới</b>"
-        "<table style='width:100%; border-collapse: collapse; margin-top: 6px; font-size: 12px;'>"
+        f"<b>{location_name} - Dự báo {FORECAST_DAYS_AHEAD} ngày tới</b>"
+        "<div style='max-height: 260px; overflow-y: auto; margin-top: 6px;'>"
+        "<table style='width:100%; border-collapse: collapse; font-size: 12px;'>"
         "<tr style='background:#f1f5f9;'>"
         "<th style='text-align:left;padding:2px 6px;'>Ngày</th>"
         "<th style='padding:2px 6px;'>Mưa dự báo</th>"
@@ -2956,6 +3062,7 @@ def build_forecast_popup_html(location_name: str, location_forecast_df: pd.DataF
         "</tr>"
         f"{''.join(row_html_parts)}"
         "</table>"
+        "</div>"
         "</div>"
     )
 
@@ -2972,7 +3079,7 @@ def build_smart_routing_map(
     1) Giám sát 5 địa phương thực tế - TÔ RANH GIỚI HÀNH CHÍNH (không phải chấm điểm) màu XANH LÁ
        ('An toàn') / ĐỎ ('Ngập') theo đúng địa giới thật, thay vì 1 chấm điểm đại diện - trực quan hơn
        nhiều vì thể hiện đúng PHẠM VI địa phương đang được cảnh báo, không chỉ 1 toạ độ trung tâm.
-       CLICK vào 1 vùng sẽ hiện POPUP tóm tắt dự báo 4 ngày tới của địa phương đó (nếu có sẵn dữ liệu
+       CLICK vào 1 vùng sẽ hiện POPUP tóm tắt dự báo 14 ngày tới của địa phương đó (nếu có sẵn dữ liệu
        trong `forecast_by_location`), TOOLTIP (rê chuột) vẫn giữ nguyên hiển thị trạng thái hiện tại.
     2) Định tuyến - marker điểm đi/đến + tuyến đường né ngập vẽ XANH DƯƠNG.
     """
@@ -2992,7 +3099,7 @@ def build_smart_routing_map(
             risk_status = risk_rows.iloc[0] if not risk_rows.empty else "Không xác định"
             fill_color = RISK_FILL_COLOR_MAP.get(risk_status, "#9CA3AF")
             tooltip_label = RISK_TOOLTIP_LABEL_MAP.get(
-                risk_status, "⚪ KHÔNG XÁC ĐỊNH được (lỗi model/dữ liệu - cần kiểm tra thủ công)"
+                risk_status, "KHÔNG XÁC ĐỊNH được (lỗi model/dữ liệu - cần kiểm tra thủ công)"
             )
             location_forecast_df = (
                 forecast_by_location.get(location_name) if forecast_by_location is not None else None
@@ -3026,21 +3133,21 @@ def build_smart_routing_map(
             if risk_status == "Ngập":
                 folium.Marker(
                     location=coordinates,
-                    tooltip=f"🔴 {location_name}: Nguy cơ NGẬP (dự báo AI)",
+                    tooltip=f"{location_name}: Nguy cơ NGẬP (dự báo AI)",
                     popup=popup,
                     icon=folium.Icon(color="red", icon="exclamation-triangle", prefix="fa"),
                 ).add_to(routing_map)
             elif risk_status == "An toàn":
                 folium.Marker(
                     location=coordinates,
-                    tooltip=f"🟢 {location_name}: An toàn",
+                    tooltip=f"{location_name}: An toàn",
                     popup=popup,
                     icon=folium.Icon(color="green", icon="check", prefix="fa"),
                 ).add_to(routing_map)
             else:
                 folium.Marker(
                     location=coordinates,
-                    tooltip=f"⚪ {location_name}: KHÔNG XÁC ĐỊNH được (lỗi model/dữ liệu - cần kiểm tra thủ công)",
+                    tooltip=f"{location_name}: KHÔNG XÁC ĐỊNH được (lỗi model/dữ liệu - cần kiểm tra thủ công)",
                     popup=popup,
                     icon=folium.Icon(color="gray", icon="question", prefix="fa"),
                 ).add_to(routing_map)
@@ -3054,20 +3161,20 @@ def build_smart_routing_map(
             fill=True,
             fill_color="#EF4444",
             fill_opacity=0.35,
-            tooltip="🔴 Vùng ngập ước tính - routing engine tự động né khu vực này",
+            tooltip="Vùng ngập ước tính - routing engine tự động né khu vực này",
         ).add_to(routing_map)
 
     # ---- (2) Định tuyến: điểm đi/đến (màu riêng, tránh trùng với màu xanh lá/đỏ của giám sát) ----
     if start_point is not None:
         folium.Marker(
             location=start_point,
-            tooltip="🏁 Điểm xuất phát",
+            tooltip="Điểm xuất phát",
             icon=folium.Icon(color="blue", icon="play", prefix="fa"),
         ).add_to(routing_map)
     if end_point is not None:
         folium.Marker(
             location=end_point,
-            tooltip="🏁 Điểm đến",
+            tooltip="Điểm đến",
             icon=folium.Icon(color="cadetblue", icon="flag-checkered", prefix="fa"),
         ).add_to(routing_map)
 
@@ -3077,7 +3184,7 @@ def build_smart_routing_map(
             color="#2563EB",
             weight=6,
             opacity=0.85,
-            tooltip="🔵 Tuyến đường di chuyển (đã né vùng ngập)",
+            tooltip="Tuyến đường di chuyển (đã né vùng ngập)",
         ).add_to(routing_map)
 
     return routing_map
@@ -3097,7 +3204,7 @@ def render_smart_routing_tab() -> None:
          bấm nút - nút "Tìm tuyến đường" vẫn giữ lại để chủ động tính lại bất cứ lúc nào (kể cả khi
          đang an toàn), nhưng không còn là điều kiện BẮT BUỘC để có tuyến đường khi có ngập.
     """
-    st.subheader("🗺️ Bản đồ Tránh ngập")
+    st.subheader("Bản đồ Tránh ngập")
     st.caption(
         "Bước 4/4 của pipeline: giám sát 5 địa phương THỰC TẾ tại Thừa Thiên Huế bằng kết quả dự báo "
         "của model AI. Click trực tiếp lên bản đồ để đặt điểm xuất phát/điểm đến ở BẤT KỲ vị trí nào - "
@@ -3109,9 +3216,9 @@ def render_smart_routing_tab() -> None:
     # ==============================================================================================
     df_predictions = get_latest_flood_predictions()
 
-    # Dữ liệu dự báo 4 ngày tới (T/T+1/T+2/T+3) CHO TỪNG ĐỊA PHƯƠNG - dùng để hiện popup tóm tắt khi
+    # Dữ liệu dự báo 14 ngày tới (T đến T+13) CHO TỪNG ĐỊA PHƯƠNG - dùng để hiện popup tóm tắt khi
     # click vào vùng giám sát trên bản đồ (xem `build_forecast_popup_html`). Tái sử dụng ĐÚNG cache
-    # `_compute_forecast_4day_result()` đã tính cho Tab '🔮 Dự báo 4 ngày tới' - không gọi lại Open-Meteo
+    # `_compute_forecast_4day_result()` đã tính cho Tab 'Dự báo 14 ngày tới' - không gọi lại Open-Meteo
     # riêng cho việc này. Bọc try/except vì tab Bản đồ vẫn phải hoạt động (giám sát + định tuyến) ngay
     # cả khi chưa có model triển khai hoặc Open-Meteo tạm thời lỗi - lúc đó popup chỉ báo "chưa có dữ
     # liệu" thay vì làm crash cả tab.
@@ -3138,14 +3245,14 @@ def render_smart_routing_tab() -> None:
         elif risk_status == "Không xác định":
             unknown_location_names.append(location_name)
 
-    st.markdown("##### 📡 Trạng thái giám sát 5 địa phương (từ dự báo AI mới nhất)")
+    st.markdown("##### Trạng thái giám sát 5 địa phương (từ dự báo AI mới nhất)")
     st.dataframe(df_predictions, use_container_width=True, hide_index=True)
     if unknown_location_names:
         # FAIL-SAFE: cảnh báo RÕ RÀNG thay vì để những địa phương này âm thầm biến thành "An toàn"
         # (xem docstring get_latest_flood_predictions) - routing engine cũng KHÔNG tự né được các khu
         # vực này vì không có đủ dữ liệu để dựng vùng ngập, nên cần con người kiểm tra thủ công.
         st.warning(
-            f"⚪ Không xác định được nguy cơ ngập cho: {', '.join(unknown_location_names)} "
+            f"Không xác định được nguy cơ ngập cho: {', '.join(unknown_location_names)} "
             "(model/dữ liệu lỗi - xem log server). Các địa phương này KHÔNG được tự động né khi định "
             "tuyến - vui lòng kiểm tra thủ công trước khi di chuyển qua khu vực này."
         )
@@ -3165,18 +3272,18 @@ def render_smart_routing_tab() -> None:
     with control_center:
         click_target = st.radio(
             "Click lên bản đồ để đặt:",
-            options=["🏁 Điểm xuất phát", "🎯 Điểm đến"],
+            options=["Điểm xuất phát", "Điểm đến"],
             horizontal=True,
             key="routing_click_target",
         )
         start_point = st.session_state["routing_start_point"]
         end_point = st.session_state["routing_end_point"]
         st.caption(
-            f"🏁 Xuất phát: `{start_point[0]:.4f}, {start_point[1]:.4f}` | "
-            f"🎯 Đến: `{end_point[0]:.4f}, {end_point[1]:.4f}`"
+            f"Xuất phát: `{start_point[0]:.4f}, {start_point[1]:.4f}` | "
+            f"Đến: `{end_point[0]:.4f}, {end_point[1]:.4f}`"
         )
         find_route_clicked = st.button(
-            "🧭 Tính lại tuyến đường",
+            "Tính lại tuyến đường",
             key="find_smart_route_button",
             use_container_width=True,
             help="Tuyến đường tự động tính lại khi có địa phương đang ngập - bấm nút này để chủ động tính lại bất cứ lúc nào.",
@@ -3224,7 +3331,7 @@ def render_smart_routing_tab() -> None:
         clicked_point = (round(last_clicked["lat"], 6), round(last_clicked["lng"], 6))
         if clicked_point != st.session_state.get("routing_last_processed_click"):
             st.session_state["routing_last_processed_click"] = clicked_point
-            if click_target == "🏁 Điểm xuất phát":
+            if click_target == "Điểm xuất phát":
                 st.session_state["routing_start_point"] = clicked_point
             else:
                 st.session_state["routing_end_point"] = clicked_point
@@ -3259,7 +3366,7 @@ def render_smart_routing_tab() -> None:
 
     if (find_route_clicked or should_auto_fetch) and not same_point_error:
         spinner_text = (
-            "🌊 Phát hiện thay đổi - đang tự động tính lại tuyến đường..."
+            "Phát hiện thay đổi - đang tự động tính lại tuyến đường..."
             if should_auto_fetch and not find_route_clicked
             else "Đang tính toán tuyến đường..."
         )
@@ -3286,7 +3393,7 @@ def render_smart_routing_tab() -> None:
 
     with control_center:
         if same_point_error:
-            st.warning("⚠️ Điểm xuất phát và điểm đến đang trùng nhau - hãy click lại để chọn 2 vị trí khác nhau.")
+            st.warning("Điểm xuất phát và điểm đến đang trùng nhau - hãy click lại để chọn 2 vị trí khác nhau.")
         elif route_result is None:
             st.info("Click lên bản đồ để đặt điểm đi/đến, hoặc bấm **Tính lại tuyến đường**.")
         elif not route_result["success"]:
@@ -3300,10 +3407,10 @@ def render_smart_routing_tab() -> None:
                 auto_note = (
                     " (tự động cập nhật)" if st.session_state.get("smart_route_auto_triggered") else ""
                 )
-                st.success(f"✅ Đã tính tuyến đường né vùng ngập thành công bằng TomTom Routing API{auto_note}.")
+                st.success(f"Đã tính tuyến đường né vùng ngập thành công bằng TomTom Routing API{auto_note}.")
             else:
                 st.success(
-                    "✅ Không địa phương nào đang có nguy cơ ngập - TomTom tính tuyến đường bình "
+                    "Không địa phương nào đang có nguy cơ ngập - TomTom tính tuyến đường bình "
                     "thường (không kèm avoidAreas)."
                 )
 
@@ -3313,16 +3420,16 @@ def render_smart_routing_tab() -> None:
 # ==================================================================================================
 def render_sidebar() -> None:
     """Sidebar tối giản: giới thiệu nhanh các bước pipeline + nút làm mới cache toàn cục."""
-    st.sidebar.markdown("## 🌊 Flood Prediction Pipeline")
+    st.sidebar.markdown("## Flood Prediction Pipeline")
     st.sidebar.markdown(
-        "1. 🔮 Dự báo 4 ngày tới\n"
-        "2. 📊 Khám phá Dữ liệu (EDA)\n"
-        "3. ⚙️ Tiền xử lý & Huấn luyện\n"
-        "4. 📈 Đánh giá Mô hình\n"
-        "5. 🗺️ Bản đồ Tránh ngập\n"
+        "1. Dự báo 14 ngày tới\n"
+        "2. Khám phá Dữ liệu (EDA)\n"
+        "3. Tiền xử lý & Huấn luyện\n"
+        "4. Đánh giá Mô hình\n"
+        "5. Bản đồ Tránh ngập\n"
     )
     st.sidebar.markdown("---")
-    if st.sidebar.button("🔄 Làm mới toàn bộ cache", key="clear_all_cache_button", use_container_width=True):
+    if st.sidebar.button("Làm mới toàn bộ cache", key="clear_all_cache_button", use_container_width=True):
         # `st.cache_data.clear()` xóa TẤT CẢ hàm decorate bằng `@st.cache_data` trong app, bao gồm cả
         # `_compute_forecast_4day_result()` (cache dự báo 4 ngày, persist="disk") - vì cache đó nay
         # dùng chung cơ chế built-in của Streamlit thay vì tự quản lý file JIT riêng như bản trước, nút
@@ -3340,9 +3447,9 @@ def main():
     apply_global_ui_theme()
     render_sidebar()
 
-    st.title("🌊 Hệ thống Dự báo Ngập lụt Thừa Thiên Huế")
+    st.title("Hệ thống Dự báo Ngập lụt Thừa Thiên Huế")
     st.caption(
-        "Dự báo 4 ngày tới → Khám phá dữ liệu → Tiền xử lý & Huấn luyện → Đánh giá mô hình → "
+        "Dự báo 14 ngày tới → Khám phá dữ liệu → Tiền xử lý & Huấn luyện → Đánh giá mô hình → "
         "Bản đồ chỉ đường tránh ngập."
     )
     st.markdown("---")
@@ -3355,11 +3462,11 @@ def main():
     # ------------------------------------------------------------------------------------------
     tab_forecast, tab_eda, tab_train, tab_eval, tab_map = st.tabs(
         [
-            "🔮 Dự báo 4 ngày tới",
-            "📊 Khám phá Dữ liệu (EDA)",
-            "⚙️ Tiền xử lý & Huấn luyện",
-            "📈 Đánh giá Mô hình",
-            "🗺️ Bản đồ Tránh ngập",
+            "Dự báo 14 ngày tới",
+            "Khám phá Dữ liệu (EDA)",
+            "Tiền xử lý & Huấn luyện",
+            "Đánh giá Mô hình",
+            "Bản đồ Tránh ngập",
         ]
     )
 
