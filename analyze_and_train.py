@@ -2583,7 +2583,13 @@ def extract_feature_importance(best_model, X_test_scaled: pd.DataFrame, y_test: 
 
 
 def plot_feature_importance(best_model, X_test_scaled: pd.DataFrame, y_test: pd.Series, output_dir: Path) -> Path:
-    """Vẽ và lưu feature importance cho mô hình tốt nhất."""
+    """
+    Vẽ và lưu feature importance cho mô hình tốt nhất (ảnh PNG - bar chart, giữ lại làm bản xuất tĩnh/
+    tải về), ĐỒNG THỜI xuất kèm `feature_importance.json` chứa đúng dữ liệu số thô (Feature/Importance)
+    để `app.py` tự vẽ biểu đồ RADAR TƯƠNG TÁC bằng Plotly (theo góp ý của GVHD) mà không cần chạy lại
+    `extract_feature_importance()` - vốn có thể tốn thời gian với `permutation_importance` (nhiều lần
+    suy luận lại trên tập test).
+    """
     importance_df = extract_feature_importance(best_model, X_test_scaled, y_test)
 
     plt.figure(figsize=(10, 6))
@@ -2594,7 +2600,13 @@ def plot_feature_importance(best_model, X_test_scaled: pd.DataFrame, y_test: pd.
     output_path = output_dir / "feature_importance.png"
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
+
+    json_output_path = output_dir / "feature_importance.json"
+    with json_output_path.open("w", encoding="utf-8") as file:
+        json.dump(importance_df.to_dict(orient="records"), file, indent=2, ensure_ascii=False)
+
     print(f"Saved feature importance plot to: {output_path}")
+    print(f"Saved feature importance data to: {json_output_path}")
     return output_path
 
 
@@ -2771,6 +2783,17 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
     latest_feature_importance_path = (
         copy_artifact_to_latest(feature_importance_path, "feature_importance.png")
         if feature_importance_path
+        else None
+    )
+    # `feature_importance.json` (dữ liệu số thô cho biểu đồ radar tương tác ở app.py) LUÔN được ghi ra
+    # CÙNG thư mục với `feature_importance.png` bởi `plot_feature_importance()` - chỉ cần copy sang
+    # `models/latest/` nếu file .png tương ứng thực sự tồn tại (tức nhánh sklearn_tabular đã chạy).
+    feature_importance_json_path = (
+        feature_importance_path.parent / "feature_importance.json" if feature_importance_path else None
+    )
+    latest_feature_importance_json_path = (
+        copy_artifact_to_latest(feature_importance_json_path, "feature_importance.json")
+        if feature_importance_json_path and feature_importance_json_path.exists()
         else None
     )
     latest_roc_curve_path = copy_artifact_to_latest(roc_curve_path, "roc_curve_data.json") if roc_curve_path else None
