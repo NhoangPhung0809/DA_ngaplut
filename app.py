@@ -367,6 +367,10 @@ FEATURE_COLS_FOR_INFERENCE = _SHARED_FEATURE_COLS
 # `analyze_and_train.py`, nếu không model sẽ nhận sai shape đầu vào mà không báo lỗi rõ ràng.
 DEFAULT_SEQUENCE_WINDOW_SIZE = 7
 
+# Ánh xạ nhãn lớp (dạng chuỗi, khớp key trong các file JSON export) sang tên tiếng Việt dễ đọc - DÙNG
+# CHUNG cho mọi bảng/biểu đồ hiển thị 3 lớp nguy cơ ngập trong app (tránh định nghĩa lại rải rác).
+CLASS_LABEL_VI: dict[str, str] = {"0": "Không ngập", "1": "Ngập nhẹ", "2": "Ngập nặng"}
+
 # Số ngày dự báo (Ngày T + 13 ngày tới = 14 ngày) - DÙNG CHUNG cho `predict_4_days_forecast()` và
 # `predict_days_ahead_forecast_sequence()`, cùng với nhãn hiển thị tương ứng cho từng ngày. Open-Meteo
 # Forecast API hỗ trợ tối đa 16 ngày (forecast_days<=16) nên 14 ngày vẫn nằm trong giới hạn miễn phí.
@@ -1333,6 +1337,71 @@ def build_ctgan_distribution_discussion(distribution_df: pd.DataFrame, title: st
     )
 
 
+def render_ctgan_before_after_chart(before_distribution_df: pd.DataFrame, after_distribution_df: pd.DataFrame) -> None:
+    """
+    Biểu đồ CỘT NHÓM (grouped bar) so sánh trực quan phân phối 3 lớp nguy cơ ngập TRƯỚC và SAU khi xử
+    lý mất cân bằng (CTGAN, fallback SMOTE) - bổ sung cho 2 bảng số liệu ở `render_ctgan_dataset_panel()`
+    vốn đặt cạnh nhau ở 2 CỘT RIÊNG BIỆT nên khó so sánh trực tiếp bằng mắt.
+
+    "Trước" và "Sau" là 2 THỰC THỂ khác nhau (categorical - identity), KHÔNG phải 1 đại lượng đo lường
+    liên tục, nên dùng 2 MÀU CỐ ĐỊNH (xám = trước/còn vấn đề, xanh dương = sau/đã xử lý) thay vì thang
+    màu sequential/diverging.
+    """
+    if before_distribution_df.empty and after_distribution_df.empty:
+        st.info("Chưa có đủ dữ liệu phân phối lớp để vẽ biểu đồ so sánh.")
+        return
+
+    def _prepare(distribution_df: pd.DataFrame, stage_label: str) -> pd.DataFrame:
+        prepared_df = distribution_df.copy()
+        prepared_df["Nhãn lớp"] = prepared_df["Lớp"].map(CLASS_LABEL_VI).fillna(prepared_df["Lớp"])
+        prepared_df["Giai đoạn"] = stage_label
+        return prepared_df
+
+    combined_df = pd.concat(
+        [_prepare(before_distribution_df, "Trước xử lý"), _prepare(after_distribution_df, "Sau xử lý")],
+        ignore_index=True,
+    )
+    class_order = [
+        CLASS_LABEL_VI[key] for key in ["0", "1", "2"] if CLASS_LABEL_VI[key] in combined_df["Nhãn lớp"].values
+    ]
+    stage_colors = {"Trước xử lý": "#64748b", "Sau xử lý": "#3b82f6"}
+
+    fig = go.Figure()
+    for stage_label, stage_color in stage_colors.items():
+        stage_df = combined_df[combined_df["Giai đoạn"] == stage_label]
+        if stage_df.empty:
+            continue
+        stage_df = stage_df.set_index("Nhãn lớp").reindex(class_order).reset_index()
+        fig.add_trace(
+            go.Bar(
+                name=stage_label,
+                x=stage_df["Nhãn lớp"],
+                y=stage_df["Số lượng"],
+                marker_color=stage_color,
+                text=[f"{value:,.0f}" if pd.notna(value) else "" for value in stage_df["Số lượng"]],
+                textposition="outside",
+                textfont=dict(color="#f8fafc"),
+            )
+        )
+    fig.update_layout(
+        barmode="group",
+        margin=dict(t=10, b=10, l=10, r=10),
+        height=340,
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(color="#f8fafc", tickfont=dict(size=14)),
+        yaxis=dict(title="Số lượng quan sát", color="#cbd5e1", gridcolor="#334155"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(color="#f8fafc", size=13)),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    render_chart_discussion(
+        "Biểu đồ trên đặt CẠNH NHAU 2 giai đoạn để thấy ngay hiệu quả xử lý mất cân bằng: cột xám "
+        "(trước xử lý) lệch hẳn về lớp `Không ngập`, trong khi cột xanh (sau xử lý) gần bằng nhau giữa "
+        "3 lớp - đúng mục tiêu của CTGAN/SMOTE là giúp model KHÔNG học lệch về phía lớp đa số, tránh "
+        "bỏ sót các trường hợp `Ngập nhẹ`/`Ngập nặng` (hiếm gặp hơn nhưng quan trọng hơn để cảnh báo)."
+    )
+
+
 @st.cache_data(show_spinner=False)
 def _load_ctgan_comparison_artifacts_cached(distribution_file_mtime: float):
     """Đọc dữ liệu export trước/sau CTGAN (do `analyze_and_train.py` xuất ra) để hiển thị nhanh trên
@@ -1413,6 +1482,13 @@ def render_ctgan_section() -> None:
             )
     else:
         st.success(f"Export CTGAN sẵn sàng. Trạng thái gần nhất: `{status}`.")
+
+    st.markdown("#### Biểu đồ so sánh phân phối lớp trước/sau xử lý")
+    render_ctgan_before_after_chart(
+        build_ctgan_distribution_dataframe(summary.get("before")),
+        build_ctgan_distribution_dataframe(summary.get("after")),
+    )
+    st.markdown("---")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -1926,7 +2002,7 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
     import plotly.graph_objects as go
 
     class_name_map = roc_payload.get("class_names", {})
-    class_label_vi = {"0": "Không ngập", "1": "Ngập nhẹ", "2": "Ngập nặng"}
+    class_label_vi = CLASS_LABEL_VI
     curves = roc_payload.get("curves", {})
     model_name = roc_payload.get("model_name", "Best Model")
 
