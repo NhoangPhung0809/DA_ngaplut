@@ -404,10 +404,17 @@ def apply_global_ui_theme():
         }
         p, li, label, span, div {
             color: #e5eefc;
+            font-size: 1.08rem;
         }
         [data-testid="stCaptionContainer"] p {
             color: #cbd5e1 !important;
-            font-size: 0.95rem !important;
+            font-size: 1rem !important;
+        }
+        [data-testid="stMetricValue"] {
+            font-size: 2rem !important;
+        }
+        [data-testid="stMetricLabel"] {
+            font-size: 1.05rem !important;
         }
         [data-testid="stExpander"] {
             background: #0b1220;
@@ -864,14 +871,37 @@ def render_full_width_image(image_path: str) -> None:
         st.image(image_path, use_column_width=True)
 
 
-def build_contrast_styler(df: pd.DataFrame, numeric_formats: dict | None = None):
-    """Tạo Styler có độ tương phản cao (nền tối, chữ sáng, sọc ngựa vằn) để bảng web dễ đọc hơn."""
+# Màu tô nổi 3 hạng đầu trong bảng xếp hạng model (huy chương vàng/bạc/đồng) - DÙNG CHUNG cho mọi
+# bảng xếp hạng trong app (đánh giá mô hình...), tránh mỗi nơi tự chọn 1 bộ màu khác nhau.
+RANK_MEDAL_COLORS: dict[int, tuple[str, str]] = {
+    0: ("#eab308", "#1c1503"),  # Hạng 1 - vàng, chữ tối để đủ tương phản trên nền sáng.
+    1: ("#94a3b8", "#0b1220"),  # Hạng 2 - bạc, chữ tối.
+    2: ("#b45309", "#fdf6ec"),  # Hạng 3 - đồng, chữ sáng (nền đủ tối để cần chữ sáng).
+}
+
+
+def build_contrast_styler(
+    df: pd.DataFrame,
+    numeric_formats: dict | None = None,
+    rank_highlight: bool = False,
+):
+    """
+    Tạo Styler có độ tương phản cao (nền tối, chữ sáng, sọc ngựa vằn) để bảng web dễ đọc hơn.
+
+    `rank_highlight=True`: tô nổi 3 DÒNG ĐẦU (sau khi `df` đã được sắp xếp theo tiêu chí xếp hạng
+    TRƯỚC KHI truyền vào đây) bằng màu huy chương vàng/bạc/đồng (`RANK_MEDAL_COLORS`) - ĐÈ LÊN màu sọc
+    ngựa vằn mặc định cho đúng 3 dòng đó, dùng cho các bảng xếp hạng model theo điểm số.
+    """
     styled_df = df.style
 
     if numeric_formats:
         styled_df = styled_df.format(numeric_formats)
 
     def zebra_rows(row):
+        medal = RANK_MEDAL_COLORS.get(row.name) if rank_highlight else None
+        if medal:
+            background, text_color = medal
+            return [f"background-color: {background}; color: {text_color}; font-weight: 700;" for _ in row]
         background = "#0f172a" if row.name % 2 == 0 else "#172033"
         return [f"background-color: {background}; color: #f8fafc;" for _ in row]
 
@@ -880,8 +910,8 @@ def build_contrast_styler(df: pd.DataFrame, numeric_formats: dict | None = None)
         **{
             "color": "#f8fafc",
             "border": "1px solid #334155",
-            "font-size": "14px",
-            "padding": "8px 10px",
+            "font-size": "15px",
+            "padding": "9px 11px",
         }
     )
     styled_df = styled_df.set_table_styles(
@@ -893,8 +923,8 @@ def build_contrast_styler(df: pd.DataFrame, numeric_formats: dict | None = None)
                     ("color", "#f8fafc"),
                     ("border", "1px solid #475569"),
                     ("font-weight", "700"),
-                    ("font-size", "14px"),
-                    ("padding", "10px 12px"),
+                    ("font-size", "15px"),
+                    ("padding", "11px 13px"),
                     ("text-align", "center"),
                 ],
             },
@@ -902,8 +932,8 @@ def build_contrast_styler(df: pd.DataFrame, numeric_formats: dict | None = None)
                 "selector": "td",
                 "props": [
                     ("border", "1px solid #334155"),
-                    ("font-size", "14px"),
-                    ("padding", "8px 10px"),
+                    ("font-size", "15px"),
+                    ("padding", "9px 11px"),
                 ],
             },
             {
@@ -1162,7 +1192,23 @@ def render_eda_tab() -> None:
                 st.info("Chưa có dữ liệu để thống kê.")
             else:
                 numeric_df = eda_df.select_dtypes(include="number")
-                st.dataframe(numeric_df.describe().T, use_container_width=True)
+                describe_df = numeric_df.describe().T.reset_index().rename(columns={"index": "Biến"})
+                render_styled_table(
+                    build_contrast_styler(
+                        describe_df,
+                        numeric_formats={
+                            "count": "{:,.0f}",
+                            "mean": "{:,.3f}",
+                            "std": "{:,.3f}",
+                            "min": "{:,.3f}",
+                            "25%": "{:,.3f}",
+                            "50%": "{:,.3f}",
+                            "75%": "{:,.3f}",
+                            "max": "{:,.3f}",
+                        },
+                    ),
+                    height=min(120 + 38 * len(describe_df), 400),
+                )
                 render_chart_discussion(
                     "Bảng `describe()` cho thấy khoảng giá trị, trung bình và độ lệch chuẩn của từng biến số - "
                     "cơ sở để phát hiện đơn vị đo bất thường (ví dụ độ ẩm âm, nhiệt độ ngoài khoảng hợp lý) "
@@ -1211,7 +1257,14 @@ def render_eda_tab() -> None:
         else:
             missing_summary = eda_df.isna().sum().rename("Số lượng thiếu").to_frame()
             missing_summary["Tỷ lệ thiếu (%)"] = (missing_summary["Số lượng thiếu"] / len(eda_df) * 100).round(2)
-            st.dataframe(missing_summary, use_container_width=True)
+            missing_summary = missing_summary.reset_index().rename(columns={"index": "Cột"})
+            render_styled_table(
+                build_contrast_styler(
+                    missing_summary,
+                    numeric_formats={"Số lượng thiếu": "{:,}", "Tỷ lệ thiếu (%)": "{:.2f}"},
+                ),
+                height=min(120 + 38 * len(missing_summary), 400),
+            )
             render_chart_discussion(
                 "Bảng trên thống kê số lượng và tỷ lệ giá trị thiếu theo từng cột - căn cứ để quyết định "
                 "chiến lược xử lý (loại bỏ, nội suy, hay điền giá trị trung vị) ở Tab 2."
@@ -1228,7 +1281,18 @@ def render_eda_tab() -> None:
                     if column != "Nguy_cơ_ngập"
                 ]
                 outlier_summary = compute_outlier_summary_by_class(eda_df, "Nguy_cơ_ngập", outlier_feature_columns)
-                st.dataframe(outlier_summary, use_container_width=True, hide_index=True)
+                render_styled_table(
+                    build_contrast_styler(
+                        outlier_summary,
+                        numeric_formats={
+                            "Số ngoại lệ (IQR)": "{:,}",
+                            "Tỷ lệ (%) (IQR)": "{:.2f}",
+                            "Số ngoại lệ (Z-score)": "{:,}",
+                            "Tỷ lệ (%) (Z-score)": "{:.2f}",
+                        },
+                    ),
+                    height=min(120 + 38 * len(outlier_summary), 460),
+                )
                 render_chart_discussion(
                     "Bảng trên áp dụng CẢ 2 phương pháp - IQR (ngoài [Q1-1.5·IQR, Q3+1.5·IQR]) và Z-score "
                     "(|z| > 3) - tính RIÊNG cho từng lớp `Nguy_cơ_ngập` (0/1/2), theo đúng khuyến nghị: gộp "
@@ -1592,17 +1656,18 @@ def render_preprocessing_training_tab() -> None:
 # ==================================================================================================
 # TAB 3 - ĐÁNH GIÁ MÔ HÌNH
 # ==================================================================================================
-def render_feature_importance_heatmap(feature_importance_json_path: Path) -> None:
+def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> None:
     """
-    Biểu đồ NHIỆT (heatmap, Plotly `Heatmap`) cho Feature Importance - theo góp ý của GVHD. Đọc dữ
-    liệu số thô từ `feature_importance.json` (do `plot_feature_importance()` trong
-    `analyze_and_train.py` xuất kèm ảnh PNG) - KHÔNG tính lại importance ở đây, tránh chạy lại
-    `permutation_importance` (tốn thời gian) mỗi lần Streamlit rerun.
+    Biểu đồ THANH NGANG (horizontal bar, Plotly) cho Feature Importance - theo góp ý của GVHD (đổi từ
+    heatmap sang thanh màu, dễ so sánh độ lớn giữa các biến hơn heatmap 1 hàng). Đọc dữ liệu số thô từ
+    `feature_importance.json` (do `plot_feature_importance()` trong `analyze_and_train.py` xuất kèm
+    ảnh PNG) - KHÔNG tính lại importance ở đây, tránh chạy lại `permutation_importance` (tốn thời
+    gian) mỗi lần Streamlit rerun.
 
-    Chỉ có 1 hàng (5 biến khí tượng - thủy văn của đồ án x 1 chỉ số Importance) nên bản chất là
-    "heatmap 1 hàng" - màu càng đậm thì biến đó đóng góp càng nhiều vào quyết định của model, kèm số
-    liệu chính xác hiện thẳng trên từng ô (không cần hover mới thấy được, phù hợp khi trình bày/in
-    báo cáo).
+    Sắp xếp GIẢM DẦN theo Importance, mỗi thanh 1 màu theo thang màu liên tục (sequential, xanh nhạt
+    -> xanh đậm) phản ánh ĐÚNG độ lớn - không dùng màu phân loại (categorical) vì đây là so sánh ĐỘ
+    LỚN giữa các biến, không phải phân biệt danh tính. Ghi số liệu trực tiếp ở đầu mỗi thanh (không
+    cần hover mới thấy) để phù hợp khi trình bày/in báo cáo.
     """
     with feature_importance_json_path.open("r", encoding="utf-8") as file:
         importance_records = json.load(file)
@@ -1611,25 +1676,33 @@ def render_feature_importance_heatmap(feature_importance_json_path: Path) -> Non
     if importance_df.empty:
         st.info("File `feature_importance.json` rỗng.")
         return
-    importance_df = importance_df.sort_values("Importance", ascending=False)
+    # Sắp xếp TĂNG DẦN vì Plotly vẽ thanh ngang từ DƯỚI LÊN - biến quan trọng nhất cần nằm TRÊN CÙNG.
+    importance_df = importance_df.sort_values("Importance", ascending=True)
 
     fig = go.Figure(
-        data=go.Heatmap(
-            z=[importance_df["Importance"].tolist()],
-            x=importance_df["Feature"].tolist(),
-            y=["Importance"],
-            colorscale="YlOrRd",
-            text=[[f"{value:.3f}" for value in importance_df["Importance"]]],
-            texttemplate="%{text}",
-            textfont=dict(size=13),
-            hovertemplate="%{x}: %{z:.4f}<extra></extra>",
-            colorbar=dict(title="Mức độ"),
+        data=go.Bar(
+            x=importance_df["Importance"].tolist(),
+            y=importance_df["Feature"].tolist(),
+            orientation="h",
+            marker=dict(
+                color=importance_df["Importance"].tolist(),
+                colorscale="Blues",
+                line=dict(color="#1e3a5f", width=1),
+            ),
+            text=[f"{value:.3f}" for value in importance_df["Importance"]],
+            textposition="outside",
+            textfont=dict(size=14, color="#f8fafc"),
+            hovertemplate="%{y}: %{x:.4f}<extra></extra>",
         )
     )
     fig.update_layout(
-        margin=dict(t=30, b=30),
-        height=220,
-        yaxis=dict(showticklabels=False),
+        margin=dict(t=20, b=20, l=10, r=40),
+        height=260,
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(title="Mức độ quan trọng", color="#cbd5e1", gridcolor="#334155", zeroline=False),
+        yaxis=dict(color="#f8fafc", tickfont=dict(size=13)),
+        showlegend=False,
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -1660,6 +1733,7 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
         return
 
     metrics_df = metrics_df.sort_values(by="F1 (Macro)", ascending=False).reset_index(drop=True)
+    metrics_df.insert(0, "Xếp hạng", range(1, len(metrics_df) + 1))
     render_styled_table(
         build_contrast_styler(
             metrics_df,
@@ -1669,6 +1743,7 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
                 "Recall (Macro)": "{:.4f}",
                 "F1 (Macro)": "{:.4f}",
             },
+            rank_highlight=True,
         ),
         height=420,
     )
@@ -1760,14 +1835,14 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
     with image_col_2:
         st.markdown("**Feature Importance**")
         if feature_importance_json_path.exists():
-            render_feature_importance_heatmap(feature_importance_json_path)
+            render_feature_importance_bar_chart(feature_importance_json_path)
         elif feature_importance_path.exists():
             # Fallback cho artifact từ lần train CŨ (trước khi có `feature_importance.json`) - chỉ có
-            # ảnh bar chart tĩnh, chưa có dữ liệu số thô để tự vẽ heatmap.
+            # ảnh bar chart tĩnh, chưa có dữ liệu số thô để tự vẽ lại thanh màu tương tác.
             render_full_width_image(str(feature_importance_path))
             st.caption(
-                "Chưa có dữ liệu số cho biểu đồ nhiệt (artifact từ lần train cũ) - hãy train lại để có "
-                "bản heatmap tương tác."
+                "Chưa có dữ liệu số cho biểu đồ tương tác (artifact từ lần train cũ) - hãy train lại "
+                "để có bản thanh màu tương tác."
             )
         else:
             st.info("Chưa có `feature_importance.json`/`feature_importance.png` trong `models/latest/`.")
@@ -3500,7 +3575,7 @@ def main():
     apply_global_ui_theme()
     render_sidebar()
 
-    st.title("Hệ thống Dự báo Ngập lụt Thừa Thiên Huế")
+    st.title("Dự báo Ngập lụt Thừa Thiên Huế")
     st.caption(
         "Dự báo 14 ngày tới → Khám phá dữ liệu → Tiền xử lý & Huấn luyện → Đánh giá mô hình → "
         "Bản đồ chỉ đường tránh ngập."
