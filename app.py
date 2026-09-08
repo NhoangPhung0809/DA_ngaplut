@@ -903,11 +903,28 @@ def build_contrast_styler(
     `rank_highlight=True`: tô nổi 3 DÒNG ĐẦU (sau khi `df` đã được sắp xếp theo tiêu chí xếp hạng
     TRƯỚC KHI truyền vào đây) bằng màu huy chương vàng/bạc/đồng (`RANK_MEDAL_COLORS`) - ĐÈ LÊN màu sọc
     ngựa vằn mặc định cho đúng 3 dòng đó, dùng cho các bảng xếp hạng model theo điểm số.
+
+    ----------------------------------------------------------------------------------------------
+    ĐÃ SỬA LỖI CRASH THẬT KHI CHẠY (TypeError: unsupported format string passed to NoneType.__format__):
+    ----------------------------------------------------------------------------------------------
+    Nếu 1 cột trong `numeric_formats` có giá trị `None` (ví dụ model chưa từng chạy qua bước tính chỉ
+    số đó - xem `attach_train_test_gap()`), và TOÀN BỘ cột đó là `None` (không có dòng nào là số),
+    pandas giữ dtype `object` thay vì tự ép về số. Format string kiểu `"{:.4f}"` xử lý được `NaN`
+    (Python format trả về chuỗi "nan") nhưng CRASH khi gặp `None` trực tiếp - 2 khái niệm khác nhau.
+    Chủ động ép các cột có `numeric_formats` về kiểu số thật bằng `pd.to_numeric(..., errors="coerce")`
+    (None/chuỗi không hợp lệ -> NaN) TRƯỚC khi format, rồi hiển thị "-" cho ô thiếu dữ liệu (`na_rep`)
+    thay vì để crash hoặc hiện chữ "nan" xấu trên giao diện.
     """
+    df = df.copy()
+    if numeric_formats:
+        for column in numeric_formats:
+            if column in df.columns:
+                df[column] = pd.to_numeric(df[column], errors="coerce")
+
     styled_df = df.style
 
     if numeric_formats:
-        styled_df = styled_df.format(numeric_formats)
+        styled_df = styled_df.format(numeric_formats, na_rep="-")
 
     def zebra_rows(row):
         medal = RANK_MEDAL_COLORS.get(row.name) if rank_highlight else None
