@@ -158,7 +158,14 @@ ALL_MODEL_NAMES = [
 ]
 SEQUENCE_WINDOW = 7
 CTGAN_MAX_TRAIN_ROWS_PER_CLASS = 5000
-CTGAN_MAX_TARGET_ROWS_PER_CLASS = 10000
+# Trần AN TOÀN (safety ceiling) cho số dòng sinh thêm mỗi lớp thiểu số - KHÔNG phải mục tiêu cân bằng
+# thực tế. Mục tiêu thật là khớp đúng số lượng lớp ĐA SỐ (xem `target_count` trong
+# `apply_gan_data_augmentation()`), để 3 lớp cân bằng THẬT SỰ thay vì dừng ở 1 con số cố định thấp
+# hơn lớp đa số (ví dụ trước đây đặt cứng 10.000 dù lớp đa số thực tế là 12.795 - lớp đa số VẪN
+# thắng thế). Đặt trần này cao hơn NHIỀU so với quy mô dữ liệu hiện tại (chỉ để chặn trường hợp cực
+# đoan dữ liệu tương lai phình to bất thường, tránh CTGAN chạy vô thời hạn) - KHÔNG chặn việc cân bằng
+# thật ở quy mô dữ liệu hiện tại.
+CTGAN_MAX_TARGET_ROWS_PER_CLASS = 50000
 CTGAN_EPOCHS = 10
 CTGAN_BATCH_SIZE = 256
 CTGAN_EXPORT_SAMPLE_SIZE = 1000
@@ -2631,14 +2638,31 @@ def plot_feature_importance(best_model, X_test_scaled: pd.DataFrame, y_test: pd.
     """
     Vẽ và lưu feature importance cho mô hình tốt nhất (ảnh PNG - bar chart, giữ lại làm bản xuất tĩnh/
     tải về), ĐỒNG THỜI xuất kèm `feature_importance.json` chứa đúng dữ liệu số thô (Feature/Importance)
-    để `app.py` tự vẽ biểu đồ RADAR TƯƠNG TÁC bằng Plotly (theo góp ý của GVHD) mà không cần chạy lại
-    `extract_feature_importance()` - vốn có thể tốn thời gian với `permutation_importance` (nhiều lần
-    suy luận lại trên tập test).
+    để `app.py` tự vẽ lại bằng Plotly thành THANH MÀU TƯƠNG TÁC (theo góp ý của GVHD) mà không cần
+    chạy lại `extract_feature_importance()` - vốn có thể tốn thời gian với `permutation_importance`
+    (nhiều lần suy luận lại trên tập test).
+
+    MÀU SẮC: dùng CÙNG 1 THANG MÀU XANH (seaborn "Blues", nhạt -> đậm theo mức độ quan trọng TĂNG DẦN)
+    như bản Plotly tương tác trong app.py - KHÔNG dùng bảng màu phân loại nhiều màu (mỗi thanh 1 màu
+    khác nhau) như trước, vì đây là so sánh ĐỘ LỚN giữa các biến (1 đại lượng liên tục), không phải so
+    sánh danh tính - dùng nhiều màu ngẫu nhiên dễ khiến người xem lầm tưởng có ý nghĩa phân loại.
     """
     importance_df = extract_feature_importance(best_model, X_test_scaled, y_test)
+    # Sắp TĂNG DẦN vì matplotlib/seaborn vẽ barplot ngang từ TRÊN XUỐNG theo thứ tự dòng - cần dòng
+    # ĐẦU (importance thấp nhất) tương ứng màu NHẠT nhất trong palette, dòng CUỐI (cao nhất) đậm nhất.
+    importance_df_sorted = importance_df.sort_values("Importance", ascending=True).reset_index(drop=True)
+    blue_palette = sns.color_palette("Blues", n_colors=len(importance_df_sorted))
 
     plt.figure(figsize=(10, 6))
-    sns.barplot(data=importance_df, x="Importance", y="Feature", hue="Feature", dodge=False, legend=False)
+    sns.barplot(
+        data=importance_df_sorted,
+        x="Importance",
+        y="Feature",
+        hue="Feature",
+        palette=blue_palette,
+        dodge=False,
+        legend=False,
+    )
     plt.title("Feature Importance - Best Model")
     plt.tight_layout()
 
