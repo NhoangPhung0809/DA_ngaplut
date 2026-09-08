@@ -884,6 +884,41 @@ def evaluate_prediction_arrays(
     }
 
 
+def attach_train_test_gap(
+    metrics: dict,
+    model_name: str,
+    category: str,
+    deployment_compatible: bool,
+    y_train_true,
+    train_predictions,
+) -> None:
+    """
+    Gắn thêm chỉ số phát hiện "HỌC VẸT" (overfitting) vào `metrics` (sửa tại chỗ - in place): so sánh
+    điểm F1-Macro/Accuracy model đạt được trên CHÍNH tập đã `.fit()` với điểm trên tập TEST (đã có sẵn
+    trong `metrics`, tính từ trước khi gọi hàm này) - khoảng cách train-test CÀNG LỚN, model càng có
+    dấu hiệu "học thuộc lòng" dữ liệu train thay vì học được quy luật tổng quát hoá sang dữ liệu chưa
+    từng thấy.
+
+    LƯU Ý QUAN TRỌNG khi diễn giải (đưa vào báo cáo luận văn): nếu tập train truyền vào là
+    `X_train_balanced` (đã qua CTGAN/SMOTE, có lẫn mẫu TỔNG HỢP), khoảng cách train-test phản ánh CẢ
+    việc học thuộc mẫu tổng hợp LẪN học thuộc nhiễu của dữ liệu thật - không tách bạch được 2 nguyên
+    nhân bằng chỉ số này. Dù vậy, đây vẫn là tín hiệu hữu ích: khoảng cách quá lớn (kinh nghiệm chung
+    ~0.15-0.20 F1-Macro trở lên) là dấu hiệu đáng ngờ cần xem lại độ phức tạp của model (ví dụ cây
+    quyết định quá sâu, mạng nơ-ron quá nhiều tham số so với lượng dữ liệu thật).
+    """
+    train_metrics = evaluate_prediction_arrays(
+        model_name=model_name,
+        y_true=y_train_true,
+        y_pred=train_predictions,
+        category=category,
+        deployment_compatible=deployment_compatible,
+        evaluation_scope="train_set_sanity_check",
+    )
+    metrics["train_accuracy"] = train_metrics["accuracy"]
+    metrics["train_f1_macro"] = train_metrics["f1_macro"]
+    metrics["overfitting_gap_f1"] = round(train_metrics["f1_macro"] - metrics["f1_macro"], 4)
+
+
 def safe_compute_roc_auc_ovr_macro(y_true: np.ndarray, y_proba: np.ndarray) -> float | None:
     y_true = np.asarray(y_true).astype(int)
     y_proba = np.asarray(y_proba, dtype=float)
@@ -2124,6 +2159,11 @@ def train_and_evaluate_models(
                     metrics["roc_auc_ovr_macro"] = safe_compute_roc_auc_ovr_macro(y_test, proba)
                 except Exception:
                     metrics["roc_auc_ovr_macro"] = None
+            # Kiểm tra "học vẹt" - xem docstring `attach_train_test_gap()`.
+            attach_train_test_gap(
+                metrics, model_name, category, deployment_compatible,
+                y_train_balanced, model.predict(X_train_balanced),
+            )
         elif model_kind == "tabular_regressor":
             model = model_config["model"]
             model.fit(X_train_balanced, y_train_balanced.astype(float))
@@ -2136,6 +2176,11 @@ def train_and_evaluate_models(
                 category=category,
                 deployment_compatible=deployment_compatible,
                 evaluation_scope="daily_t_plus_1_tabular",
+            )
+            # Kiểm tra "học vẹt" - xem docstring `attach_train_test_gap()`.
+            attach_train_test_gap(
+                metrics, model_name, category, deployment_compatible,
+                y_train_balanced, round_and_clip_predictions(model.predict(X_train_balanced)),
             )
         elif model_kind == "time_series_arima":
             metrics = train_arima_family_model(model_name, daily_df, seasonal=False)
