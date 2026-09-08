@@ -3397,7 +3397,14 @@ def build_smart_routing_map(
     """
     center_lat = sum(lat for lat, _ in REAL_MONITORED_LOCATIONS.values()) / len(REAL_MONITORED_LOCATIONS)
     center_lon = sum(lon for _, lon in REAL_MONITORED_LOCATIONS.values()) / len(REAL_MONITORED_LOCATIONS)
-    routing_map = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles="OpenStreetMap")
+    # NỀN BẢN ĐỒ: dùng "CartoDB dark_matter" thay vì "OpenStreetMap" mặc định trước đây - ĐÃ KIỂM
+    # CHỨNG THỰC TẾ `tile.openstreetmap.org` (server tile gốc của OSM) chặn/không phản hồi ổn định từ
+    # nhiều môi trường server/cloud (chính sách Tile Usage Policy của OSM ưu tiên trình duyệt người
+    # dùng cuối, không khuyến khích truy cập hàng loạt từ server) - dẫn tới bản đồ hiện nền TRẮNG/XÁM
+    # TRỐNG dù các lớp GeoJson/marker vẫn vẽ đúng (đúng hiện tượng đã gặp khi deploy thực tế). CartoDB
+    # (basemaps.cartocdn.com) không có chính sách chặn này, đồng thời nền tối "dark_matter" hợp với
+    # theme tối của toàn bộ app hơn nhiều so với nền OpenStreetMap trắng chói.
+    routing_map = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles="CartoDB dark_matter")
 
     # ---- (1) Giám sát: TÔ RANH GIỚI HÀNH CHÍNH thật của 5 địa phương, màu theo đúng 'Nguy cơ' dự báo
     # của AI. FAIL-SAFE: thiếu dòng dữ liệu cũng KHÔNG mặc định "An toàn" (xem docstring
@@ -3463,6 +3470,28 @@ def build_smart_routing_map(
                     popup=popup,
                     icon=folium.Icon(color="gray", icon="question", prefix="fa"),
                 ).add_to(routing_map)
+
+    # ---- NHÃN TÊN CỐ ĐỊNH cho 5 địa phương - LUÔN HIỂN THỊ trên bản đồ (không cần rê chuột/click như
+    # tooltip/popup ở trên) - dùng `DivIcon` (nhãn chữ thuần, không phải icon ghim) đặt NGAY TRÊN mỗi
+    # vùng/điểm giám sát, màu viền theo đúng 'Nguy cơ' để vừa đọc được tên vừa nhận biết trạng thái
+    # ngay từ cái nhìn đầu tiên, không phải tương tác mới biết đây là địa phương nào.
+    for location_name, coordinates in REAL_MONITORED_LOCATIONS.items():
+        risk_rows = df_predictions.loc[df_predictions["Địa phương"] == location_name, "Nguy cơ"]
+        risk_status = risk_rows.iloc[0] if not risk_rows.empty else "Không xác định"
+        label_border_color = RISK_FILL_COLOR_MAP.get(risk_status, "#9CA3AF")
+        folium.Marker(
+            location=coordinates,
+            icon=folium.DivIcon(
+                html=(
+                    '<div style="'
+                    "font-size: 12px; font-weight: 700; color: #f8fafc; "
+                    "background: rgba(15, 23, 42, 0.85); padding: 2px 7px; border-radius: 4px; "
+                    f"border: 1.5px solid {label_border_color}; white-space: nowrap; "
+                    'transform: translate(-50%, -160%);">'
+                    f"{location_name}</div>"
+                )
+            ),
+        ).add_to(routing_map)
 
     # ---- Vẽ vùng ngập THỰC TẾ (đã được suy ra từ df_predictions, không còn là dummy cố định) ----
     for polygon in real_flooded_polygons:
