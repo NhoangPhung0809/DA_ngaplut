@@ -39,7 +39,7 @@ load_dotenv()
 
 # Cấu hình giao diện trang Streamlit.
 st.set_page_config(
-    page_title="Dự báo Ngập lụt Thừa Thiên Huế",
+    page_title="Dự báo ngập lụt Thừa Thiên Huế",
     page_icon="🌊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -371,6 +371,14 @@ DEFAULT_SEQUENCE_WINDOW_SIZE = 7
 # CHUNG cho mọi bảng/biểu đồ hiển thị 3 lớp nguy cơ ngập trong app (tránh định nghĩa lại rải rác).
 CLASS_LABEL_VI: dict[str, str] = {"0": "Không ngập", "1": "Ngập nhẹ", "2": "Ngập nặng"}
 
+# Ngưỡng chênh lệch F1-Macro (train - test) để cảnh báo model có dấu hiệu "học vẹt" (overfitting) -
+# xem `attach_train_test_gap()` trong analyze_and_train.py và `render_overfitting_check_section()`.
+OVERFITTING_GAP_WARNING_THRESHOLD = 0.15
+
+# Chu kỳ tự động làm mới các tab "sống" (dự báo, giám sát) khi trình duyệt vẫn đang mở - dùng
+# `st.fragment(run_every=...)`, xem giải thích đầy đủ tại `render_forecast_tab()`.
+LIVE_TAB_AUTO_REFRESH_INTERVAL = "10m"
+
 # Số ngày dự báo (Ngày T + 13 ngày tới = 14 ngày) - DÙNG CHUNG cho `predict_4_days_forecast()` và
 # `predict_days_ahead_forecast_sequence()`, cùng với nhãn hiển thị tương ứng cho từng ngày. Open-Meteo
 # Forecast API hỗ trợ tối đa 16 ngày (forecast_days<=16) nên 14 ngày vẫn nằm trong giới hạn miễn phí.
@@ -671,7 +679,7 @@ def initialize_system():
     Khởi tạo hệ thống đúng một lần khi app bắt đầu:
     - Tự tải dữ liệu lịch sử nếu thiếu (gọi lại `fetch_data.py`)
     - KHÔNG tự huấn luyện trong Streamlit nếu thiếu artifact - việc train phải được kích hoạt tường
-      minh từ Tab "Tiền xử lý & Huấn luyện" để tránh block giao diện.
+      minh từ Tab "Tiền xử lý & huấn luyện" để tránh block giao diện.
     """
     ensure_latest_models_dir()
 
@@ -1158,12 +1166,12 @@ def render_interactive_monthly_trend_chart(eda_df: pd.DataFrame) -> None:
 
 def render_eda_tab() -> None:
     """
-    Nội dung Tab 1 - Khám phá Dữ liệu (EDA), bước ĐẦU TIÊN của vòng đời Data Science.
+    Nội dung Tab 1 - Khám phá dữ liệu (EDA), bước ĐẦU TIÊN của vòng đời Data Science.
     Bố cục: 2 cột song song (Raw Data | Thống kê mô tả) phía trên, tiếp theo là 1 khối biểu đồ phân
     phối/tương quan, và cuối cùng là khối xử lý giá trị thiếu/ngoại lai - mỗi khối đặt trong
     `st.expander` để trang không bị dồn cục, người xem chỉ mở phần mình cần.
     """
-    st.subheader("Khám phá Dữ liệu (EDA)")
+    st.subheader("Khám phá dữ liệu (EDA)")
     st.caption(
         "Bước 1/4 của pipeline: hiểu dữ liệu trước khi làm sạch và huấn luyện. Các biểu đồ tĩnh bên dưới "
         "được sinh sẵn bởi `eda_analysis.py` (chạy `python eda_analysis.py` để làm mới sau khi có dữ liệu mới)."
@@ -1229,7 +1237,7 @@ def render_eda_tab() -> None:
     st.markdown("---")
 
     # ---- Hàng 2: biểu đồ phân phối / tương quan (ảnh tĩnh do eda_analysis.py sinh sẵn) ----
-    with st.expander("Phân phối dữ liệu & Ma trận tương quan (Distribution / Heatmap)", expanded=True):
+    with st.expander("Phân phối dữ liệu & ma trận tương quan (Distribution / Heatmap)", expanded=True):
         # TODO: đây là placeholder hiển thị ẢNH TĨNH từ `eda_analysis.py` để tránh vẽ lại biểu đồ nặng
         # mỗi lần Streamlit rerun. Nếu muốn biểu đồ TƯƠNG TÁC, có thể thay bằng `px.imshow()` (heatmap)
         # hoặc `px.histogram()` (phân phối) ngay trong hàm này.
@@ -1493,7 +1501,7 @@ def render_ctgan_section() -> None:
     col1, col2 = st.columns(2)
     with col1:
         render_ctgan_dataset_panel(
-            title="Dữ liệu Gốc (Bị mất cân bằng)",
+            title="Dữ liệu gốc (Bị mất cân bằng)",
             subtitle="Snapshot trước khi áp dụng CTGAN.",
             summary=summary.get("before"),
             dataset_df=artifacts["before_df"],
@@ -1652,11 +1660,11 @@ def load_cleaned_training_dataframe() -> pd.DataFrame:
 
 def render_preprocessing_training_tab() -> None:
     """
-    Nội dung Tab 2 - Tiền xử lý & Huấn luyện, bước THỨ HAI của vòng đời Data Science.
+    Nội dung Tab 2 - Tiền xử lý & huấn luyện, bước THỨ HAI của vòng đời Data Science.
     Bố cục: 2 cột song song (Dữ liệu đã làm sạch | Chia Train/Test) phía trên, tiếp theo là khối
     Cân bằng dữ liệu (CTGAN) và khối Log Tinh chỉnh siêu tham số - mỗi khối 1 `st.expander`.
     """
-    st.subheader("Tiền xử lý & Huấn luyện")
+    st.subheader("Tiền xử lý & huấn luyện")
     st.caption(
         "Bước 2/4 của pipeline: làm sạch dữ liệu, chia tập train/test đúng đặc thù chuỗi thời gian, "
         "cân bằng lớp thiểu số, và tinh chỉnh siêu tham số (Optuna / GridSearchCV)."
@@ -1720,7 +1728,7 @@ def render_preprocessing_training_tab() -> None:
         )
         render_ctgan_section()
 
-    with st.expander("Log Tinh chỉnh Siêu tham số (Optuna / GridSearchCV)", expanded=True):
+    with st.expander("Log tinh chỉnh siêu tham số (Optuna / GridSearchCV)", expanded=True):
         st.caption(
             "Random Forest tự tinh chỉnh bằng GridSearchCV, XGBoost bằng Optuna (TPE) - CHẠY THẬT "
             "trên dữ liệu train của lần huấn luyện gần nhất (`analyze_and_train.py`), không phải demo."
@@ -1783,6 +1791,64 @@ def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> N
     st.plotly_chart(fig, use_container_width=True)
 
 
+def render_overfitting_check_section(metrics_df: pd.DataFrame) -> None:
+    """
+    Khối "Kiểm tra học vẹt (Overfitting)" - so sánh F1-Macro trên tập TRAIN vs tập TEST cho từng
+    model, sắp xếp GIẢM DẦN theo mức chênh lệch (model học vẹt rõ nhất nằm trên cùng).
+
+    LƯU Ý PHẠM VI: chỉ số này hiện CHỈ được tính cho model dạng bảng (tabular_classifier/
+    tabular_regressor - xem `attach_train_test_gap()` trong `analyze_and_train.py`), CHƯA áp dụng cho
+    model dạng chuỗi/Deep Learning (LSTM/GRU/CNN/Hybrid) - các model đó sẽ tự động không xuất hiện ở
+    đây (cột `Chênh lệch Train-Test (F1)` rỗng) thay vì hiện sai số 0 gây hiểu lầm là "không học vẹt".
+    """
+    checkable_df = metrics_df.dropna(subset=["Chênh lệch Train-Test (F1)"]).copy()
+    if checkable_df.empty:
+        return
+
+    checkable_df = checkable_df.sort_values("Chênh lệch Train-Test (F1)", ascending=False).reset_index(drop=True)
+
+    with st.expander("Kiểm tra học vẹt (Overfitting) - so sánh điểm Train vs Test", expanded=False):
+        st.caption(
+            "So sánh F1-Macro trên chính tập TRAIN model đã học với F1-Macro trên tập TEST (chưa từng "
+            "thấy) - chênh lệch càng lớn, model càng có dấu hiệu học thuộc lòng dữ liệu train thay vì "
+            f"học được quy luật tổng quát hoá được. Ngưỡng cảnh báo tham khảo: > "
+            f"{OVERFITTING_GAP_WARNING_THRESHOLD:.2f} điểm F1-Macro. Chỉ áp dụng cho model dạng bảng "
+            "(chưa tính cho model dạng chuỗi/Deep Learning)."
+        )
+        display_df = checkable_df[
+            ["Model", "Train F1 (Macro)", "F1 (Macro)", "Chênh lệch Train-Test (F1)"]
+        ].rename(columns={"F1 (Macro)": "Test F1 (Macro)"})
+        render_styled_table(
+            build_contrast_styler(
+                display_df,
+                numeric_formats={
+                    "Train F1 (Macro)": "{:.4f}",
+                    "Test F1 (Macro)": "{:.4f}",
+                    "Chênh lệch Train-Test (F1)": "{:+.4f}",
+                },
+            ),
+            height=min(120 + 38 * len(display_df), 420),
+        )
+
+        flagged_df = checkable_df[checkable_df["Chênh lệch Train-Test (F1)"] > OVERFITTING_GAP_WARNING_THRESHOLD]
+        if flagged_df.empty:
+            st.success(
+                "Không model nào (trong số có đủ dữ liệu kiểm tra) vượt ngưỡng cảnh báo học vẹt - "
+                "khoảng cách train-test ở mức chấp nhận được."
+            )
+        else:
+            flagged_names = ", ".join(
+                f"**{row['Model']}** (+{row['Chênh lệch Train-Test (F1)']:.4f})"
+                for _, row in flagged_df.iterrows()
+            )
+            st.warning(
+                f"Nghi ngờ học vẹt: {flagged_names} - điểm trên tập train cao vượt trội so với tập "
+                "test. Cân nhắc giảm độ phức tạp model (giảm độ sâu cây, tăng regularization, giảm k "
+                "cho KNN...) hoặc kiểm tra lại xem model có đang 'nhớ' mẫu tổng hợp CTGAN/SMOTE thay vì "
+                "học quy luật thật hay không."
+            )
+
+
 def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) -> None:
     """Hiển thị bảng số liệu, biểu đồ Plotly và ảnh artifact đánh giá mô hình (Model Comparison Metrics)."""
     if not evaluation_metrics:
@@ -1800,6 +1866,8 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
                 "Precision (Macro)": metric_values.get("precision_macro"),
                 "Recall (Macro)": metric_values.get("recall_macro"),
                 "F1 (Macro)": metric_values.get("f1_macro"),
+                "Train F1 (Macro)": metric_values.get("train_f1_macro"),
+                "Chênh lệch Train-Test (F1)": metric_values.get("overfitting_gap_f1"),
             }
         )
 
@@ -1818,6 +1886,8 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
                 "Precision (Macro)": "{:.4f}",
                 "Recall (Macro)": "{:.4f}",
                 "F1 (Macro)": "{:.4f}",
+                "Train F1 (Macro)": "{:.4f}",
+                "Chênh lệch Train-Test (F1)": "{:+.4f}",
             },
             rank_highlight=True,
         ),
@@ -1832,6 +1902,8 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
         f"khoảng {(best_metrics_row['F1 (Macro)'] - worst_metrics_row['F1 (Macro)']):.4f} điểm, cho thấy việc lựa chọn "
         "đúng thuật toán có tác động đáng kể đến chất lượng cảnh báo ngập trước khi đưa vào vận hành thực tế."
     )
+
+    render_overfitting_check_section(metrics_df)
 
     st.markdown("### So sánh F1-Score của toàn bộ mô hình")
     f1_chart_df = metrics_df.sort_values(by="F1 (Macro)", ascending=False).copy()
@@ -1980,7 +2052,7 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
             st.error(f"Nạp model thất bại: {exc}")
 
     st.markdown("---")
-    st.subheader("Phân tích Đường cong ROC-AUC (One-vs-Rest)")
+    st.subheader("Phân tích đường cong ROC-AUC (One-vs-Rest)")
     roc_path = Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR))) / "roc_curve_data.json"
     if not roc_path.exists():
         st.info("Chưa có `roc_curve_data.json`. Hãy train lại mô hình để xuất ROC-AUC.")
@@ -2068,11 +2140,11 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
 
 def render_evaluation_tab() -> None:
     """
-    Nội dung Tab 3 - Đánh giá Mô hình, bước THỨ BA của vòng đời Data Science.
+    Nội dung Tab 3 - Đánh giá mô hình, bước THỨ BA của vòng đời Data Science.
     Bố cục: khối so sánh chỉ số (tái sử dụng `render_model_metrics`) rồi đến khối "Kết luận quản trị" -
     phần bắt buộc phải có để nối kết quả kỹ thuật với ý nghĩa thực tiễn cho người ra quyết định.
     """
-    st.subheader("Đánh giá Mô hình")
+    st.subheader("Đánh giá mô hình")
     st.caption("Bước 3/4 của pipeline: so sánh hiệu năng các mô hình đã huấn luyện và rút ra khuyến nghị quản trị.")
 
     try:
@@ -2080,14 +2152,14 @@ def render_evaluation_tab() -> None:
     except Exception as exc:
         st.warning(
             f"Chưa thể nạp evaluation metrics: {exc} "
-            "Hãy khởi chạy huấn luyện ở Tab 2 (Tiền xử lý & Huấn luyện) trước."
+            "Hãy khởi chạy huấn luyện ở Tab 2 (Tiền xử lý & huấn luyện) trước."
         )
         return
 
     with st.expander("So sánh chỉ số mô hình (F1-Score / Precision / Recall)", expanded=True):
         render_model_metrics(evaluation_metrics, deployment_config, runtime_info)
 
-    with st.expander("Nhận định & Kết luận quản trị (Managerial Insights)", expanded=True):
+    with st.expander("Nhận định & kết luận quản trị (Managerial Insights)", expanded=True):
         # TODO: thay nội dung placeholder này bằng nhận định THẬT rút ra từ kết quả mô hình + EDA (Tab 1)
         # của bạn - đây là phần quan trọng nhất khi bảo vệ luận văn vì nối kết quả kỹ thuật với hành động
         # quản trị thực tế, không chỉ dừng lại ở con số.
@@ -3090,6 +3162,7 @@ def render_weather_comparison_section() -> None:
             )
 
 
+@st.fragment(run_every=LIVE_TAB_AUTO_REFRESH_INTERVAL)
 def render_forecast_tab() -> None:
     """
     Nội dung TRANG ĐẦU TIÊN của app - bảng dự báo nguy cơ ngập 14 ngày tới (T đến T+13) cho toàn bộ
@@ -3099,11 +3172,29 @@ def render_forecast_tab() -> None:
     quyền địa phương khi vận hành, hoặc hội đồng khi bảo vệ luận văn) cần thấy NGAY khi mở app -
     "mô hình dự báo được gì" - thay vì phải lật qua các tab kỹ thuật nội bộ (khám phá dữ liệu, quy
     trình huấn luyện) trước mới thấy được giá trị thực tế của hệ thống.
+
+    ----------------------------------------------------------------------------------------------
+    HỆ THỐNG HOÁ CẬP NHẬT REALTIME LIÊN TỤC (`@st.fragment(run_every=...)`):
+    ----------------------------------------------------------------------------------------------
+    Toàn bộ hàm này được đánh dấu là 1 FRAGMENT của Streamlit, tự động CHẠY LẠI mỗi
+    `LIVE_TAB_AUTO_REFRESH_INTERVAL` (hiện tại: 10 phút) MÀ KHÔNG CẦN người dùng bấm F5 hay tương tác
+    gì - miễn là tab trình duyệt vẫn đang mở (kết nối WebSocket với server còn sống). Vì các hàm dữ
+    liệu bên dưới (`_compute_forecast_4day_result()`) đã tự cache theo mtime/ngày, mỗi lần fragment
+    tự chạy lại gần như MIỄN PHÍ (trả cache ngay) TRỪ KHI có gì đó thật sự thay đổi (huấn luyện xong
+    model mới, hoặc đã qua ngày mới) - lúc đó UI sẽ tự cập nhật ngay trong 10 phút kế tiếp mà không
+    cần ai chủ động làm gì.
+
+    GIỚI HẠN CẦN NÓI RÕ (đúng bản chất kiến trúc Streamlit, không phải thiếu sót khi cài đặt): cơ chế
+    này CHỈ hoạt động khi có ÍT NHẤT 1 trình duyệt đang mở kết nối tới app - Streamlit không có tiến
+    trình nền chạy khi hoàn toàn không ai xem trang (khác với cron job thật chạy độc lập trên server).
+    Nếu cần dữ liệu THẬT SỰ được fetch mới ngay cả khi không ai mở app, vẫn cần 1 tiến trình lập lịch
+    riêng ở tầng hệ điều hành (cron/systemd timer gọi `fetch_data.py`) - nằm ngoài phạm vi Streamlit.
     """
-    st.subheader("Dự báo Ngập lụt 14 ngày tới")
+    st.subheader("Dự báo ngập lụt 14 ngày tới")
     st.caption(
         "Kết quả dự báo THẬT từ model đã huấn luyện, cho toàn bộ 5 địa phương giám sát (Ngày T = hôm "
-        "nay, đến T+13), dựa trên dữ liệu thời tiết dự báo mới nhất từ Open-Meteo Forecast API."
+        "nay, đến T+13), dựa trên dữ liệu thời tiết dự báo mới nhất từ Open-Meteo Forecast API. Trang "
+        f"này tự động kiểm tra và làm mới mỗi {LIVE_TAB_AUTO_REFRESH_INTERVAL} khi đang mở."
     )
 
     header_left, header_right = st.columns([5, 1])
@@ -3149,7 +3240,7 @@ def render_forecast_tab() -> None:
 
     if refresh_error is not None:
         if cached_result is None:
-            st.error(f"{refresh_error} Hãy khởi chạy huấn luyện ở Tab 'Tiền xử lý & Huấn luyện' trước.")
+            st.error(f"{refresh_error} Hãy khởi chạy huấn luyện ở Tab 'Tiền xử lý & huấn luyện' trước.")
             return
         st.warning(
             f"Không làm mới được dự báo mới ({refresh_error}) - đang hiển thị kết quả gần nhất "
@@ -3396,7 +3487,7 @@ def build_smart_routing_map(
 
 def render_smart_routing_tab() -> None:
     """
-    Nội dung Tab 4 - Bản đồ Tránh ngập, bước THỨ TƯ (sản phẩm ứng dụng thực tế) của pipeline.
+    Nội dung Tab 4 - Bản đồ tránh ngập, bước THỨ TƯ (sản phẩm ứng dụng thực tế) của pipeline.
 
     THIẾT KẾ LẠI THEO YÊU CẦU THỰC TẾ (khác bản demo trước - vốn chỉ cho chọn giữa 5 điểm giám sát
     cố định và luôn cần bấm nút thủ công):
@@ -3408,7 +3499,7 @@ def render_smart_routing_tab() -> None:
          bấm nút - nút "Tìm tuyến đường" vẫn giữ lại để chủ động tính lại bất cứ lúc nào (kể cả khi
          đang an toàn), nhưng không còn là điều kiện BẮT BUỘC để có tuyến đường khi có ngập.
     """
-    st.subheader("Bản đồ Tránh ngập")
+    st.subheader("Bản đồ tránh ngập")
     st.caption(
         "Bước 4/4 của pipeline: giám sát 5 địa phương THỰC TẾ tại Thừa Thiên Huế bằng kết quả dự báo "
         "của model AI. Click trực tiếp lên bản đồ để đặt điểm xuất phát/điểm đến ở BẤT KỲ vị trí nào - "
@@ -3627,10 +3718,10 @@ def render_sidebar() -> None:
     st.sidebar.markdown("## Flood Prediction Pipeline")
     st.sidebar.markdown(
         "1. Dự báo 14 ngày tới\n"
-        "2. Khám phá Dữ liệu (EDA)\n"
-        "3. Tiền xử lý & Huấn luyện\n"
-        "4. Đánh giá Mô hình\n"
-        "5. Bản đồ Tránh ngập\n"
+        "2. Khám phá dữ liệu (EDA)\n"
+        "3. Tiền xử lý & huấn luyện\n"
+        "4. Đánh giá mô hình\n"
+        "5. Bản đồ tránh ngập\n"
     )
     st.sidebar.markdown("---")
     if st.sidebar.button("Làm mới toàn bộ cache", key="clear_all_cache_button", use_container_width=True):
@@ -3651,9 +3742,9 @@ def main():
     apply_global_ui_theme()
     render_sidebar()
 
-    st.title("Dự báo Ngập lụt Thừa Thiên Huế")
+    st.title("Dự báo ngập lụt Thừa Thiên Huế")
     st.caption(
-        "Dự báo 14 ngày tới → Khám phá dữ liệu → Tiền xử lý & Huấn luyện → Đánh giá mô hình → "
+        "Dự báo 14 ngày tới → Khám phá dữ liệu → Tiền xử lý & huấn luyện → Đánh giá mô hình → "
         "Bản đồ chỉ đường tránh ngập."
     )
     st.markdown("---")
@@ -3667,10 +3758,10 @@ def main():
     tab_forecast, tab_eda, tab_train, tab_eval, tab_map = st.tabs(
         [
             "Dự báo 14 ngày tới",
-            "Khám phá Dữ liệu (EDA)",
-            "Tiền xử lý & Huấn luyện",
-            "Đánh giá Mô hình",
-            "Bản đồ Tránh ngập",
+            "Khám phá dữ liệu (EDA)",
+            "Tiền xử lý & huấn luyện",
+            "Đánh giá mô hình",
+            "Bản đồ tránh ngập",
         ]
     )
 
