@@ -2709,6 +2709,33 @@ def copy_artifact_to_plots(source_path: Path, target_name: str) -> Path:
     return destination
 
 
+def remove_stale_latest_artifact(target_name: str) -> None:
+    """
+    Xoá file CŨ (nếu có) ở `models/latest/<target_name>` và `plots/<target_name>` - dùng khi lần train
+    NÀY không sinh ra artifact đó (ví dụ model thắng cuộc là dạng chuỗi/hybrid nên không có
+    `feature_importance.png`/`.json` kiểu tabular - xem nhánh `elif`/`else` trong `run_training_pipeline()`).
+
+    ----------------------------------------------------------------------------------------------
+    TẠI SAO CẦN HÀM NÀY (đã từng gây hiểu lầm THẬT khi demo cho GVHD):
+    ----------------------------------------------------------------------------------------------
+    TRƯỚC ĐÂY, khi 1 lần train có model thắng cuộc KHÔNG hỗ trợ artifact nào đó, code chỉ đơn giản
+    KHÔNG COPY artifact mới, nhưng cũng KHÔNG XOÁ file CŨ từ 1 lần train TRƯỚC (thời điểm đó có model
+    tabular thắng, đã từng sinh ra artifact) - hậu quả: `models/latest/feature_importance.png` vẫn
+    còn nguyên từ lần chạy CŨ, và `app.py` (chỉ kiểm tra "file có tồn tại không") vô tình hiển thị lại
+    ảnh CŨ như thể đó là kết quả của lần train MỚI NHẤT - gây hiểu lầm nghiêm trọng vì ảnh không khớp
+    với model đang thực sự triển khai. Gọi hàm này ngay khi biết chắc lần train này không sinh ra
+    artifact đó, để UI hiển thị ĐÚNG "chưa có/không áp dụng" thay vì âm thầm hiện dữ liệu lỗi thời.
+    """
+    for directory in (LATEST_MODELS_DIR, PLOTS_DIR):
+        stale_path = directory / target_name
+        if stale_path.exists():
+            try:
+                stale_path.unlink()
+                print(f"Removed stale artifact (không áp dụng cho model lần này): {stale_path}")
+            except Exception as exc:
+                print(f"[Warning] Không xoá được artifact cũ {stale_path}: {exc}")
+
+
 def run_training_pipeline(selected_models_list: list[str], balancing_method: str = "auto"):
     """
     Chạy pipeline huấn luyện theo danh sách mô hình được chọn từ UI.
@@ -2846,26 +2873,40 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
         key: copy_artifact_to_latest(path, Path(path).name) for key, path in artifacts.items()
     }
 
-    latest_confusion_path = (
-        copy_artifact_to_latest(confusion_matrix_path, "confusion_matrix.png") if confusion_matrix_path else None
-    )
-    latest_feature_importance_path = (
-        copy_artifact_to_latest(feature_importance_path, "feature_importance.png")
-        if feature_importance_path
-        else None
-    )
-    # `feature_importance.json` (dữ liệu số thô cho biểu đồ radar tương tác ở app.py) LUÔN được ghi ra
-    # CÙNG thư mục với `feature_importance.png` bởi `plot_feature_importance()` - chỉ cần copy sang
-    # `models/latest/` nếu file .png tương ứng thực sự tồn tại (tức nhánh sklearn_tabular đã chạy).
+    # XOÁ artifact CŨ (nếu có) cho những loại mà LẦN TRAIN NÀY không sinh ra - xem docstring
+    # `remove_stale_latest_artifact()` để biết lý do (tránh app.py hiển thị nhầm ảnh/json từ lần train
+    # trước, thuộc về 1 model_type khác, như thể đó là kết quả của model đang triển khai hiện tại).
+    if confusion_matrix_path:
+        latest_confusion_path = copy_artifact_to_latest(confusion_matrix_path, "confusion_matrix.png")
+    else:
+        remove_stale_latest_artifact("confusion_matrix.png")
+        latest_confusion_path = None
+
+    if feature_importance_path:
+        latest_feature_importance_path = copy_artifact_to_latest(feature_importance_path, "feature_importance.png")
+    else:
+        remove_stale_latest_artifact("feature_importance.png")
+        latest_feature_importance_path = None
+
+    # `feature_importance.json` (dữ liệu số thô cho biểu đồ thanh màu tương tác ở app.py) LUÔN được
+    # ghi ra CÙNG thư mục với `feature_importance.png` bởi `plot_feature_importance()` - chỉ cần copy
+    # sang `models/latest/` nếu file .png tương ứng thực sự tồn tại (tức nhánh sklearn_tabular đã chạy).
     feature_importance_json_path = (
         feature_importance_path.parent / "feature_importance.json" if feature_importance_path else None
     )
-    latest_feature_importance_json_path = (
-        copy_artifact_to_latest(feature_importance_json_path, "feature_importance.json")
-        if feature_importance_json_path and feature_importance_json_path.exists()
-        else None
-    )
-    latest_roc_curve_path = copy_artifact_to_latest(roc_curve_path, "roc_curve_data.json") if roc_curve_path else None
+    if feature_importance_json_path and feature_importance_json_path.exists():
+        latest_feature_importance_json_path = copy_artifact_to_latest(
+            feature_importance_json_path, "feature_importance.json"
+        )
+    else:
+        remove_stale_latest_artifact("feature_importance.json")
+        latest_feature_importance_json_path = None
+
+    if roc_curve_path:
+        latest_roc_curve_path = copy_artifact_to_latest(roc_curve_path, "roc_curve_data.json")
+    else:
+        remove_stale_latest_artifact("roc_curve_data.json")
+        latest_roc_curve_path = None
     if latest_confusion_path:
         copy_artifact_to_plots(latest_confusion_path, "confusion_matrix.png")
     if latest_feature_importance_path:

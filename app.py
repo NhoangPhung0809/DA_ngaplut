@@ -2010,7 +2010,12 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
                 "để có bản thanh màu tương tác."
             )
         else:
-            st.info("Chưa có `feature_importance.json`/`feature_importance.png` trong `models/latest/`.")
+            st.info(
+                "Chưa có Feature Importance cho model đang triển khai - hoặc CHƯA train lần nào, hoặc "
+                "model thắng cuộc thuộc dạng chuỗi/hybrid (LSTM/GRU/CNN/Hybrid) mà chỉ số importance "
+                "kiểu bảng (feature_importances_/coef_/permutation) không áp dụng trực tiếp được cho "
+                "input dạng cửa sổ thời gian - xem log huấn luyện gần nhất để biết chính xác lý do."
+            )
 
     if confusion_matrix_path.exists() or feature_importance_path.exists():
         render_chart_discussion(
@@ -2155,6 +2160,106 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
         )
 
 
+def build_managerial_insights_markdown(
+    evaluation_metrics: dict, deployment_config: dict, eda_df: pd.DataFrame
+) -> str:
+    """
+    Tự tính "Nhận định & kết luận quản trị" từ DỮ LIỆU THẬT - THAY THẾ template hướng dẫn điền tay
+    trước đây (chỉ gợi ý cấu trúc, không có số liệu thật). Kết hợp 2 nguồn:
+      1. Kết quả mô hình THẬT (`evaluation_metrics.json`/`deployment_config.json`) - model đang triển
+         khai, F1-macro, và Recall/Precision RIÊNG cho lớp `Heavy Flood` (an toàn quan trọng hơn số
+         tổng quát, vì bỏ sót 1 đợt ngập nặng nguy hiểm hơn nhiều so với 1 lần cảnh báo dư).
+      2. Dữ liệu lịch sử THẬT (`eda_df`, cùng nguồn Tab 1) - tự tính địa phương/tháng có tỷ lệ ngập
+         cao nhất, KHÔNG chỉ trỏ người đọc sang xem ảnh tĩnh `flood_share_by_location.png` như trước.
+    """
+    best_model_name = deployment_config.get("model_name", "N/A")
+    best_metrics = evaluation_metrics.get(best_model_name, {})
+    f1_macro = best_metrics.get("f1_macro")
+    classification_report = best_metrics.get("classification_report", {})
+    heavy_flood_stats = classification_report.get("Heavy Flood", {})
+    heavy_recall = heavy_flood_stats.get("recall")
+    heavy_precision = heavy_flood_stats.get("precision")
+    light_flood_stats = classification_report.get("Light Flood", {})
+    light_f1 = light_flood_stats.get("f1-score")
+
+    performance_lines = [f"1. **Hiệu năng mô hình đề xuất triển khai** — model đang triển khai: **{best_model_name}**"]
+    if f1_macro is not None:
+        performance_lines.append(f" (F1-Macro = {f1_macro:.4f}).")
+    if heavy_recall is not None and heavy_precision is not None:
+        performance_lines.append(
+            f" Với lớp `Ngập nặng` (nguy hiểm nhất) — Recall = {heavy_recall:.2%}, Precision = "
+            f"{heavy_precision:.2%}. "
+            + (
+                "Recall đang CAO HƠN Precision, đúng ưu tiên mong muốn cho bài toán cảnh báo thiên tai "
+                "(chấp nhận vài lần cảnh báo dư còn hơn bỏ sót 1 đợt ngập nặng thật)."
+                if heavy_recall >= heavy_precision
+                else "LƯU Ý: Precision đang cao hơn Recall ở lớp `Ngập nặng` - nghĩa là model đang có xu "
+                "hướng BỎ SÓT một số đợt ngập nặng thật hơn là cảnh báo dư, cần cân nhắc điều chỉnh "
+                "ngưỡng quyết định (decision threshold) hoặc trọng số lớp (class_weight) để ưu tiên Recall hơn."
+            )
+        )
+
+    # ---- Khu vực ưu tiên: tự tính tỷ lệ ngập (%) theo TỪNG địa phương từ chính eda_df (dữ liệu thật) ----
+    location_lines = ["2. **Khu vực ưu tiên**"]
+    if not eda_df.empty and "Địa phương" in eda_df.columns and "Nguy_cơ_ngập" in eda_df.columns:
+        flood_rate_by_location = (
+            eda_df.groupby("Địa phương")["Nguy_cơ_ngập"].apply(lambda s: (s > 0).mean() * 100).sort_values(ascending=False)
+        )
+        if not flood_rate_by_location.empty:
+            top_location = flood_rate_by_location.index[0]
+            top_location_rate = flood_rate_by_location.iloc[0]
+            location_lines.append(
+                f" — **{top_location}** có tỷ lệ giờ quan trắc ghi nhận ngập cao nhất "
+                f"({top_location_rate:.2f}% tổng số giờ trong 10 năm dữ liệu), nên được ưu tiên đầu tư "
+                "trạm quan trắc bổ sung / lực lượng ứng trực so với 4 địa phương còn lại."
+            )
+    else:
+        location_lines.append(" — chưa có đủ dữ liệu lịch sử để tính (xem Tab 1).")
+
+    # ---- Thời điểm ưu tiên: tự tính tỷ lệ ngập (%) theo TỪNG tháng từ chính eda_df ----
+    month_lines = ["3. **Thời điểm ưu tiên**"]
+    if not eda_df.empty and "Thời_gian" in eda_df.columns and "Nguy_cơ_ngập" in eda_df.columns:
+        month_series = pd.to_datetime(eda_df["Thời_gian"], errors="coerce").dt.month
+        flood_rate_by_month = (
+            eda_df.assign(_thang=month_series)
+            .groupby("_thang")["Nguy_cơ_ngập"]
+            .apply(lambda s: (s > 0).mean() * 100)
+            .sort_values(ascending=False)
+        )
+        if not flood_rate_by_month.empty:
+            top_month = int(flood_rate_by_month.index[0])
+            top_month_rate = flood_rate_by_month.iloc[0]
+            month_lines.append(
+                f" — **Tháng {top_month}** có tỷ lệ giờ quan trắc ghi nhận ngập cao nhất trong năm "
+                f"({top_month_rate:.2f}%), cần tăng cường giám sát và chuẩn bị phương án sơ tán trước "
+                "thời điểm này hàng năm."
+            )
+    else:
+        month_lines.append(" — chưa có đủ dữ liệu lịch sử để tính (xem Tab 1).")
+
+    # ---- Rủi ro còn tồn đọng: nêu điểm yếu THẬT của model đang triển khai (không phải giả định chung chung) ----
+    risk_lines = ["4. **Rủi ro còn tồn đọng**"]
+    if light_f1 is not None and heavy_recall is not None:
+        risk_lines.append(
+            f" — F1-Score lớp `Ngập nhẹ` hiện chỉ đạt {light_f1:.2%} (thường là lớp YẾU NHẤT trong 3 "
+            "lớp do ranh giới giữa 'An toàn' và 'Ngập nhẹ' mờ hơn ranh giới 'Ngập nhẹ'/'Ngập nặng'), và "
+            f"Recall lớp `Ngập nặng` đạt {heavy_recall:.2%} — "
+            + (
+                "còn dưới 90%, nên xem lại việc thu thập thêm dữ liệu quan trắc thật cho các đợt ngập "
+                "nặng (hiện đang là lớp hiếm nhất) hoặc tinh chỉnh sâu hơn bằng `hyperparameter_tuning.py`."
+                if heavy_recall < 0.90
+                else "đã ở mức khá cao, nhưng vẫn nên tiếp tục thu thập thêm dữ liệu thật (không chỉ dựa "
+                "vào mẫu tổng hợp CTGAN/SMOTE) để cải thiện độ tin cậy dài hạn."
+            )
+        )
+    else:
+        risk_lines.append(" — chưa có đủ chỉ số phân lớp chi tiết để đánh giá (hãy huấn luyện lại).")
+
+    return "\n\n".join(
+        ["".join(performance_lines), "".join(location_lines), "".join(month_lines), "".join(risk_lines)]
+    )
+
+
 def render_evaluation_tab() -> None:
     """
     Nội dung Tab 3 - Đánh giá mô hình, bước THỨ BA của vòng đời Data Science.
@@ -2177,25 +2282,12 @@ def render_evaluation_tab() -> None:
         render_model_metrics(evaluation_metrics, deployment_config, runtime_info)
 
     with st.expander("Nhận định & kết luận quản trị (Managerial Insights)", expanded=True):
-        # TODO: thay nội dung placeholder này bằng nhận định THẬT rút ra từ kết quả mô hình + EDA (Tab 1)
-        # của bạn - đây là phần quan trọng nhất khi bảo vệ luận văn vì nối kết quả kỹ thuật với hành động
-        # quản trị thực tế, không chỉ dừng lại ở con số.
-        st.markdown(
-            """
-            **Gợi ý cấu trúc phần Kết luận quản trị (điền số liệu thật của bạn vào đây):**
-
-            1. **Hiệu năng mô hình đề xuất triển khai** — nêu tên mô hình tốt nhất, F1-macro, và lý do
-               chọn (cân bằng Precision/Recall, ưu tiên Recall cho lớp `Ngập nặng` vì bỏ sót nguy hiểm
-               hơn cảnh báo dư).
-            2. **Khu vực ưu tiên** — dựa trên EDA ở Tab 1 (`flood_share_by_location.png`), địa phương nào
-               có tần suất ngập cao nhất cần được ưu tiên đầu tư trạm quan trắc / lực lượng ứng trực.
-            3. **Thời điểm ưu tiên** — dựa trên `monthly_trend.png`, giai đoạn nào trong năm cần tăng
-               cường giám sát và chuẩn bị phương án sơ tán.
-            4. **Rủi ro còn tồn đọng** — nêu giới hạn của mô hình (ví dụ AUC lớp `Ngập nặng` thấp do
-               thiếu dữ liệu) và đề xuất hướng khắc phục (thu thập thêm dữ liệu, cải thiện CTGAN,
-               dùng `hyperparameter_tuning.py` để tinh chỉnh sâu hơn).
-            """
-        )
+        # Tự tính TOÀN BỘ nhận định từ dữ liệu THẬT (kết quả model + eda_df) - xem docstring
+        # `build_managerial_insights_markdown()`. Trước đây đây chỉ là template hướng dẫn điền tay,
+        # không có số liệu thật - phần quan trọng nhất khi bảo vệ luận văn vì nối kết quả kỹ thuật với
+        # hành động quản trị thực tế, nên KHÔNG được để dạng placeholder.
+        eda_df_for_insights = load_eda_sample_dataframe()
+        st.markdown(build_managerial_insights_markdown(evaluation_metrics, deployment_config, eda_df_for_insights))
 
 
 # ==================================================================================================
@@ -3397,14 +3489,41 @@ def build_smart_routing_map(
     """
     center_lat = sum(lat for lat, _ in REAL_MONITORED_LOCATIONS.values()) / len(REAL_MONITORED_LOCATIONS)
     center_lon = sum(lon for _, lon in REAL_MONITORED_LOCATIONS.values()) / len(REAL_MONITORED_LOCATIONS)
-    # NỀN BẢN ĐỒ: dùng "CartoDB dark_matter" thay vì "OpenStreetMap" mặc định trước đây - ĐÃ KIỂM
-    # CHỨNG THỰC TẾ `tile.openstreetmap.org` (server tile gốc của OSM) chặn/không phản hồi ổn định từ
-    # nhiều môi trường server/cloud (chính sách Tile Usage Policy của OSM ưu tiên trình duyệt người
-    # dùng cuối, không khuyến khích truy cập hàng loạt từ server) - dẫn tới bản đồ hiện nền TRẮNG/XÁM
-    # TRỐNG dù các lớp GeoJson/marker vẫn vẽ đúng (đúng hiện tượng đã gặp khi deploy thực tế). CartoDB
-    # (basemaps.cartocdn.com) không có chính sách chặn này, đồng thời nền tối "dark_matter" hợp với
-    # theme tối của toàn bộ app hơn nhiều so với nền OpenStreetMap trắng chói.
-    routing_map = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles="CartoDB dark_matter")
+    # NỀN BẢN ĐỒ: dùng Esri "World Dark Gray Canvas" (server.arcgisonline.com) thay vì OpenStreetMap
+    # hoặc CartoDB mặc định trước đây - ĐÃ KIỂM CHỨNG THỰC TẾ CẢ HAI ĐỀU LỖI:
+    #   1. `tile.openstreetmap.org` (OSM gốc): chặn/không phản hồi ổn định từ nhiều môi trường server/
+    #      cloud (chính sách Tile Usage Policy của OSM ưu tiên trình duyệt người dùng cuối).
+    #   2. `basemaps.cartocdn.com` ("CartoDB dark_matter"): tải được (HTTP 200) nhưng trả về ẢNH
+    #      WATERMARK "API KEY REQUIRED" thay vì bản đồ thật - CARTO đã đổi chính sách, gói ẩn danh
+    #      miễn phí không còn dùng được cho basemap nữa (lỗi thật gặp khi deploy, đã tự kiểm tra bằng
+    #      cách tải ảnh tile về xem trực tiếp, không chỉ dựa vào mã HTTP 200 - 200 không có nghĩa là
+    #      NỘI DUNG đúng).
+    # Esri Dark Gray Canvas (2 lớp: Base + Reference nhãn) ĐÃ kiểm chứng bằng cách tải + xem ảnh tile
+    # THẬT tại chính khu vực Huế - ra bản đồ chi tiết, không watermark, không cần API key, thuộc dịch
+    # vụ ArcGIS Online công khai của Esri (được phép dùng ẩn danh cho mục đích tham chiếu chung).
+    routing_map = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles=None)
+    folium.TileLayer(
+        tiles=(
+            "https://server.arcgisonline.com/ArcGIS/rest/services/"
+            "Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+        ),
+        attr="Esri, HERE, Garmin, FAO, NOAA, USGS",
+        name="Nền bản đồ",
+        overlay=False,
+        control=False,
+        max_zoom=16,
+    ).add_to(routing_map)
+    folium.TileLayer(
+        tiles=(
+            "https://server.arcgisonline.com/ArcGIS/rest/services/"
+            "Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
+        ),
+        attr="Esri",
+        name="Nhãn tên đường/địa danh",
+        overlay=True,
+        control=False,
+        max_zoom=16,
+    ).add_to(routing_map)
 
     # ---- (1) Giám sát: TÔ RANH GIỚI HÀNH CHÍNH thật của 5 địa phương, màu theo đúng 'Nguy cơ' dự báo
     # của AI. FAIL-SAFE: thiếu dòng dữ liệu cũng KHÔNG mặc định "An toàn" (xem docstring
