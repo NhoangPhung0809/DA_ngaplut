@@ -1770,10 +1770,10 @@ def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> N
     ảnh PNG) - KHÔNG tính lại importance ở đây, tránh chạy lại `permutation_importance` (tốn thời
     gian) mỗi lần Streamlit rerun.
 
-    Sắp xếp GIẢM DẦN theo Importance, mỗi thanh 1 màu theo thang màu liên tục (sequential, xanh nhạt
-    -> xanh đậm) phản ánh ĐÚNG độ lớn - không dùng màu phân loại (categorical) vì đây là so sánh ĐỘ
-    LỚN giữa các biến, không phải phân biệt danh tính. Ghi số liệu trực tiếp ở đầu mỗi thanh (không
-    cần hover mới thấy) để phù hợp khi trình bày/in báo cáo.
+    Sắp xếp GIẢM DẦN theo Importance, TẤT CẢ các thanh dùng CHUNG 1 MÀU (không tô gradient theo giá
+    trị) - vì các thanh đang biểu diễn CÙNG 1 đại lượng (mức độ quan trọng), độ dài thanh đã đủ thể
+    hiện sự khác biệt, tô nhiều màu khác nhau chỉ gây rối mắt không cần thiết. Ghi số liệu trực tiếp ở
+    đầu mỗi thanh (không cần hover mới thấy) để phù hợp khi trình bày/in báo cáo.
     """
     with feature_importance_json_path.open("r", encoding="utf-8") as file:
         importance_records = json.load(file)
@@ -1790,11 +1790,11 @@ def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> N
             x=importance_df["Importance"].tolist(),
             y=importance_df["Feature"].tolist(),
             orientation="h",
-            marker=dict(
-                color=importance_df["Importance"].tolist(),
-                colorscale="Blues",
-                line=dict(color="#1e3a5f", width=1),
-            ),
+            # 1 MÀU DUY NHẤT cho mọi thanh (không dùng thang màu gradient theo giá trị) - vì các thanh
+            # đang so sánh CÙNG 1 đại lượng (mức độ quan trọng), không phải nhiều đại lượng khác nhau
+            # cần phân biệt bằng màu; ĐỘ DÀI thanh đã đủ thể hiện độ lớn, tô màu khác nhau theo giá trị
+            # chỉ gây rối mắt không cần thiết.
+            marker=dict(color="#4C78A8", line=dict(color="#1e3a5f", width=1)),
             text=[f"{value:.3f}" for value in importance_df["Importance"]],
             textposition="outside",
             textfont=dict(size=14, color="#f8fafc"),
