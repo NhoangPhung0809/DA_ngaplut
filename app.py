@@ -1459,14 +1459,19 @@ def render_ctgan_dataset_panel(title: str, subtitle: str, summary: dict | None, 
     total_rows = (summary or {}).get("total_rows")
     sample_rows = (summary or {}).get("sample_rows")
     metric_col_1, metric_col_2 = st.columns(2)
-    metric_col_1.metric("Tổng số dòng", total_rows if total_rows is not None else "N/A")
-    metric_col_2.metric("Số dòng hiển thị", sample_rows if sample_rows is not None else "N/A")
+    metric_col_1.metric("Tổng số dòng", f"{total_rows:,}" if total_rows is not None else "N/A")
+    metric_col_2.metric("Số dòng hiển thị", f"{sample_rows:,}" if sample_rows is not None else "N/A")
 
     distribution_df = build_ctgan_distribution_dataframe(summary)
     if distribution_df.empty:
         st.info("Chưa có thống kê phân phối lớp.")
     else:
-        st.dataframe(distribution_df, use_container_width=True, hide_index=True, height=160)
+        # Giữ `distribution_df` GỐC ở dạng số (truyền cho build_ctgan_distribution_discussion() bên
+        # dưới vẫn cần idxmax/idxmin/chia số học) - chỉ tạo BẢN HIỂN THỊ riêng có dấu phân cách hàng
+        # nghìn cho cột "Số lượng", tránh hiện "12850" khó đọc như trước.
+        display_distribution_df = distribution_df.copy()
+        display_distribution_df["Số lượng"] = display_distribution_df["Số lượng"].map(lambda v: f"{v:,}")
+        st.dataframe(display_distribution_df, use_container_width=True, hide_index=True, height=160)
         render_chart_discussion(build_ctgan_distribution_discussion(distribution_df, title))
 
     if dataset_df.empty:
