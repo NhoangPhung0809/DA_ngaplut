@@ -1871,6 +1871,78 @@ def render_overfitting_check_section(metrics_df: pd.DataFrame) -> None:
             )
 
 
+def render_case_study_section(misclassified_samples_path: Path) -> None:
+    """
+    Khối "Case study - phân tích các trường hợp dự đoán SAI" - đọc `misclassified_samples.csv` (do
+    `export_misclassified_samples()` trong `analyze_and_train.py` xuất ra, giá trị feature đã được đưa
+    về ĐÚNG ĐƠN VỊ VẬT LÝ GỐC qua `scaler.inverse_transform()`, không phải z-score chuẩn hoá) để đọc
+    được TRỰC TIẾP nguyên nhân khả dĩ của từng lỗi, thay vì chỉ nhìn Confusion Matrix ở mức tổng hợp.
+
+    CHỈ có dữ liệu này khi model tốt nhất là dạng bảng (sklearn_tabular) - xem lý do kỹ thuật trong
+    docstring `export_misclassified_samples()`.
+    """
+    if not misclassified_samples_path.exists():
+        st.info(
+            "Chưa có `misclassified_samples.csv` trong `models/latest/` - hoặc model tốt nhất hiện tại "
+            "là dạng chuỗi/sequence (LSTM/GRU/Hybrid), dạng này chưa hỗ trợ tra ngược case study theo "
+            "từng dòng, hoặc bạn cần train lại để tính năng này xuất dữ liệu."
+        )
+        return
+
+    misclassified_df = pd.read_csv(misclassified_samples_path)
+    if misclassified_df.empty:
+        st.success("Model tốt nhất KHÔNG có dòng nào bị dự đoán sai trên tập test hiện tại.")
+        return
+
+    display_df = misclassified_df.copy()
+    display_df["Nhãn thật"] = display_df["Nhãn thật"].astype(str).map(CLASS_LABEL_VI)
+    display_df["Nhãn dự đoán"] = display_df["Nhãn dự đoán"].astype(str).map(CLASS_LABEL_VI)
+    numeric_columns = [c for c in display_df.columns if c not in ("Nhãn thật", "Nhãn dự đoán")]
+
+    render_styled_table(
+        build_contrast_styler(display_df, numeric_formats={col: "{:.2f}" for col in numeric_columns}),
+        height=min(120 + 38 * len(display_df), 420),
+    )
+
+    # Phân tích tự động: đếm cặp (nhãn thật -> nhãn dự đoán) xuất hiện nhiều nhất, và cảnh báo riêng
+    # nếu có trường hợp lệch NẶNG (thật là "Ngập nặng" nhưng dự đoán "Không ngập" hoặc ngược lại) - đây
+    # là loại sai số nguy hiểm nhất trong bài toán cảnh báo thiên tai.
+    error_pairs = (
+        misclassified_df.groupby(["Nhãn thật", "Nhãn dự đoán"]).size().sort_values(ascending=False)
+    )
+    top_true_code, top_pred_code = error_pairs.index[0]
+    top_true_label = CLASS_LABEL_VI.get(str(top_true_code), str(top_true_code))
+    top_pred_label = CLASS_LABEL_VI.get(str(top_pred_code), str(top_pred_code))
+    top_count = int(error_pairs.iloc[0])
+
+    severe_mask = (
+        ((misclassified_df["Nhãn thật"] == 2) & (misclassified_df["Nhãn dự đoán"] == 0))
+        | ((misclassified_df["Nhãn thật"] == 0) & (misclassified_df["Nhãn dự đoán"] == 2))
+    )
+    severe_count = int(severe_mask.sum())
+
+    discussion_lines = [
+        f"Trong {len(misclassified_df)} dòng bị dự đoán sai (đã lấy mẫu nếu quá nhiều), cặp nhầm lẫn "
+        f"phổ biến nhất là **{top_true_label} → {top_pred_label}** ({top_count} lần) - thường xảy ra "
+        "khi giá trị các biến đầu vào nằm GẦN NGƯỠNG phân loại giữa 2 lớp liền kề (ví dụ lượng mưa xấp "
+        "xỉ ngưỡng 25mm hoặc 50mm dùng trong luật gán nhãn), khiến model khó phân biệt dứt khoát."
+    ]
+    if severe_count > 0:
+        discussion_lines.append(
+            f"**Đáng lưu ý: có {severe_count} trường hợp lệch NẶNG** (nhầm lẫn trực tiếp giữa "
+            f"'{CLASS_LABEL_VI['2']}' và '{CLASS_LABEL_VI['0']}', bỏ qua hoàn toàn lớp trung gian) - đây "
+            "là loại sai số nguy hiểm nhất trong bài toán cảnh báo thiên tai, cần ưu tiên xem lại các "
+            "dòng này trong bảng trên."
+        )
+    else:
+        discussion_lines.append(
+            f"Không có trường hợp lệch NẶNG nào (nhầm thẳng giữa '{CLASS_LABEL_VI['2']}' và "
+            f"'{CLASS_LABEL_VI['0']}') - các lỗi hiện tại đều là nhầm lẫn giữa 2 lớp LIỀN KỀ, ít nguy "
+            "hiểm hơn về mặt cảnh báo thực tế."
+        )
+    render_chart_discussion(" ".join(discussion_lines))
+
+
 def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) -> None:
     """Hiển thị bảng số liệu, biểu đồ Plotly và ảnh artifact đánh giá mô hình (Model Comparison Metrics)."""
     if not evaluation_metrics:
@@ -2024,6 +2096,10 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
             "sai số nguy hiểm nhất trong bài toán cảnh báo. Feature Importance cho thấy biến khí tượng - thủy văn "
             "nào (mưa, độ ẩm đất, triều cường...) đóng góp nhiều nhất vào quyết định của mô hình."
         )
+
+    with st.expander("Case study - phân tích các trường hợp dự đoán sai", expanded=False):
+        misclassified_samples_path = Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR))) / "misclassified_samples.csv"
+        render_case_study_section(misclassified_samples_path)
 
     model_type = deployment_config.get("model_type", "unknown")
     model_type_label_map = {

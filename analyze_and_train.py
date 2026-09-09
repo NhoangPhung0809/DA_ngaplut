@@ -2679,6 +2679,57 @@ def plot_feature_importance(best_model, X_test_scaled: pd.DataFrame, y_test: pd.
     return output_path
 
 
+def export_misclassified_samples(
+    best_model,
+    X_test_scaled: pd.DataFrame,
+    y_test: pd.Series,
+    scaler: StandardScaler,
+    feature_cols: list[str],
+    output_dir: Path,
+    max_samples: int = 30,
+) -> Path | None:
+    """
+    Xuất CÁC DÒNG bị dự đoán SAI trên tập test của model tốt nhất - phục vụ "case study" (phân tích vì
+    sao model dự đoán sai) trên UI, thay vì chỉ nhìn Confusion Matrix ở mức tổng hợp (biết SỐ LƯỢNG bị
+    nhầm giữa 2 lớp nhưng không thấy được DÒNG DỮ LIỆU CỤ THỂ nào bị nhầm).
+
+    Dùng `scaler.inverse_transform()` để đưa giá trị feature về ĐÚNG ĐƠN VỊ VẬT LÝ GỐC (mm, %, m...)
+    thay vì để nguyên dạng đã chuẩn hoá (z-score) - z-score như "-0.34" không có ý nghĩa trực quan khi
+    đọc case study, cần thấy "Lượng mưa = 12.4mm" mới phân tích được vì sao model nhầm.
+
+    CHỈ áp dụng cho model dạng bảng (deployment_type == 'sklearn_tabular') - model dạng chuỗi/sequence
+    (LSTM/GRU/Hybrid) không có DataFrame tabular 1-dòng-1-mẫu tương ứng 1-1 để tra ngược lại feature
+    gốc theo cách này (mỗi mẫu sequence gộp từ 7 dòng liên tiếp).
+
+    Trả về `None` nếu KHÔNG có dòng nào bị dự đoán sai (model hoàn hảo trên tập test - hiếm nhưng có
+    thể xảy ra với tập test rất nhỏ), để bên gọi tự quyết định thông báo gì cho phù hợp.
+    """
+    y_pred = best_model.predict(X_test_scaled)
+    y_true_array = np.asarray(y_test)
+    mismatch_mask = y_pred != y_true_array
+    if not mismatch_mask.any():
+        return None
+
+    X_test_raw = pd.DataFrame(
+        scaler.inverse_transform(X_test_scaled),
+        columns=feature_cols,
+        index=X_test_scaled.index,
+    )
+    misclassified_df = X_test_raw.loc[mismatch_mask].copy()
+    misclassified_df["Nhãn thật"] = y_true_array[mismatch_mask]
+    misclassified_df["Nhãn dự đoán"] = y_pred[mismatch_mask]
+
+    # Nếu quá nhiều dòng sai (ví dụ model kém), CHỈ lấy mẫu ngẫu nhiên `max_samples` dòng để UI không
+    # bị quá tải - case study chỉ cần vài chục ví dụ đại diện, không cần liệt kê hết.
+    if len(misclassified_df) > max_samples:
+        misclassified_df = misclassified_df.sample(n=max_samples, random_state=42)
+
+    output_path = output_dir / "misclassified_samples.csv"
+    misclassified_df.to_csv(output_path, index=False, encoding="utf-8-sig")
+    print(f"Saved {len(misclassified_df)} misclassified samples to: {output_path}")
+    return output_path
+
+
 def print_leaderboard(leaderboard_df: pd.DataFrame) -> None:
     """In bảng xếp hạng đẹp ra terminal."""
     print("\n=== MODEL LEADERBOARD (SORTED BY MACRO F1-SCORE) ===")
@@ -2798,6 +2849,9 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
     if deployment_type == "sklearn_tabular":
         confusion_matrix_path = plot_confusion_matrix(trained_models[best_model_name], X_test_scaled, y_test, run_dir)
         feature_importance_path = plot_feature_importance(trained_models[best_model_name], X_test_scaled, y_test, run_dir)
+        misclassified_samples_path = export_misclassified_samples(
+            trained_models[best_model_name], X_test_scaled, y_test, scaler, FEATURE_COLS, run_dir
+        )
     elif best_model_name in roc_cache:
         # keras_sequence / hybrid_lstm_xgboost: không có DataFrame tabular để `.predict()` trực tiếp,
         # nhưng đã có sẵn (y_true, y_proba) từ lúc đánh giá trên tập test dạng sequence -> suy ra
@@ -2814,9 +2868,15 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
             f"[Info] Bỏ qua feature_importance.png cho model_type='{deployment_type}' - biểu đồ "
             "feature importance kiểu tabular không áp dụng trực tiếp cho input dạng sequence."
         )
+        misclassified_samples_path = None
+        print(
+            f"[Info] Bỏ qua misclassified_samples.csv cho model_type='{deployment_type}' - không có "
+            "DataFrame tabular 1-dòng-1-mẫu tương ứng 1-1 để tra ngược feature gốc từ mẫu sequence."
+        )
     else:
         confusion_matrix_path = None
         feature_importance_path = None
+        misclassified_samples_path = None
 
     roc_curve_path = None
     if best_model_name in roc_cache:
@@ -2863,6 +2923,11 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
     latest_feature_importance_json_path = (
         copy_artifact_to_latest(feature_importance_json_path, "feature_importance.json")
         if feature_importance_json_path and feature_importance_json_path.exists()
+        else None
+    )
+    latest_misclassified_samples_path = (
+        copy_artifact_to_latest(misclassified_samples_path, "misclassified_samples.csv")
+        if misclassified_samples_path
         else None
     )
     latest_roc_curve_path = copy_artifact_to_latest(roc_curve_path, "roc_curve_data.json") if roc_curve_path else None
