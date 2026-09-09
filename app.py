@@ -1943,6 +1943,99 @@ def render_case_study_section(misclassified_samples_path: Path) -> None:
     render_chart_discussion(" ".join(discussion_lines))
 
 
+# Ngưỡng xếp loại (1-Tốt / 2-Trung bình / 3-Yếu) - ngưỡng THAM KHẢO dựa trên kinh nghiệm thực nghiệm
+# cho bài toán phân loại đa lớp mất cân bằng, KHÔNG phải chuẩn tuyệt đối trong tài liệu học thuật nào.
+# ROC-AUC dùng ngưỡng CAO HƠN các độ đo còn lại vì bản chất thang đo khác nhau (ROC-AUC ngẫu nhiên =
+# 0.5, còn Accuracy/Precision/Recall/F1 "ngẫu nhiên" trên 3 lớp cân bằng chỉ khoảng 0.33).
+METRIC_RATING_THRESHOLDS: dict[str, tuple[float, float]] = {
+    "Accuracy": (0.75, 0.5),
+    "Precision (Macro)": (0.6, 0.4),
+    "Recall (Macro)": (0.6, 0.4),
+    "F1 (Macro)": (0.6, 0.4),
+    "ROC-AUC (OvR Macro)": (0.85, 0.7),
+}
+METRIC_RATING_STYLE: dict[str, tuple[str, str]] = {
+    "1 - Tốt": ("#166534", "#f0fdf4"),
+    "2 - Trung bình": ("#92400e", "#fffbeb"),
+    "3 - Yếu": ("#991b1b", "#fef2f2"),
+}
+
+
+def rate_metric_value(metric_name: str, value: float | None) -> str | None:
+    """Xếp loại 1 giá trị độ đo theo ngưỡng `METRIC_RATING_THRESHOLDS` - trả `None` nếu thiếu giá trị
+    hoặc độ đo đó chưa có ngưỡng khai báo (không đoán bừa)."""
+    if value is None or pd.isna(value):
+        return None
+    thresholds = METRIC_RATING_THRESHOLDS.get(metric_name)
+    if thresholds is None:
+        return None
+    good_cutoff, medium_cutoff = thresholds
+    if value >= good_cutoff:
+        return "1 - Tốt"
+    if value >= medium_cutoff:
+        return "2 - Trung bình"
+    return "3 - Yếu"
+
+
+def render_metric_rating_table(best_model_metric_values: dict, best_model_name: str) -> None:
+    """
+    Bảng 3 cột (Độ đo / Giá trị / Xếp loại) cho model TỐT NHẤT - khác với bảng leaderboard so sánh
+    NHIỀU model theo 1 độ đo (F1-Macro), bảng này soi NHIỀU độ đo của CÙNG 1 model, giúp đọc nhanh model
+    đang mạnh/yếu ở khía cạnh nào (ví dụ Recall tốt nhưng Precision yếu) mà không cần tự nhớ khoảng giá
+    trị hợp lệ [0, 1] của từng độ đo là tốt hay xấu.
+    """
+    if not best_model_metric_values:
+        return
+
+    candidate_metrics = {
+        "Accuracy": best_model_metric_values.get("accuracy"),
+        "Precision (Macro)": best_model_metric_values.get("precision_macro"),
+        "Recall (Macro)": best_model_metric_values.get("recall_macro"),
+        "F1 (Macro)": best_model_metric_values.get("f1_macro"),
+        "ROC-AUC (OvR Macro)": best_model_metric_values.get("roc_auc_ovr_macro"),
+    }
+    rating_rows = []
+    for metric_name, value in candidate_metrics.items():
+        if value is None or pd.isna(value):
+            continue
+        rating_rows.append(
+            {
+                "Độ đo": metric_name,
+                "Giá trị": float(value),
+                "Xếp loại": rate_metric_value(metric_name, value) or "Chưa có ngưỡng",
+            }
+        )
+    if not rating_rows:
+        return
+
+    rating_df = pd.DataFrame(rating_rows)
+
+    def highlight_rating_column(row: pd.Series) -> list[str]:
+        style = METRIC_RATING_STYLE.get(row["Xếp loại"])
+        if not style:
+            return [""] * len(row)
+        background, text_color = style
+        return [
+            f"background-color: {background}; color: {text_color}; font-weight: 700;"
+            if column == "Xếp loại"
+            else ""
+            for column in row.index
+        ]
+
+    st.markdown(f"### Bảng xếp loại độ đo - model tốt nhất ({best_model_name})")
+    rating_styler = (
+        build_contrast_styler(rating_df, numeric_formats={"Giá trị": "{:.4f}"})
+        .apply(highlight_rating_column, axis=1)
+    )
+    render_styled_table(rating_styler, height=min(90 + 38 * len(rating_df), 280))
+    render_chart_discussion(
+        "Ngưỡng xếp loại (1-Tốt / 2-Trung bình / 3-Yếu) là ngưỡng THAM KHẢO dựa trên kinh nghiệm thực "
+        "nghiệm cho bài toán phân loại đa lớp mất cân bằng, KHÔNG phải chuẩn tuyệt đối trong tài liệu "
+        "học thuật nào - mục đích giúp đọc nhanh mức độ đạt được của từng độ đo mà không cần tự nhớ "
+        "khoảng giá trị hợp lệ [0, 1] của mỗi độ đo là tốt hay xấu."
+    )
+
+
 def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) -> None:
     """Hiển thị bảng số liệu, biểu đồ Plotly và ảnh artifact đánh giá mô hình (Model Comparison Metrics)."""
     if not evaluation_metrics:
@@ -1950,12 +2043,15 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
         return
 
     metrics_rows = []
+    metric_values_by_display_name: dict[str, dict] = {}
     for model_name, metric_values in evaluation_metrics.items():
         if not isinstance(metric_values, dict):
             continue
+        display_name = metric_values.get("model_name", model_name)
+        metric_values_by_display_name[display_name] = metric_values
         metrics_rows.append(
             {
-                "Model": metric_values.get("model_name", model_name),
+                "Model": display_name,
                 "Accuracy": metric_values.get("accuracy"),
                 "Precision (Macro)": metric_values.get("precision_macro"),
                 "Recall (Macro)": metric_values.get("recall_macro"),
@@ -1995,6 +2091,10 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
         f"({worst_metrics_row['F1 (Macro)']:.4f}) trong số các mô hình đã huấn luyện. Chênh lệch F1 giữa hai mô hình "
         f"khoảng {(best_metrics_row['F1 (Macro)'] - worst_metrics_row['F1 (Macro)']):.4f} điểm, cho thấy việc lựa chọn "
         "đúng thuật toán có tác động đáng kể đến chất lượng cảnh báo ngập trước khi đưa vào vận hành thực tế."
+    )
+
+    render_metric_rating_table(
+        metric_values_by_display_name.get(best_metrics_row["Model"], {}), best_metrics_row["Model"]
     )
 
     render_overfitting_check_section(metrics_df)
