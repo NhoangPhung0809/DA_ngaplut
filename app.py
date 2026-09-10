@@ -1776,6 +1776,59 @@ def render_preprocessing_training_tab() -> None:
 # ==================================================================================================
 # TAB 3 - ĐÁNH GIÁ MÔ HÌNH
 # ==================================================================================================
+def render_confusion_matrix_heatmap(confusion_matrix_json_path: Path) -> None:
+    """
+    Confusion Matrix dạng heatmap TƯƠNG TÁC (Plotly) - đọc dữ liệu số thô từ `confusion_matrix.json`
+    (do `build_confusion_matrix_from_labels()` trong `analyze_and_train.py` xuất kèm ảnh PNG), thay
+    cho ảnh tĩnh trước đây. Hover để xem chính xác số lượng từng ô, zoom được khi cần soi kỹ.
+    """
+    with confusion_matrix_json_path.open("r", encoding="utf-8") as file:
+        payload = json.load(file)
+
+    labels = payload.get("labels") or []
+    matrix = payload.get("matrix") or []
+    if not labels or not matrix:
+        st.info("File `confusion_matrix.json` rỗng hoặc thiếu dữ liệu.")
+        return
+
+    matrix_array = np.asarray(matrix, dtype=float)
+    max_value = matrix_array.max() if matrix_array.size else 0
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=matrix,
+            x=labels,
+            y=labels,
+            colorscale="Blues",
+            hovertemplate="Nhãn thật: %{y}<br>Nhãn dự đoán: %{x}<br>Số lượng: %{z}<extra></extra>",
+            colorbar=dict(title="Số lượng"),
+            showscale=True,
+        )
+    )
+    # Ghi số liệu trực tiếp lên từng ô bằng annotation (thay vì texttemplate chung 1 màu) - để tự
+    # chọn màu chữ TRẮNG trên ô nền đậm (số lớn) và màu chữ TỐI trên ô nền nhạt (số nhỏ), đảm bảo đọc
+    # được rõ ràng ở MỌI ô thay vì 1 màu cố định dễ bị chìm vào nền ở 1 đầu thang màu.
+    for row_index, row_label in enumerate(labels):
+        for col_index, col_label in enumerate(labels):
+            cell_value = matrix_array[row_index, col_index]
+            is_dark_cell = max_value > 0 and cell_value / max_value > 0.5
+            fig.add_annotation(
+                x=col_label,
+                y=row_label,
+                text=str(int(cell_value)),
+                showarrow=False,
+                font=dict(size=16, color="#f8fafc" if is_dark_cell else "#0f172a"),
+            )
+    fig.update_layout(
+        title="Confusion Matrix - Best Model",
+        xaxis=dict(title="Nhãn dự đoán", side="bottom"),
+        yaxis=dict(title="Nhãn thật", autorange="reversed"),
+        height=420,
+        margin=dict(t=50, b=40, l=10, r=10),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> None:
     """
     Biểu đồ THANH NGANG (horizontal bar, Plotly) cho Feature Importance - theo góp ý của GVHD (đổi từ
@@ -1885,78 +1938,6 @@ def render_overfitting_check_section(metrics_df: pd.DataFrame) -> None:
                 "cho KNN...) hoặc kiểm tra lại xem model có đang 'nhớ' mẫu tổng hợp CTGAN/SMOTE thay vì "
                 "học quy luật thật hay không."
             )
-
-
-def render_case_study_section(misclassified_samples_path: Path) -> None:
-    """
-    Khối "Case study - phân tích các trường hợp dự đoán SAI" - đọc `misclassified_samples.csv` (do
-    `export_misclassified_samples()` trong `analyze_and_train.py` xuất ra, giá trị feature đã được đưa
-    về ĐÚNG ĐƠN VỊ VẬT LÝ GỐC qua `scaler.inverse_transform()`, không phải z-score chuẩn hoá) để đọc
-    được TRỰC TIẾP nguyên nhân khả dĩ của từng lỗi, thay vì chỉ nhìn Confusion Matrix ở mức tổng hợp.
-
-    CHỈ có dữ liệu này khi model tốt nhất là dạng bảng (sklearn_tabular) - xem lý do kỹ thuật trong
-    docstring `export_misclassified_samples()`.
-    """
-    if not misclassified_samples_path.exists():
-        st.info(
-            "Chưa có `misclassified_samples.csv` trong `models/latest/` - hoặc model tốt nhất hiện tại "
-            "là dạng chuỗi/sequence (LSTM/GRU/Hybrid), dạng này chưa hỗ trợ tra ngược case study theo "
-            "từng dòng, hoặc bạn cần train lại để tính năng này xuất dữ liệu."
-        )
-        return
-
-    misclassified_df = pd.read_csv(misclassified_samples_path)
-    if misclassified_df.empty:
-        st.success("Model tốt nhất KHÔNG có dòng nào bị dự đoán sai trên tập test hiện tại.")
-        return
-
-    display_df = misclassified_df.copy()
-    display_df["Nhãn thật"] = display_df["Nhãn thật"].astype(str).map(CLASS_LABEL_VI)
-    display_df["Nhãn dự đoán"] = display_df["Nhãn dự đoán"].astype(str).map(CLASS_LABEL_VI)
-    numeric_columns = [c for c in display_df.columns if c not in ("Nhãn thật", "Nhãn dự đoán")]
-
-    render_styled_table(
-        build_contrast_styler(display_df, numeric_formats={col: "{:.2f}" for col in numeric_columns}),
-        height=min(120 + 38 * len(display_df), 420),
-    )
-
-    # Phân tích tự động: đếm cặp (nhãn thật -> nhãn dự đoán) xuất hiện nhiều nhất, và cảnh báo riêng
-    # nếu có trường hợp lệch NẶNG (thật là "Ngập nặng" nhưng dự đoán "Không ngập" hoặc ngược lại) - đây
-    # là loại sai số nguy hiểm nhất trong bài toán cảnh báo thiên tai.
-    error_pairs = (
-        misclassified_df.groupby(["Nhãn thật", "Nhãn dự đoán"]).size().sort_values(ascending=False)
-    )
-    top_true_code, top_pred_code = error_pairs.index[0]
-    top_true_label = CLASS_LABEL_VI.get(str(top_true_code), str(top_true_code))
-    top_pred_label = CLASS_LABEL_VI.get(str(top_pred_code), str(top_pred_code))
-    top_count = int(error_pairs.iloc[0])
-
-    severe_mask = (
-        ((misclassified_df["Nhãn thật"] == 2) & (misclassified_df["Nhãn dự đoán"] == 0))
-        | ((misclassified_df["Nhãn thật"] == 0) & (misclassified_df["Nhãn dự đoán"] == 2))
-    )
-    severe_count = int(severe_mask.sum())
-
-    discussion_lines = [
-        f"Trong {len(misclassified_df)} dòng bị dự đoán sai (đã lấy mẫu nếu quá nhiều), cặp nhầm lẫn "
-        f"phổ biến nhất là **{top_true_label} → {top_pred_label}** ({top_count} lần) - thường xảy ra "
-        "khi giá trị các biến đầu vào nằm GẦN NGƯỠNG phân loại giữa 2 lớp liền kề (ví dụ lượng mưa xấp "
-        "xỉ ngưỡng 25mm hoặc 50mm dùng trong luật gán nhãn), khiến model khó phân biệt dứt khoát."
-    ]
-    if severe_count > 0:
-        discussion_lines.append(
-            f"**Đáng lưu ý: có {severe_count} trường hợp lệch NẶNG** (nhầm lẫn trực tiếp giữa "
-            f"'{CLASS_LABEL_VI['2']}' và '{CLASS_LABEL_VI['0']}', bỏ qua hoàn toàn lớp trung gian) - đây "
-            "là loại sai số nguy hiểm nhất trong bài toán cảnh báo thiên tai, cần ưu tiên xem lại các "
-            "dòng này trong bảng trên."
-        )
-    else:
-        discussion_lines.append(
-            f"Không có trường hợp lệch NẶNG nào (nhầm thẳng giữa '{CLASS_LABEL_VI['2']}' và "
-            f"'{CLASS_LABEL_VI['0']}') - các lỗi hiện tại đều là nhầm lẫn giữa 2 lớp LIỀN KỀ, ít nguy "
-            "hiểm hơn về mặt cảnh báo thực tế."
-        )
-    render_chart_discussion(" ".join(discussion_lines))
 
 
 # Ngưỡng xếp loại (1-Tốt / 2-Trung bình / 3-Yếu) - ngưỡng THAM KHẢO dựa trên kinh nghiệm thực nghiệm
@@ -2178,6 +2159,9 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
     st.markdown("### Artifact trực quan")
     image_col_1, image_col_2 = st.columns(2)
     confusion_matrix_path = Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR))) / "confusion_matrix.png"
+    confusion_matrix_json_path = (
+        Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR))) / "confusion_matrix.json"
+    )
     feature_importance_path = Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR))) / "feature_importance.png"
     feature_importance_json_path = (
         Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR))) / "feature_importance.json"
@@ -2185,10 +2169,18 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
 
     with image_col_1:
         st.markdown("**Confusion Matrix**")
-        if confusion_matrix_path.exists():
+        if confusion_matrix_json_path.exists():
+            render_confusion_matrix_heatmap(confusion_matrix_json_path)
+        elif confusion_matrix_path.exists():
+            # Fallback cho artifact từ lần train CŨ (trước khi có `confusion_matrix.json`) - chỉ có
+            # ảnh heatmap tĩnh, chưa có dữ liệu số thô để tự vẽ lại bản tương tác.
             render_full_width_image(str(confusion_matrix_path))
+            st.caption(
+                "Chưa có dữ liệu số cho heatmap tương tác (artifact từ lần train cũ) - hãy train lại "
+                "để có bản tương tác."
+            )
         else:
-            st.info("Chưa có ảnh `confusion_matrix.png` trong `models/latest/`.")
+            st.info("Chưa có `confusion_matrix.json`/`confusion_matrix.png` trong `models/latest/`.")
 
     with image_col_2:
         st.markdown("**Feature Importance**")
@@ -2223,10 +2215,6 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
             "sai số nguy hiểm nhất trong bài toán cảnh báo. Feature Importance cho thấy biến khí tượng - thủy văn "
             "nào (mưa, độ ẩm đất, triều cường...) đóng góp nhiều nhất vào quyết định của mô hình."
         )
-
-    with st.expander("Case study - phân tích các trường hợp dự đoán sai", expanded=False):
-        misclassified_samples_path = Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR))) / "misclassified_samples.csv"
-        render_case_study_section(misclassified_samples_path)
 
     model_type = deployment_config.get("model_type", "unknown")
     model_type_label_map = {
@@ -2363,6 +2351,82 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
         )
 
 
+def render_managerial_insights_section(
+    evaluation_metrics: dict, deployment_config: dict, runtime_info: dict
+) -> None:
+    """
+    Nhận định & kết luận quản trị - TÍNH THẬT từ dữ liệu và kết quả huấn luyện hiện có (bản trước đây
+    chỉ là TEMPLATE placeholder tĩnh, không thật sự tính toán gì - đã phát hiện và sửa lại). Mỗi con
+    số dưới đây lấy TRỰC TIẾP từ artifact/dữ liệu thật, không hardcode:
+    - Tên model + F1-Macro: từ `deployment_config.json` (đúng model vừa được chọn triển khai).
+    - Địa phương/tháng ưu tiên: tính trực tiếp từ dữ liệu lịch sử thật (`load_eda_sample_dataframe()`).
+    - AUC lớp `Ngập nặng`: từ `roc_curve_data.json` (đúng kết quả đánh giá của model đang triển khai).
+    """
+    best_model_name = deployment_config.get("model_name", "N/A")
+    best_f1_macro = deployment_config.get("f1_macro", 0)
+
+    eda_df = load_eda_sample_dataframe()
+    priority_location_text = "Chưa có đủ dữ liệu lịch sử để xác định."
+    priority_month_text = "Chưa có đủ dữ liệu lịch sử để xác định."
+    if not eda_df.empty and "Nguy_cơ_ngập" in eda_df.columns:
+        flood_df = eda_df[pd.to_numeric(eda_df["Nguy_cơ_ngập"], errors="coerce") > 0]
+        if not flood_df.empty and "Địa phương" in flood_df.columns:
+            location_counts = flood_df["Địa phương"].value_counts()
+            top_location = location_counts.index[0]
+            top_location_share = location_counts.iloc[0] / len(flood_df) * 100
+            priority_location_text = (
+                f"**{top_location}** ghi nhận {int(location_counts.iloc[0]):,} lượt ngập "
+                f"({top_location_share:.1f}% tổng số lượt ngập trong dữ liệu lịch sử) - địa phương có "
+                "tần suất ngập cao nhất, cần ưu tiên đầu tư trạm quan trắc/lực lượng ứng trực."
+            )
+        if not flood_df.empty and "Thời_gian" in flood_df.columns:
+            month_counts = flood_df["Thời_gian"].dt.month.value_counts()
+            top_month = int(month_counts.index[0])
+            top_month_share = month_counts.iloc[0] / len(flood_df) * 100
+            priority_month_text = (
+                f"**Tháng {top_month}** ghi nhận {int(month_counts.iloc[0]):,} lượt ngập "
+                f"({top_month_share:.1f}% tổng số lượt ngập) - tháng cao điểm cần tăng cường giám sát "
+                "và chuẩn bị phương án sơ tán."
+            )
+
+    residual_risk_text = "Chưa có dữ liệu ROC-AUC để đánh giá rủi ro còn tồn đọng."
+    roc_path = Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR))) / "roc_curve_data.json"
+    if roc_path.exists():
+        try:
+            with roc_path.open("r", encoding="utf-8") as file:
+                roc_payload = json.load(file)
+            heavy_flood_auc = (roc_payload.get("curves", {}).get("2") or {}).get("auc")
+            if heavy_flood_auc is not None:
+                if heavy_flood_auc < 0.85:
+                    residual_risk_text = (
+                        f"AUC lớp `Ngập nặng` hiện ở mức **{heavy_flood_auc:.4f}** - tương đối thấp so "
+                        "với 2 lớp còn lại, phản ánh đúng thực tế lớp này CHỈ CHIẾM PHẦN NHỎ trong dữ "
+                        "liệu (mất cân bằng nặng). Hướng khắc phục: thu thập thêm dữ liệu ngập nặng "
+                        "thật, cải thiện chất lượng CTGAN, hoặc tinh chỉnh ngưỡng cảnh báo qua "
+                        "`hyperparameter_tuning.py`."
+                    )
+                else:
+                    residual_risk_text = (
+                        f"AUC lớp `Ngập nặng` hiện ở mức **{heavy_flood_auc:.4f}** - khá tốt, model phân "
+                        "biệt được lớp nguy hiểm nhất này tương đối rõ ràng. Vẫn nên tiếp tục theo dõi "
+                        "khi có thêm dữ liệu thực tế mới để xác nhận độ ổn định."
+                    )
+        except Exception:
+            pass
+
+    st.markdown(
+        f"""
+1. **Hiệu năng mô hình đề xuất triển khai**: model tốt nhất hiện tại là **`{best_model_name}`** với
+   F1-Macro = **{best_f1_macro:.4f}**. Đây là model có điểm cân bằng tốt nhất giữa Precision và Recall
+   trên cả 3 lớp, đặc biệt quan trọng với lớp `Ngập nặng` vì bỏ sót 1 trường hợp ngập thật gây hậu quả
+   nghiêm trọng hơn nhiều so với 1 lần cảnh báo dư thừa.
+2. **Khu vực ưu tiên**: {priority_location_text}
+3. **Thời điểm ưu tiên**: {priority_month_text}
+4. **Rủi ro còn tồn đọng**: {residual_risk_text}
+        """
+    )
+
+
 def render_evaluation_tab() -> None:
     """
     Nội dung Tab 3 - Đánh giá mô hình, bước THỨ BA của vòng đời Data Science.
@@ -2385,25 +2449,7 @@ def render_evaluation_tab() -> None:
         render_model_metrics(evaluation_metrics, deployment_config, runtime_info)
 
     with st.expander("Nhận định & kết luận quản trị (Managerial Insights)", expanded=True):
-        # TODO: thay nội dung placeholder này bằng nhận định THẬT rút ra từ kết quả mô hình + EDA (Tab 1)
-        # của bạn - đây là phần quan trọng nhất khi bảo vệ luận văn vì nối kết quả kỹ thuật với hành động
-        # quản trị thực tế, không chỉ dừng lại ở con số.
-        st.markdown(
-            """
-            **Gợi ý cấu trúc phần Kết luận quản trị (điền số liệu thật của bạn vào đây):**
-
-            1. **Hiệu năng mô hình đề xuất triển khai** — nêu tên mô hình tốt nhất, F1-macro, và lý do
-               chọn (cân bằng Precision/Recall, ưu tiên Recall cho lớp `Ngập nặng` vì bỏ sót nguy hiểm
-               hơn cảnh báo dư).
-            2. **Khu vực ưu tiên** — dựa trên EDA ở Tab 1 (`flood_share_by_location.png`), địa phương nào
-               có tần suất ngập cao nhất cần được ưu tiên đầu tư trạm quan trắc / lực lượng ứng trực.
-            3. **Thời điểm ưu tiên** — dựa trên `monthly_trend.png`, giai đoạn nào trong năm cần tăng
-               cường giám sát và chuẩn bị phương án sơ tán.
-            4. **Rủi ro còn tồn đọng** — nêu giới hạn của mô hình (ví dụ AUC lớp `Ngập nặng` thấp do
-               thiếu dữ liệu) và đề xuất hướng khắc phục (thu thập thêm dữ liệu, cải thiện CTGAN,
-               dùng `hyperparameter_tuning.py` để tinh chỉnh sâu hơn).
-            """
-        )
+        render_managerial_insights_section(evaluation_metrics, deployment_config, runtime_info)
 
 
 # ==================================================================================================
