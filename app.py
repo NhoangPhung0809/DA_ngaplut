@@ -704,9 +704,16 @@ def initialize_system():
 
 
 @st.cache_resource(show_spinner=False)
-def load_evaluation_artifacts():
+def _load_evaluation_artifacts_cached(metrics_mtime: float, deployment_mtime: float):
     """
     Nạp `evaluation_metrics.json` + `deployment_config.json` + thông tin runtime cho Tab Đánh giá.
+    `metrics_mtime`/`deployment_mtime` KHÔNG dùng trong thân hàm - chỉ tồn tại để LÀM CACHE KEY, ép
+    Streamlit tự đọc lại 2 file JSON này mỗi khi `analyze_and_train.py` ghi đè bằng lần train mới
+    (mtime đổi), thay vì cache VĨNH VIỄN kết quả của lần train ĐẦU TIÊN cho tới khi ai đó bấm '🔄 Làm
+    mới toàn bộ cache' thủ công - đúng lỗi thực tế đã gặp (Confusion Matrix/leaderboard trông như
+    "đứng yên" dù đã train lại nhiều lần), cùng nguyên nhân và cách sửa như
+    `_load_ctgan_comparison_artifacts_cached()` ở trên.
+
     Lưu ý: hàm này chỉ đọc THÔNG TIN MÔ TẢ (JSON nhẹ), CHƯA nạp model thật vào bộ nhớ (không
     joblib.load()/keras.load_model() ở đây) - việc nạp model thật chỉ nên thực hiện khi thật sự cần
     suy luận, xem `load_deployment_model()` bên dưới, để tránh tốn RAM/thời gian tải chỉ để xem bảng
@@ -718,6 +725,13 @@ def load_evaluation_artifacts():
     with open(runtime_info["deployment_config_path"], "r", encoding="utf-8") as file:
         deployment_config = json.load(file)
     return evaluation_metrics, deployment_config, runtime_info
+
+
+def load_evaluation_artifacts():
+    runtime_info = initialize_system()
+    metrics_mtime = Path(runtime_info["metrics_path"]).stat().st_mtime
+    deployment_mtime = Path(runtime_info["deployment_config_path"]).stat().st_mtime
+    return _load_evaluation_artifacts_cached(metrics_mtime, deployment_mtime)
 
 
 def load_deployment_model(deployment_config: dict, latest_dir: str | Path) -> dict:
@@ -1797,17 +1811,19 @@ def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> N
             marker=dict(color="#4C78A8", line=dict(color="#1e3a5f", width=1)),
             text=[f"{value:.3f}" for value in importance_df["Importance"]],
             textposition="outside",
-            textfont=dict(size=14, color="#f8fafc"),
+            textfont=dict(size=16, color="#f8fafc"),
             hovertemplate="%{y}: %{x:.4f}<extra></extra>",
         )
     )
     fig.update_layout(
-        margin=dict(t=20, b=20, l=10, r=40),
-        height=260,
+        # Cao hơn bản cũ (260 -> 420) để khớp chiều cao Confusion Matrix bên cạnh và đỡ bị bó hẹp khi
+        # có đủ 5 dòng (mỗi dòng cần khoảng không đủ rộng để không đè chữ lên nhau).
+        margin=dict(t=20, b=40, l=10, r=60),
+        height=420,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(title="Mức độ quan trọng", color="#cbd5e1", gridcolor="#334155", zeroline=False),
-        yaxis=dict(color="#f8fafc", tickfont=dict(size=13)),
+        xaxis=dict(title="Mức độ quan trọng", color="#cbd5e1", gridcolor="#334155", zeroline=False, title_font=dict(size=15), tickfont=dict(size=13)),
+        yaxis=dict(color="#f8fafc", tickfont=dict(size=15)),
         showlegend=False,
     )
     st.plotly_chart(fig, use_container_width=True)
