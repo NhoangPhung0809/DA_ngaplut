@@ -1195,6 +1195,144 @@ def render_interactive_monthly_trend_chart(eda_df: pd.DataFrame) -> None:
     )
 
 
+def apply_dark_plotly_theme(fig, height: int = 420) -> None:
+    """
+    Style DÙNG CHUNG cho mọi biểu đồ Plotly trong app: nền TRONG SUỐT + chữ/trục sáng màu, khớp theme
+    tối toàn cục (`apply_global_ui_theme()`). Không áp style này thì Plotly mặc định nền TRẮNG, đặt
+    cạnh theme tối trông như 1 ảnh dán lì, không giống thành phần tương tác thật của trang (bug thực tế
+    đã gặp với Confusion Matrix trước khi thêm hàm này).
+    """
+    fig.update_layout(
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#e5eefc"),
+        title=dict(font=dict(color="#f8fafc")),
+        legend=dict(font=dict(color="#e5eefc")),
+        height=height,
+        margin=dict(t=50, b=40, l=10, r=10),
+    )
+    fig.update_xaxes(color="#cbd5e1", gridcolor="#334155", zerolinecolor="#334155")
+    fig.update_yaxes(color="#cbd5e1", gridcolor="#334155", zerolinecolor="#334155")
+
+
+def render_correlation_heatmap_interactive(eda_df: pd.DataFrame) -> None:
+    """Ma trận tương quan Pearson (Plotly heatmap tương tác) - thay cho `correlation_heatmap.png` tĩnh
+    do `eda_analysis.py` sinh sẵn. Tính TRỰC TIẾP từ `eda_df` (dữ liệu lịch sử thật đang nạp trong
+    app), không phụ thuộc file ảnh xuất sẵn."""
+    numeric_cols = [col for col in [*FEATURE_COLS_FOR_INFERENCE, "Nguy_cơ_ngập"] if col in eda_df.columns]
+    if eda_df.empty or len(numeric_cols) < 2:
+        st.info("Chưa đủ dữ liệu số để tính ma trận tương quan.")
+        return
+
+    corr_df = eda_df[numeric_cols].corr(method="pearson").round(2)
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=corr_df.values,
+            x=corr_df.columns.tolist(),
+            y=corr_df.columns.tolist(),
+            colorscale="RdYlBu_r",
+            zmid=0,
+            zmin=-1,
+            zmax=1,
+            hovertemplate="%{y} vs %{x}: %{z}<extra></extra>",
+            colorbar=dict(title="Hệ số"),
+        )
+    )
+    for row_index, row_label in enumerate(corr_df.index):
+        for col_index, col_label in enumerate(corr_df.columns):
+            value = corr_df.iloc[row_index, col_index]
+            fig.add_annotation(
+                x=col_label,
+                y=row_label,
+                text=f"{value:.2f}",
+                showarrow=False,
+                font=dict(size=12, color="#0f172a" if abs(value) < 0.6 else "#f8fafc"),
+            )
+    apply_dark_plotly_theme(fig, height=480)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_class_distribution_interactive(eda_df: pd.DataFrame) -> None:
+    """Phân bố lớp mục tiêu (Plotly bar chart tương tác) - thay cho `class_distribution.png` tĩnh."""
+    if eda_df.empty or "Nguy_cơ_ngập" not in eda_df.columns:
+        st.info("Chưa có dữ liệu để thống kê phân bố lớp.")
+        return
+
+    class_counts = pd.to_numeric(eda_df["Nguy_cơ_ngập"], errors="coerce").value_counts().sort_index()
+    class_labels = [f"{int(code)} - {CLASS_LABEL_VI.get(str(int(code)), str(code))}" for code in class_counts.index]
+    class_colors = {"0": "#4C78A8", "1": "#F58518", "2": "#E45756"}
+    bar_colors = [class_colors.get(str(int(code)), "#94a3b8") for code in class_counts.index]
+
+    fig = go.Figure(
+        data=go.Bar(
+            x=class_labels,
+            y=class_counts.values,
+            marker=dict(color=bar_colors, line=dict(color="#1F1F1F", width=1)),
+            text=[f"{int(v):,}" for v in class_counts.values],
+            textposition="outside",
+            hovertemplate="%{x}: %{y:,}<extra></extra>",
+        )
+    )
+    apply_dark_plotly_theme(fig)
+    fig.update_layout(xaxis=dict(title="Lớp nguy cơ ngập"), yaxis=dict(title="Số lượng quan sát"))
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_flood_share_by_location_interactive(eda_df: pd.DataFrame) -> None:
+    """Tỷ lệ ngập theo địa phương (Plotly pie chart tương tác) - thay cho
+    `flood_share_by_location.png` tĩnh."""
+    if eda_df.empty or "Nguy_cơ_ngập" not in eda_df.columns or "Địa phương" not in eda_df.columns:
+        st.info("Chưa có dữ liệu để tính tỷ lệ ngập theo địa phương.")
+        return
+
+    flood_df = eda_df[pd.to_numeric(eda_df["Nguy_cơ_ngập"], errors="coerce") > 0]
+    if flood_df.empty:
+        st.info("Không có bản ghi ngập nào trong dữ liệu hiện có.")
+        return
+
+    location_counts = flood_df["Địa phương"].value_counts()
+    fig = go.Figure(
+        data=go.Pie(
+            labels=location_counts.index.tolist(),
+            values=location_counts.values.tolist(),
+            hovertemplate="%{label}: %{value:,} (%{percent})<extra></extra>",
+            textinfo="label+percent",
+            marker=dict(line=dict(color="#0b1220", width=2)),
+        )
+    )
+    apply_dark_plotly_theme(fig)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_feature_distribution_by_class_interactive(eda_df: pd.DataFrame, feature_col: str, title: str) -> None:
+    """Phân bố 1 biến số (mưa/triều cường...) theo TỪNG lớp nguy cơ ngập (Plotly histogram chồng lớp,
+    dạng density) - thay cho `rain_distribution_by_class.png`/`tide_distribution_by_class.png` tĩnh."""
+    if eda_df.empty or feature_col not in eda_df.columns or "Nguy_cơ_ngập" not in eda_df.columns:
+        st.info(f"Chưa có dữ liệu để vẽ phân bố `{feature_col}`.")
+        return
+
+    plot_df = eda_df.copy()
+    plot_df["Nguy_cơ_ngập"] = pd.to_numeric(plot_df["Nguy_cơ_ngập"], errors="coerce")
+    plot_df = plot_df.dropna(subset=["Nguy_cơ_ngập", feature_col])
+    plot_df["Mức độ ngập"] = plot_df["Nguy_cơ_ngập"].astype(int).astype(str).map(CLASS_LABEL_VI)
+
+    class_colors = {"Không ngập": "#4C78A8", "Ngập nhẹ": "#F58518", "Ngập nặng": "#E45756"}
+    fig = px.histogram(
+        plot_df,
+        x=feature_col,
+        color="Mức độ ngập",
+        histnorm="probability density",
+        barmode="overlay",
+        opacity=0.55,
+        nbins=40,
+        color_discrete_map=class_colors,
+        category_orders={"Mức độ ngập": ["Không ngập", "Ngập nhẹ", "Ngập nặng"]},
+    )
+    apply_dark_plotly_theme(fig)
+    fig.update_layout(title=dict(text=title), yaxis=dict(title="Mật độ phân bố"))
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def render_eda_tab() -> None:
     """
     Nội dung Tab 1 - Khám phá dữ liệu (EDA), bước ĐẦU TIÊN của vòng đời Data Science.
@@ -1267,30 +1405,36 @@ def render_eda_tab() -> None:
 
     st.markdown("---")
 
-    # ---- Hàng 2: biểu đồ phân phối / tương quan (ảnh tĩnh do eda_analysis.py sinh sẵn) ----
+    # ---- Hàng 2: biểu đồ phân phối / tương quan - TƯƠNG TÁC (Plotly, tính trực tiếp từ eda_df thật,
+    # thay cho 5 ảnh PNG tĩnh do eda_analysis.py sinh sẵn trước đây) ----
     with st.expander("Phân phối dữ liệu & ma trận tương quan (Distribution / Heatmap)", expanded=True):
-        # TODO: đây là placeholder hiển thị ẢNH TĨNH từ `eda_analysis.py` để tránh vẽ lại biểu đồ nặng
-        # mỗi lần Streamlit rerun. Nếu muốn biểu đồ TƯƠNG TÁC, có thể thay bằng `px.imshow()` (heatmap)
-        # hoặc `px.histogram()` (phân phối) ngay trong hàm này.
-        eda_chart_files = {
-            "Ma trận tương quan (Heatmap)": PLOTS_DIR / "correlation_heatmap.png",
-            "Phân bố lớp mục tiêu": PLOTS_DIR / "class_distribution.png",
-            "Tỷ lệ ngập theo địa phương": PLOTS_DIR / "flood_share_by_location.png",
-            "Phân bố lượng mưa theo lớp": PLOTS_DIR / "rain_distribution_by_class.png",
-            "Phân bố triều cường theo lớp": PLOTS_DIR / "tide_distribution_by_class.png",
-        }
         chart_columns = st.columns(2)
-        for index, (chart_title, chart_path) in enumerate(eda_chart_files.items()):
-            with chart_columns[index % 2]:
-                st.markdown(f"**{chart_title}**")
-                if chart_path.exists():
-                    render_full_width_image(str(chart_path))
-                else:
-                    st.info(f"Chưa có `{chart_path.name}`. Hãy chạy `python eda_analysis.py` để sinh ảnh.")
+        with chart_columns[0]:
+            st.markdown("**Ma trận tương quan (Heatmap)**")
+            render_correlation_heatmap_interactive(eda_df)
+        with chart_columns[1]:
+            st.markdown("**Phân bố lớp mục tiêu**")
+            render_class_distribution_interactive(eda_df)
+
+        chart_columns_2 = st.columns(2)
+        with chart_columns_2[0]:
+            st.markdown("**Tỷ lệ ngập theo địa phương**")
+            render_flood_share_by_location_interactive(eda_df)
+        with chart_columns_2[1]:
+            st.markdown("**Phân bố lượng mưa theo lớp**")
+            render_feature_distribution_by_class_interactive(
+                eda_df, "Lượng_mưa_mm", "Phân bố lượng mưa theo lớp nguy cơ ngập"
+            )
+
+        st.markdown("**Phân bố triều cường theo lớp**")
+        render_feature_distribution_by_class_interactive(
+            eda_df, "Chiều_cao_triều_m", "Phân bố triều cường theo lớp nguy cơ ngập"
+        )
+
         render_chart_discussion(
-            "Các biểu đồ trên tổng hợp quan hệ tương quan giữa các biến, phân phối lớp mục tiêu, xu hướng "
-            "mưa/ngập theo mùa vụ, và tỷ lệ ngập theo địa phương - cung cấp căn cứ định lượng cho khuyến "
-            "nghị quản trị ở Tab 3 (ví dụ: tháng nào, khu vực nào cần ưu tiên nguồn lực phòng chống ngập)."
+            "Các biểu đồ trên tổng hợp quan hệ tương quan giữa các biến, phân phối lớp mục tiêu, và tỷ "
+            "lệ ngập theo địa phương - cung cấp căn cứ định lượng cho khuyến nghị quản trị ở Tab 3 (ví "
+            "dụ: khu vực nào cần ưu tiên nguồn lực phòng chống ngập)."
         )
 
     # ---- Hàng 3: xử lý giá trị thiếu / ngoại lai ----
@@ -1820,12 +1964,18 @@ def render_confusion_matrix_heatmap(confusion_matrix_json_path: Path) -> None:
                 font=dict(size=16, color="#f8fafc" if is_dark_cell else "#0f172a"),
             )
     fig.update_layout(
-        title="Confusion Matrix - Best Model",
-        xaxis=dict(title="Nhãn dự đoán", side="bottom"),
-        yaxis=dict(title="Nhãn thật", autorange="reversed"),
+        title=dict(text="Confusion Matrix - Best Model", font=dict(color="#f8fafc")),
+        # Nền TRONG SUỐT (khớp `plot_bgcolor`/`paper_bgcolor` đã dùng ở Feature Importance) - mặc định
+        # Plotly nền TRẮNG, đặt cạnh theme tối của app trông như 1 ảnh dán lì, không giống 1 thành phần
+        # tương tác thật của trang. Không set màu này thì colorbar/trục cũng bị lẫn vào nền trắng đó.
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(title="Nhãn dự đoán", side="bottom", color="#cbd5e1"),
+        yaxis=dict(title="Nhãn thật", autorange="reversed", color="#cbd5e1"),
         height=420,
         margin=dict(t=50, b=40, l=10, r=10),
     )
+    fig.update_traces(colorbar=dict(title=dict(text="Số lượng", font=dict(color="#f8fafc")), tickfont=dict(color="#cbd5e1")))
     st.plotly_chart(fig, use_container_width=True)
 
 
