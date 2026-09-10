@@ -2186,7 +2186,7 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
                 "Chưa có dữ liệu số cho biểu đồ tương tác (artifact từ lần train cũ) - hãy train lại "
                 "để có bản thanh màu tương tác."
             )
-        elif deployment_config.get("model_type") in {"keras_sequence", "hybrid_lstm_xgboost"}:
+        elif deployment_config.get("model_type") in {"keras_sequence", "hybrid_lstm_xgboost", "hybrid_lstm_gru_xgboost"}:
             # KHÔNG phải lỗi/chưa train - model tốt nhất hiện tại là dạng chuỗi (LSTM/GRU/CNN/Hybrid),
             # loại feature importance kiểu tabular (feature_importances_/coef_/permutation) không áp
             # dụng trực tiếp được cho input dạng sliding-window (mỗi feature lặp lại qua 7 bước thời
