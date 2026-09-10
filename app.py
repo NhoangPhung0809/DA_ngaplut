@@ -1043,7 +1043,57 @@ def load_eda_sample_dataframe() -> pd.DataFrame:
         combined_df["Thời_gian"] = pd.to_datetime(combined_df["Thời_gian"], errors="coerce")
         combined_df = combined_df.dropna(subset=["Thời_gian"]).sort_values("Thời_gian").reset_index(drop=True)
 
+    combined_df = regenerate_flood_risk_label(combined_df)
     return combined_df
+
+
+def regenerate_flood_risk_label(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tính lại cột `Nguy_cơ_ngập` 3 lớp (0/1/2) bằng ĐÚNG luật chuyên gia dùng trong
+    `create_multiclass_flood_label()` (analyze_and_train.py), thay vì tin thẳng cột `Nguy_cơ_ngập` sẵn
+    có trong CSV thô.
+
+    LÝ DO CẦN HÀM NÀY (bug thực tế đã gặp): CSV thô trong `data/historical/` lưu nhãn từ MỘT phiên bản
+    fetch/label CŨ hơn (có thể chỉ 0/1 nhị phân, không có lớp 'Ngập nặng'), KHÁC với nhãn 3 lớp rule-
+    based mà pipeline huấn luyện thật sự dùng - `eda_analysis.py` (script độc lập cũ) đã biết vấn đề
+    này và tự quy định lại nhãn trước khi vẽ biểu đồ (xem docstring `save_eda_metadata()` ở đó), nhưng
+    `load_eda_sample_dataframe()` ở `app.py` trước đây LẤY THẲNG cột CSV thô - khiến Tab EDA hiển thị
+    sai lệch nhãn so với thực tế model đang học (ví dụ biểu đồ phân bố lớp bị THIẾU HẲN lớp 'Ngập
+    nặng' dù dữ liệu vẫn có các đợt mưa/triều đủ lớn để được xếp vào lớp đó).
+
+    ĐƠN GIẢN HOÁ so với bản training thật: dùng `fillna(0)` trực tiếp cho 3 biến quyết định nhãn (mưa/
+    độ ẩm đất/triều), KHÔNG áp dụng bước điền median-theo-tập-train phức tạp của
+    `compute_train_only_medians()` - bước đó chỉ cần thiết để tránh rò rỉ dữ liệu khi HUẤN LUYỆN model,
+    không ảnh hưởng tới mục đích XEM PHÂN BỐ dữ liệu ở Tab EDA.
+    """
+    if df.empty:
+        return df
+
+    required_columns = {"Lượng_mưa_mm", "Độ_ẩm_đất", "Chiều_cao_triều_m"}
+    if not required_columns.issubset(df.columns):
+        return df
+
+    labeled_df = df.copy()
+    rain = pd.to_numeric(labeled_df["Lượng_mưa_mm"], errors="coerce").fillna(0)
+    soil = pd.to_numeric(labeled_df["Độ_ẩm_đất"], errors="coerce").fillna(0)
+    tide = pd.to_numeric(labeled_df["Chiều_cao_triều_m"], errors="coerce").fillna(0)
+
+    heavy_flood_mask = (
+        (rain > 50)
+        | ((rain > 30) & (soil > 0.45))
+        | ((rain > 20) & (soil > 0.40) & (tide > 1.50))
+        | (tide > 2.50)
+    )
+    light_flood_mask = (
+        (rain > 25)
+        | ((rain > 15) & (soil > 0.30))
+        | ((rain > 10) & (tide > 1.20))
+    )
+
+    labeled_df["Nguy_cơ_ngập"] = 0
+    labeled_df.loc[light_flood_mask, "Nguy_cơ_ngập"] = 1
+    labeled_df.loc[heavy_flood_mask, "Nguy_cơ_ngập"] = 2
+    return labeled_df
 
 
 def compute_outlier_summary_by_class(
@@ -1205,8 +1255,11 @@ def apply_dark_plotly_theme(fig, height: int = 420) -> None:
     fig.update_layout(
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
+        # KHÔNG set `title=dict(font=...)` ở đây khi chưa có `title.text` - 1 số phiên bản Plotly.js
+        # render literal chữ "undefined" ngay dưới tiêu đề markdown khi `layout.title` tồn tại nhưng
+        # thiếu "text" (bug thực tế đã gặp). Màu chữ tiêu đề (khi CÓ set text ở nơi gọi) đã tự kế thừa
+        # từ `font` toàn cục bên dưới, không cần khai báo `title.font` riêng.
         font=dict(color="#e5eefc"),
-        title=dict(font=dict(color="#f8fafc")),
         legend=dict(font=dict(color="#e5eefc")),
         height=height,
         margin=dict(t=50, b=40, l=10, r=10),
