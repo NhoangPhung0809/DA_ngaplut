@@ -2752,6 +2752,26 @@ def copy_artifact_to_latest(source_path: Path, target_name: str) -> Path:
     return destination
 
 
+def remove_stale_latest_artifact(target_name: str) -> None:
+    """
+    Xoá 1 artifact CŨ khỏi `models/latest/` (và `plots/` nếu có) khi lần train NÀY không tạo ra artifact
+    tương ứng (ví dụ model tốt nhất đổi từ dạng bảng sang dạng sequence, khiến `feature_importance.png`
+    không còn được sinh ra nữa).
+
+    LÝ DO CẦN HÀM NÀY (bug thực tế đã gặp): trước đây `copy_artifact_to_latest()` chỉ ĐƯỢC GỌI khi
+    artifact mới thực sự tồn tại - nếu KHÔNG gọi thì file CŨ từ 1 lần train TRƯỚC ĐÓ (khi model khác
+    đang thắng) vẫn nằm nguyên trong `models/latest/` mãi mãi, khiến UI hiển thị 1 biểu đồ trông như
+    "kết quả hiện tại" nhưng THỰC RA thuộc về 1 model đã không còn được triển khai - gây hiểu lầm
+    nghiêm trọng khi đọc kết quả (ví dụ Confusion Matrix mới nhưng Feature Importance lại là của model
+    cũ từ nhiều lần train trước, hoàn toàn không khớp nhau).
+    """
+    for directory in (LATEST_MODELS_DIR, PLOTS_DIR):
+        stale_path = directory / target_name
+        if stale_path.exists():
+            stale_path.unlink()
+            print(f"Removed stale artifact (model hiện tại không còn sinh ra file này): {stale_path}")
+
+
 def copy_artifact_to_plots(source_path: Path, target_name: str) -> Path:
     """Đồng bộ artifact sang `plots/` để tránh tồn tại file cũ gây hiểu nhầm."""
     destination = PLOTS_DIR / target_name
@@ -2906,30 +2926,41 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
         key: copy_artifact_to_latest(path, Path(path).name) for key, path in artifacts.items()
     }
 
-    latest_confusion_path = (
-        copy_artifact_to_latest(confusion_matrix_path, "confusion_matrix.png") if confusion_matrix_path else None
-    )
-    latest_feature_importance_path = (
-        copy_artifact_to_latest(feature_importance_path, "feature_importance.png")
-        if feature_importance_path
-        else None
-    )
-    # `feature_importance.json` (dữ liệu số thô cho biểu đồ radar tương tác ở app.py) LUÔN được ghi ra
-    # CÙNG thư mục với `feature_importance.png` bởi `plot_feature_importance()` - chỉ cần copy sang
+    if confusion_matrix_path:
+        latest_confusion_path = copy_artifact_to_latest(confusion_matrix_path, "confusion_matrix.png")
+    else:
+        remove_stale_latest_artifact("confusion_matrix.png")
+        latest_confusion_path = None
+
+    if feature_importance_path:
+        latest_feature_importance_path = copy_artifact_to_latest(feature_importance_path, "feature_importance.png")
+    else:
+        # Model tốt nhất lần này KHÔNG hỗ trợ feature importance kiểu tabular (ví dụ đổi sang LSTM/GRU/
+        # Hybrid) - xoá ảnh CŨ đi thay vì để nó nằm lại trông như đang là kết quả của model hiện tại.
+        remove_stale_latest_artifact("feature_importance.png")
+        latest_feature_importance_path = None
+
+    # `feature_importance.json` (dữ liệu số thô cho biểu đồ thanh màu tương tác ở app.py) LUÔN được ghi
+    # ra CÙNG thư mục với `feature_importance.png` bởi `plot_feature_importance()` - chỉ cần copy sang
     # `models/latest/` nếu file .png tương ứng thực sự tồn tại (tức nhánh sklearn_tabular đã chạy).
     feature_importance_json_path = (
         feature_importance_path.parent / "feature_importance.json" if feature_importance_path else None
     )
-    latest_feature_importance_json_path = (
-        copy_artifact_to_latest(feature_importance_json_path, "feature_importance.json")
-        if feature_importance_json_path and feature_importance_json_path.exists()
-        else None
-    )
-    latest_misclassified_samples_path = (
-        copy_artifact_to_latest(misclassified_samples_path, "misclassified_samples.csv")
-        if misclassified_samples_path
-        else None
-    )
+    if feature_importance_json_path and feature_importance_json_path.exists():
+        latest_feature_importance_json_path = copy_artifact_to_latest(
+            feature_importance_json_path, "feature_importance.json"
+        )
+    else:
+        remove_stale_latest_artifact("feature_importance.json")
+        latest_feature_importance_json_path = None
+
+    if misclassified_samples_path:
+        latest_misclassified_samples_path = copy_artifact_to_latest(
+            misclassified_samples_path, "misclassified_samples.csv"
+        )
+    else:
+        remove_stale_latest_artifact("misclassified_samples.csv")
+        latest_misclassified_samples_path = None
     latest_roc_curve_path = copy_artifact_to_latest(roc_curve_path, "roc_curve_data.json") if roc_curve_path else None
     if latest_confusion_path:
         copy_artifact_to_plots(latest_confusion_path, "confusion_matrix.png")
