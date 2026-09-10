@@ -2679,6 +2679,131 @@ def plot_feature_importance(best_model, X_test_scaled: pd.DataFrame, y_test: pd.
     return output_path
 
 
+def build_sequence_predict_fn(deployment_type: str, model_bundle: dict):
+    """
+    Trả về 1 hàm `predict_fn(X_seq) -> mảng nhãn dự đoán (int)` DÙNG CHUNG cho MỌI loại model dạng
+    sequence/hybrid (`keras_sequence` / `hybrid_lstm_xgboost` / `hybrid_lstm_gru_xgboost`) - để
+    `compute_sequence_permutation_importance()` coi model như 1 HỘP ĐEN, không cần biết chi tiết kiến
+    trúc bên trong từng loại (LSTM đơn, hay ghép với XGBoost qua 1-2 nhánh feature extractor).
+    """
+    if deployment_type == "keras_sequence":
+        keras_model = model_bundle["model"]
+        return lambda X: np.argmax(keras_model.predict(X, verbose=0), axis=1)
+
+    if deployment_type == "hybrid_lstm_xgboost":
+        feature_extractor = model_bundle["feature_extractor"]
+        classifier = model_bundle["classifier"]
+        return lambda X: classifier.predict(feature_extractor.predict(X, verbose=0))
+
+    if deployment_type == "hybrid_lstm_gru_xgboost":
+        lstm_feature_extractor = model_bundle["lstm_feature_extractor"]
+        gru_feature_extractor = model_bundle["gru_feature_extractor"]
+        classifier = model_bundle["classifier"]
+
+        def predict_fn(X: np.ndarray) -> np.ndarray:
+            lstm_embeddings = lstm_feature_extractor.predict(X, verbose=0)
+            gru_embeddings = gru_feature_extractor.predict(X, verbose=0)
+            combined_embeddings = np.concatenate([lstm_embeddings, gru_embeddings], axis=1)
+            return classifier.predict(combined_embeddings)
+
+        return predict_fn
+
+    raise ValueError(f"Không hỗ trợ tính predict_fn cho deployment_type='{deployment_type}'.")
+
+
+def compute_sequence_permutation_importance(
+    predict_fn,
+    X_test_seq: np.ndarray,
+    y_test_seq: np.ndarray,
+    feature_cols: list[str],
+    n_repeats: int = 3,
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """
+    Permutation Importance THỦ CÔNG cho model dạng sequence (LSTM/GRU/CNN/Hybrid) - `sklearn.inspection.
+    permutation_importance` KHÔNG dùng trực tiếp được ở đây vì nó yêu cầu estimator tương thích API
+    sklearn chuẩn, trong khi model ở đây là Keras hoặc tổ hợp Keras + XGBoost qua `predict_fn` tuỳ biến.
+
+    NGUYÊN LÝ (giống hệt permutation importance chuẩn của sklearn, chỉ khác cách áp dụng lên dữ liệu 3
+    chiều `(mẫu, 7 ngày, feature)`): với MỖI feature, XÁO TRỘN (permutation) giá trị của feature đó
+    GIỮA CÁC MẪU (đổi mẫu nào ghép với mẫu nào ở CHIỀU feature đó, giữ nguyên cấu trúc 7 ngày và mọi
+    feature khác) - phá vỡ mối liên hệ giữa feature đó và nhãn thật, RỒI đo F1-Macro giảm bao nhiêu so
+    với baseline (không xáo trộn gì). Feature nào làm F1 giảm CÀNG NHIỀU khi bị xáo trộn thì model đang
+    dựa vào feature đó CÀNG NHIỀU để dự đoán đúng - tức càng quan trọng.
+
+    `n_repeats=3`: lặp lại phép xáo trộn ngẫu nhiên 3 lần cho MỖI feature rồi lấy trung bình, để giảm
+    nhiễu do 1 lần xáo trộn ngẫu nhiên "may rủi" không đại diện (đúng khuyến nghị mặc định của sklearn).
+    """
+    rng = np.random.RandomState(random_state)
+    baseline_predictions = predict_fn(X_test_seq)
+    baseline_f1 = f1_score(y_test_seq, baseline_predictions, average="macro", zero_division=0)
+
+    importance_rows = []
+    for feature_index, feature_name in enumerate(feature_cols):
+        score_drops = []
+        for _ in range(n_repeats):
+            permuted_X = X_test_seq.copy()
+            shuffled_sample_order = rng.permutation(len(permuted_X))
+            permuted_X[:, :, feature_index] = X_test_seq[shuffled_sample_order, :, feature_index]
+            permuted_predictions = predict_fn(permuted_X)
+            permuted_f1 = f1_score(y_test_seq, permuted_predictions, average="macro", zero_division=0)
+            score_drops.append(baseline_f1 - permuted_f1)
+        importance_rows.append({"Feature": feature_name, "Importance": float(np.mean(score_drops))})
+
+    return (
+        pd.DataFrame(importance_rows)
+        .sort_values(by="Importance", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def plot_sequence_feature_importance(
+    deployment_type: str,
+    model_bundle: dict,
+    X_test_seq: np.ndarray,
+    y_test_seq: np.ndarray,
+    feature_cols: list[str],
+    output_dir: Path,
+) -> Path:
+    """
+    Bản Feature Importance CHO MODEL DẠNG SEQUENCE/HYBRID (LSTM/GRU/CNN/Hybrid) - dùng Permutation
+    Importance thủ công (`compute_sequence_permutation_importance()`) vì các model này KHÔNG có sẵn
+    `feature_importances_`/`coef_` như model dạng bảng. Xuất CÙNG ĐỊNH DẠNG file (.png + .json) như
+    `plot_feature_importance()` (bản dành cho model dạng bảng) để `app.py` không cần phân biệt nguồn
+    gốc khi hiển thị - chỉ cần đọc `feature_importance.json` là dùng chung được cho MỌI loại model.
+    """
+    predict_fn = build_sequence_predict_fn(deployment_type, model_bundle)
+    importance_df = compute_sequence_permutation_importance(predict_fn, X_test_seq, y_test_seq, feature_cols)
+
+    importance_df_sorted = importance_df.sort_values("Importance", ascending=True).reset_index(drop=True)
+    blue_palette = sns.color_palette("Blues", n_colors=len(importance_df_sorted))
+
+    plt.figure(figsize=(10, 6))
+    sns.barplot(
+        data=importance_df_sorted,
+        x="Importance",
+        y="Feature",
+        hue="Feature",
+        palette=blue_palette,
+        dodge=False,
+        legend=False,
+    )
+    plt.title("Feature Importance - Best Model (Permutation)")
+    plt.tight_layout()
+
+    output_path = output_dir / "feature_importance.png"
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+    json_output_path = output_dir / "feature_importance.json"
+    with json_output_path.open("w", encoding="utf-8") as file:
+        json.dump(importance_df.to_dict(orient="records"), file, indent=2, ensure_ascii=False)
+
+    print(f"Saved feature importance plot to: {output_path}")
+    print(f"Saved feature importance data to: {json_output_path}")
+    return output_path
+
+
 def export_misclassified_samples(
     best_model,
     X_test_scaled: pd.DataFrame,
@@ -2880,14 +3005,28 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
         y_true_for_cm = roc_cache[best_model_name]["y_true"]
         y_pred_for_cm = np.argmax(roc_cache[best_model_name]["y_proba"], axis=1)
         confusion_matrix_path = build_confusion_matrix_from_labels(y_true_for_cm, y_pred_for_cm, run_dir)
-        # Feature importance kiểu "tabular" (feature_importances_/coef_/permutation) không có ý nghĩa
-        # trực tiếp cho input dạng sequence (mỗi feature xuất hiện lặp lại qua nhiều bước thời gian
-        # trong sliding window) - bỏ qua thay vì tính sai, và ghi rõ lý do ra log/artifact.
-        feature_importance_path = None
-        print(
-            f"[Info] Bỏ qua feature_importance.png cho model_type='{deployment_type}' - biểu đồ "
-            "feature importance kiểu tabular không áp dụng trực tiếp cho input dạng sequence."
-        )
+        # Feature importance kiểu "tabular" (feature_importances_/coef_) không tồn tại cho model dạng
+        # sequence - dùng PERMUTATION IMPORTANCE thủ công thay thế (xem `plot_sequence_feature_
+        # importance()`), áp dụng được cho MỌI loại model (chỉ cần hàm predict, không cần thuộc tính
+        # nội bộ nào) - đúng yêu cầu "cần Feature Importance cho 100% mô hình", không riêng model dạng
+        # bảng nữa. Bọc try/except vì đây là bước BỔ SUNG (không phải bắt buộc để pipeline hoàn tất) -
+        # lỗi ở đây (ví dụ hết bộ nhớ khi predict lặp lại nhiều lần) không nên làm hỏng cả lần train.
+        try:
+            _, _, X_test_seq_for_importance, y_test_seq_for_importance, _ = build_sequence_datasets(daily_df)
+            feature_importance_path = plot_sequence_feature_importance(
+                deployment_type,
+                trained_models[best_model_name],
+                X_test_seq_for_importance,
+                y_test_seq_for_importance,
+                FEATURE_COLS,
+                run_dir,
+            )
+        except Exception as exc:
+            feature_importance_path = None
+            print(
+                f"[Info] Bỏ qua feature_importance.png cho model_type='{deployment_type}' - lỗi khi "
+                f"tính permutation importance: {exc}"
+            )
         misclassified_samples_path = None
         print(
             f"[Info] Bỏ qua misclassified_samples.csv cho model_type='{deployment_type}' - không có "

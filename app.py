@@ -2187,16 +2187,15 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
                 "để có bản thanh màu tương tác."
             )
         elif deployment_config.get("model_type") in {"keras_sequence", "hybrid_lstm_xgboost", "hybrid_lstm_gru_xgboost"}:
-            # KHÔNG phải lỗi/chưa train - model tốt nhất hiện tại là dạng chuỗi (LSTM/GRU/CNN/Hybrid),
-            # loại feature importance kiểu tabular (feature_importances_/coef_/permutation) không áp
-            # dụng trực tiếp được cho input dạng sliding-window (mỗi feature lặp lại qua 7 bước thời
-            # gian) - xem giải thích trong `export_misclassified_samples()`/`plot_feature_importance()`
-            # ở analyze_and_train.py. Artifact CŨ (nếu có, từ lần 1 model dạng bảng từng thắng) đã được
-            # tự động dọn sạch khi train lại, để không hiển thị nhầm biểu đồ của model khác.
+            # Model dạng sequence (LSTM/GRU/CNN/Hybrid) TÍNH ĐƯỢC Feature Importance qua Permutation
+            # Importance (xem `plot_sequence_feature_importance()` trong analyze_and_train.py - áp dụng
+            # cho MỌI loại model, không riêng model dạng bảng) - nếu tới đây vẫn không thấy file, nghĩa
+            # là bước tính đó gặp lỗi ở lần train gần nhất (xem log server để biết lý do cụ thể), KHÔNG
+            # phải giới hạn kỹ thuật không thể tính được như trước đây.
             st.info(
                 f"Model tốt nhất hiện tại (`{deployment_config.get('model_name', '')}`) là dạng chuỗi/"
-                "sequence - biểu đồ Feature Importance kiểu bảng không áp dụng trực tiếp được cho loại "
-                "model này (không phải lỗi/thiếu dữ liệu)."
+                "sequence - Feature Importance (permutation) đáng lẽ tính được cho loại model này, "
+                "nhưng chưa thấy file kết quả. Hãy train lại và xem log server nếu vẫn không xuất hiện."
             )
         else:
             st.info("Chưa có `feature_importance.json`/`feature_importance.png` trong `models/latest/`.")
