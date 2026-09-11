@@ -3175,14 +3175,21 @@ def _fetch_daily_weather_and_tide(
     return daily_weather, all_dates, tide_heights
 
 
-def _build_forecast_row(day_label: str, forecast_date: pd.Timestamp, rain_mm: float, predicted_class: int) -> dict:
-    """Đóng gói 1 dòng kết quả dự báo (['Ngày', 'Dự báo Lượng mưa (mm)', 'Dự đoán Ngập']) - DÙNG CHUNG
-    cho `predict_4_days_forecast()` và `predict_days_ahead_forecast_sequence()` để đảm bảo định dạng
-    ngày/nhãn nhất quán giữa 2 hàm (trước đây mỗi hàm tự viết riêng 1 bản)."""
+def _build_forecast_row(
+    day_label: str, forecast_date: pd.Timestamp, rain_mm: float, predicted_class: int, temperature_c: float
+) -> dict:
+    """Đóng gói 1 dòng kết quả dự báo (['Ngày', 'Dự báo Lượng mưa (mm)', 'Dự đoán Ngập', 'Nhiệt độ dự
+    báo (°C)']) - DÙNG CHUNG cho `predict_4_days_forecast()` và `predict_days_ahead_forecast_sequence()`
+    để đảm bảo định dạng ngày/nhãn nhất quán giữa 2 hàm (trước đây mỗi hàm tự viết riêng 1 bản).
+
+    `temperature_c` được thêm sau (ban đầu chỉ có mưa/nhãn ngập) - phục vụ Tab "Biểu đồ dự báo" cần cả
+    nhiệt độ lẫn lượng mưa theo ngày (dữ liệu này đã có sẵn trong `daily_features_df` ở cả 2 hàm gọi,
+    chỉ là trước đây bị bỏ qua khi đóng gói dòng kết quả)."""
     return {
         "Ngày": f"{forecast_date.strftime('%d/%m/%Y')} ({day_label})",
         "Dự báo Lượng mưa (mm)": round(float(rain_mm), 1),
         "Dự đoán Ngập": "An toàn" if int(predicted_class) == 0 else "Nguy cơ ngập",
+        "Nhiệt độ dự báo (°C)": round(float(temperature_c), 1),
     }
 
 
@@ -3247,11 +3254,17 @@ def predict_4_days_forecast(lat: float, lon: float, model, scaler) -> pd.DataFra
     # BƯỚC D - OUTPUT: xem docstring `_build_forecast_row()`.
     result_rows = [
         _build_forecast_row(
-            DAY_LABELS[offset], forecast_dates[offset], daily_features_df["Lượng_mưa_mm"].iloc[offset], predicted_classes[offset]
+            DAY_LABELS[offset],
+            forecast_dates[offset],
+            daily_features_df["Lượng_mưa_mm"].iloc[offset],
+            predicted_classes[offset],
+            daily_features_df["Nhiệt_độ_C"].iloc[offset],
         )
         for offset in range(FORECAST_DAYS_AHEAD)
     ]
-    return pd.DataFrame(result_rows, columns=["Ngày", "Dự báo Lượng mưa (mm)", "Dự đoán Ngập"])
+    return pd.DataFrame(
+        result_rows, columns=["Ngày", "Dự báo Lượng mưa (mm)", "Dự đoán Ngập", "Nhiệt độ dự báo (°C)"]
+    )
 
 
 def predict_days_ahead_forecast_sequence(
@@ -3317,14 +3330,20 @@ def predict_days_ahead_forecast_sequence(
             predicted_class = predict_class_from_sequence_window(deployed_model, window_input)
             result_rows.append(
                 _build_forecast_row(
-                    DAY_LABELS[offset], all_dates[end_idx], daily_features_df["Lượng_mưa_mm"].iloc[end_idx], predicted_class
+                    DAY_LABELS[offset],
+                    all_dates[end_idx],
+                    daily_features_df["Lượng_mưa_mm"].iloc[end_idx],
+                    predicted_class,
+                    daily_features_df["Nhiệt_độ_C"].iloc[end_idx],
                 )
             )
     except Exception as exc:
         print(f"[predict_days_ahead_forecast_sequence] Lỗi khi suy luận bằng model: {exc}")
         return None
 
-    return pd.DataFrame(result_rows, columns=["Ngày", "Dự báo Lượng mưa (mm)", "Dự đoán Ngập"])
+    return pd.DataFrame(
+        result_rows, columns=["Ngày", "Dự báo Lượng mưa (mm)", "Dự đoán Ngập", "Nhiệt độ dự báo (°C)"]
+    )
 
 
 @st.cache_data(persist="disk", show_spinner="Đang gọi Open-Meteo và suy luận dự báo cho 5 địa phương...")
@@ -3747,7 +3766,10 @@ def render_forecast_tab() -> None:
         )
 
     render_styled_table(
-        build_contrast_styler(combined_forecast_df, numeric_formats={"Dự báo Lượng mưa (mm)": "{:.1f}"}),
+        build_contrast_styler(
+            combined_forecast_df,
+            numeric_formats={"Dự báo Lượng mưa (mm)": "{:.1f}", "Nhiệt độ dự báo (°C)": "{:.1f}"},
+        ),
         height=min(120 + 38 * len(combined_forecast_df), 640),
     )
 
@@ -3773,6 +3795,89 @@ def render_forecast_tab() -> None:
     )
 
     render_weather_comparison_section()
+
+
+def render_location_forecast_combo_chart(location_name: str, location_forecast_df: pd.DataFrame) -> None:
+    """
+    Biểu đồ cột (lượng mưa, mm) + đường (nhiệt độ, °C) theo NGÀY cho 1 địa phương - dùng ĐÚNG dữ liệu
+    dự báo thật đã có sẵn từ `_compute_forecast_4day_result()` (không gọi thêm API/model nào mới),
+    theo mẫu biểu đồ người dùng cung cấp (cột mưa + đường nhiệt độ trên cùng 1 biểu đồ, trục y phụ).
+    """
+    if location_forecast_df.empty:
+        st.info(f"Chưa có dữ liệu dự báo cho {location_name}.")
+        return
+
+    # Rút gọn nhãn trục X: "12/09/2026 (Hôm nay)" -> "12/09" - đủ để phân biệt các ngày, không chiếm
+    # quá nhiều chỗ ngang khi hiển thị đủ 14 cột trên 1 biểu đồ.
+    short_day_labels = location_forecast_df["Ngày"].str.extract(r"^(\d{2}/\d{2})")[0]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=short_day_labels,
+            y=location_forecast_df["Dự báo Lượng mưa (mm)"],
+            name="Lượng mưa (mm)",
+            marker=dict(color="#3b82f6"),
+            text=[f"{v:.1f}" for v in location_forecast_df["Dự báo Lượng mưa (mm)"]],
+            textposition="outside",
+            yaxis="y1",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=short_day_labels,
+            y=location_forecast_df["Nhiệt độ dự báo (°C)"],
+            name="Nhiệt độ (°C)",
+            mode="lines+markers+text",
+            line=dict(color="#f97316", width=3),
+            marker=dict(size=7),
+            text=[f"{v:.0f}°" for v in location_forecast_df["Nhiệt độ dự báo (°C)"]],
+            textposition="top center",
+            textfont=dict(color="#f97316"),
+            yaxis="y2",
+        )
+    )
+    fig.update_layout(
+        title=dict(text=f"Nhiệt độ và lượng mưa dự báo - {location_name}"),
+        xaxis=dict(title="Ngày"),
+        yaxis=dict(title="Lượng mưa (mm)"),
+        yaxis2=dict(title="Nhiệt độ (°C)", overlaying="y", side="right"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.08, xanchor="center", x=0.5),
+        hovermode="x unified",
+        bargap=0.3,
+    )
+    apply_dark_plotly_theme(fig, height=380)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+@st.fragment(run_every=LIVE_TAB_AUTO_REFRESH_INTERVAL)
+def render_forecast_chart_tab() -> None:
+    """
+    Tab "Biểu đồ dự báo" - biểu đồ cột+đường (nhiệt độ/lượng mưa) cho cả 5 địa phương giám sát, dùng
+    ĐÚNG kết quả dự báo thật từ model tốt nhất (tái sử dụng `_compute_forecast_4day_result()` - cùng
+    cache với Tab "Dự báo 14 ngày tới", KHÔNG gọi thêm request Open-Meteo/model nào mới).
+
+    Tự làm mới mỗi `LIVE_TAB_AUTO_REFRESH_INTERVAL` giống hệt Tab 1 (xem giải thích cơ chế/giới hạn
+    của `@st.fragment(run_every=...)` trong docstring `render_forecast_tab()`).
+    """
+    st.subheader("Biểu đồ dự báo nhiệt độ & lượng mưa")
+    st.caption(
+        f"Biểu đồ trực quan cho dữ liệu dự báo thật ở Tab 'Dự báo 14 ngày tới' - cùng model, cùng "
+        f"cache, tự làm mới mỗi {LIVE_TAB_AUTO_REFRESH_INTERVAL} khi đang mở."
+    )
+
+    try:
+        cached_result = _compute_forecast_4day_result()
+    except Exception as exc:
+        st.warning(f"Chưa có dữ liệu dự báo để vẽ biểu đồ: {exc}")
+        return
+
+    combined_forecast_df = cached_result["combined_df"]
+    st.caption(f"Cập nhật lần cuối: {cached_result['generated_at'].strftime('%H:%M:%S %d/%m/%Y')}")
+
+    for location_name in REAL_MONITORED_LOCATIONS:
+        location_forecast_df = combined_forecast_df[combined_forecast_df["Địa phương"] == location_name]
+        render_location_forecast_combo_chart(location_name, location_forecast_df)
 
 
 @st.cache_data(show_spinner=False)
@@ -4272,9 +4377,10 @@ def main():
     # Huấn luyện -> Đánh giá) để người xem hiểu được PHƯƠNG PHÁP đứng sau kết quả dự báo đó, và tab
     # cuối là sản phẩm ứng dụng (bản đồ chỉ đường tránh ngập).
     # ------------------------------------------------------------------------------------------
-    tab_forecast, tab_eda, tab_train, tab_eval, tab_map = st.tabs(
+    tab_forecast, tab_forecast_chart, tab_eda, tab_train, tab_eval, tab_map = st.tabs(
         [
             "Dự báo 14 ngày tới",
+            "Biểu đồ dự báo",
             "Khám phá dữ liệu (EDA)",
             "Tiền xử lý & huấn luyện",
             "Đánh giá mô hình",
@@ -4284,6 +4390,9 @@ def main():
 
     with tab_forecast:
         render_forecast_tab()
+
+    with tab_forecast_chart:
+        render_forecast_chart_tab()
 
     with tab_eda:
         render_eda_tab()
