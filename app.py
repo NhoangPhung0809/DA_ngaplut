@@ -3479,10 +3479,26 @@ def fetch_visualcrossing_rain_mm(lat: float, lon: float, api_key: str) -> float 
 
 
 def fetch_tomorrow_io_rain_mm(lat: float, lon: float, api_key: str) -> float | None:
+    """
+    Lượng mưa HÔM NAY (mm) từ Tomorrow.io.
+
+    BẮT BUỘC truyền `timezone` - khác với Open-Meteo (`fetch_open_meteo_rain_mm`, dùng "auto"), Tomorrow.io
+    MẶC ĐỊNH gộp "ngày" theo giờ UTC nếu thiếu tham số này (đã kiểm chứng qua tài liệu API) - tức "ngày 0"
+    của họ sẽ là 07h00 hôm nay đến 07h00 hôm sau theo giờ Việt Nam (UTC+7), LỆCH hẳn khung "hôm nay" thật
+    mà Open-Meteo và các nguồn khác đang so sánh cùng. Lỗi thật đã gặp: lệch khung giờ này vô tình gộp
+    thêm mưa của khung giờ kế bên, khiến số liệu cao gấp 2-4 lần các nguồn khác một cách có hệ thống dù
+    không phải do model dự báo thời tiết khác nhau thật sự.
+    """
     try:
         response = requests.get(
             "https://api.tomorrow.io/v4/weather/forecast",
-            params={"location": f"{lat},{lon}", "timesteps": "1d", "units": "metric", "apikey": api_key},
+            params={
+                "location": f"{lat},{lon}",
+                "timesteps": "1d",
+                "units": "metric",
+                "timezone": "Asia/Ho_Chi_Minh",
+                "apikey": api_key,
+            },
             timeout=10,
         )
         response.raise_for_status()
