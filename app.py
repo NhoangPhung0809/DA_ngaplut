@@ -275,7 +275,7 @@ def render_admin_api_key_panel() -> None:
             key=f"admin_panel_key_input_{selected_provider['secret_key']}",
         )
         session_only = st.checkbox(
-            "Chỉ lưu tạm cho phiên này (KHÔNG ghi ra đĩa - mất khi reload)",
+            "Chỉ lưu tạm cho phiên này (không ghi ra đĩa - mất khi reload)",
             value=False,
             key="admin_panel_session_only_checkbox",
             help=(
@@ -1549,11 +1549,11 @@ def render_eda_tab() -> None:
                     height=min(120 + 38 * len(outlier_summary), 460),
                 )
                 render_chart_discussion(
-                    "Bảng trên áp dụng CẢ 2 phương pháp - IQR (ngoài [Q1-1.5·IQR, Q3+1.5·IQR]) và Z-score "
-                    "(|z| > 3) - tính RIÊNG cho từng lớp `Nguy_cơ_ngập` (0/1/2), theo đúng khuyến nghị: gộp "
-                    "chung các lớp sẽ khiến phần lớn dòng dữ liệu THẬT của lớp `Ngập nặng` (mưa/triều cực đoan) "
-                    "bị nhầm là ngoại lai, vì đó chính là TÍN HIỆU THẬT có giá trị dự báo, không nên loại bỏ. "
-                    "Bảng này chỉ THỐNG KÊ để tham khảo, chưa tự động loại bỏ dòng nào khỏi dữ liệu."
+                    "Bảng trên áp dụng cả 2 phương pháp - IQR (ngoài [Q1-1.5·IQR, Q3+1.5·IQR]) và Z-score "
+                    "(|z| > 3) - tính riêng cho từng lớp `Nguy_cơ_ngập` (0/1/2), theo đúng khuyến nghị: gộp "
+                    "chung các lớp sẽ khiến phần lớn dòng dữ liệu thật của lớp `Ngập nặng` (mưa/triều cực đoan) "
+                    "bị nhầm là ngoại lai, vì đó chính là tín hiệu thật có giá trị dự báo, không nên loại bỏ. "
+                    "Bảng này chỉ thống kê để tham khảo, chưa tự động loại bỏ dòng nào khỏi dữ liệu."
                 )
 
 
@@ -1646,9 +1646,9 @@ def render_ctgan_before_after_chart(before_distribution_df: pd.DataFrame, after_
     )
     st.plotly_chart(fig, use_container_width=True)
     render_chart_discussion(
-        "Biểu đồ trên đặt CẠNH NHAU 2 giai đoạn để thấy ngay hiệu quả xử lý mất cân bằng: cột xám "
+        "Biểu đồ trên đặt cạnh nhau 2 giai đoạn để thấy ngay hiệu quả xử lý mất cân bằng: cột xám "
         "(trước xử lý) lệch hẳn về lớp `Không ngập`, trong khi cột xanh (sau xử lý) gần bằng nhau giữa "
-        "3 lớp - đúng mục tiêu của CTGAN/SMOTE là giúp model KHÔNG học lệch về phía lớp đa số, tránh "
+        "3 lớp - đúng mục tiêu của CTGAN/SMOTE là giúp model không học lệch về phía lớp đa số, tránh "
         "bỏ sót các trường hợp `Ngập nhẹ`/`Ngập nặng` (hiếm gặp hơn nhưng quan trọng hơn để cảnh báo)."
     )
 
@@ -1929,10 +1929,10 @@ def render_preprocessing_training_tab() -> None:
             else:
                 st.dataframe(cleaned_df.head(20), use_container_width=True, hide_index=True)
                 render_chart_discussion(
-                    f"Bảng trên là {len(cleaned_df):,} dòng SAU khi qua `preprocess_features()` trong "
-                    "`analyze_and_train.py`: ép kiểu số, điền giá trị thiếu bằng TRUNG VỊ của từng cột "
+                    f"Bảng trên là {len(cleaned_df):,} dòng sau khi qua `preprocess_features()` trong "
+                    "`analyze_and_train.py`: ép kiểu số, điền giá trị thiếu bằng trung vị của từng cột "
                     "(median - ít bị lệch bởi outlier hơn trung bình), và chỉ giữ lại các cột thật sự "
-                    "cần cho huấn luyện. LƯU Ý: nhãn `Nguy_cơ_ngập` ở bước này LẤY THẲNG từ dữ liệu gốc "
+                    "cần cho huấn luyện. Lưu ý: nhãn `Nguy_cơ_ngập` ở bước này lấy thẳng từ dữ liệu gốc "
                     "(không tạo lại theo rule-based) - việc gán nhãn rule-based chỉ áp dụng cho dữ liệu "
                     "tổng hợp CTGAN ở khối 'Cân bằng dữ liệu' bên dưới, không áp dụng ở bước làm sạch này."
                 )
@@ -1941,7 +1941,7 @@ def render_preprocessing_training_tab() -> None:
         with st.expander("Chia tập Train / Test (Data Splitting)", expanded=True):
             st.markdown(
                 "- **Tỷ lệ chia**: 80% Train / 20% Test.\n"
-                "- **Phương pháp**: chia theo MỐC THỜI GIAN (`shuffle=False`) - tập Test luôn nằm SAU "
+                "- **Phương pháp**: chia theo mốc thời gian (`shuffle=False`) - tập Test luôn nằm sau "
                 "tập Train, không chia ngẫu nhiên.\n"
             )
             # QUAN TRỌNG - GIẢI THÍCH KỸ THUẬT DÙNG CHO PHẦN BẢO VỆ LUẬN VĂN:
@@ -1962,7 +1962,7 @@ def render_preprocessing_training_tab() -> None:
                 language="python",
             )
             render_chart_discussion(
-                "TimeSeriesSplit khác K-Fold thông thường ở chỗ nó KHÔNG xáo trộn dữ liệu - đảm bảo mọi "
+                "TimeSeriesSplit khác K-Fold thông thường ở chỗ nó không xáo trộn dữ liệu - đảm bảo mọi "
                 "lần đánh giá đều mô phỏng đúng bối cảnh dự báo thực tế (chỉ dùng dữ liệu quá khứ để dự "
                 "báo tương lai), tránh đánh giá bị 'ảo' do rò rỉ thông tin tương lai."
             )
@@ -1978,7 +1978,7 @@ def render_preprocessing_training_tab() -> None:
 
     with st.expander("Log tinh chỉnh siêu tham số (Optuna / GridSearchCV)", expanded=True):
         st.caption(
-            "Random Forest tự tinh chỉnh bằng GridSearchCV, XGBoost bằng Optuna (TPE) - CHẠY THẬT "
+            "Random Forest tự tinh chỉnh bằng GridSearchCV, XGBoost bằng Optuna (TPE) - chạy thật "
             "trên dữ liệu train của lần huấn luyện gần nhất (`analyze_and_train.py`), không phải demo."
         )
         render_hyperparameter_tuning_section()
@@ -2290,9 +2290,9 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
         height=420,
     )
     st.caption(
-        "**Train F1 (Macro)**: điểm F1-Macro đo trên chính TẬP TRAIN (dữ liệu model đã học), khác với "
-        "cột **F1 (Macro)** đo trên tập TEST (dữ liệu model CHƯA từng thấy). **Chênh lệch Train-Test "
-        "(F1)** = Train F1 − Test F1 - chênh lệch càng LỚN thì càng nghi ngờ model 'học vẹt' (thuộc "
+        "**Train F1 (Macro)**: điểm F1-Macro đo trên chính tập Train (dữ liệu model đã học), khác với "
+        "cột **F1 (Macro)** đo trên tập Test (dữ liệu model chưa từng thấy). **Chênh lệch Train-Test "
+        "(F1)** = Train F1 − Test F1 - chênh lệch càng lớn thì càng nghi ngờ model 'học vẹt' (thuộc "
         "lòng dữ liệu train thay vì học được quy luật tổng quát, xem khối 'Kiểm tra học vẹt' bên dưới). "
         "2 cột này hiện **'-' (None)** cho các model dạng chuỗi (GRU/LSTM/Hybrid) vì cách tính điểm "
         "Train F1 hiện chỉ áp dụng cho model dạng bảng (sklearn_tabular) - không phải model đó bị lỗi."
@@ -3582,8 +3582,8 @@ def render_weather_comparison_section() -> None:
             return
 
         st.caption(
-            "Bảng so sánh **LƯỢNG MƯA hôm nay (mm)** - biến liên quan trực tiếp đến nguy cơ ngập, KHÔNG "
-            "phải nhiệt độ/độ ẩm. Ô hiện **\"—\"** nghĩa là lần gọi đó THẤT BẠI (key sai/hết hạn/hết "
+            "Bảng so sánh **lượng mưa hôm nay (mm)** - biến liên quan trực tiếp đến nguy cơ ngập, không "
+            "phải nhiệt độ/độ ẩm. Ô hiện **\"—\"** nghĩa là lần gọi đó thất bại (key sai/hết hạn/hết "
             f"quota) chứ không phải trời không mưa - kiểm tra lại key ở khung Admin nếu thấy \"—\" kéo "
             f"dài. Dữ liệu tự làm mới mỗi khi có người mở lại tab và cache đã quá "
             f"{WEATHER_COMPARISON_CACHE_TTL_SECONDS // 3600} tiếng (không có tiến trình chạy nền)."
@@ -3680,7 +3680,7 @@ def render_forecast_tab() -> None:
     """
     st.subheader("Dự báo ngập lụt 14 ngày tới")
     st.caption(
-        "Kết quả dự báo THẬT từ model đã huấn luyện, cho toàn bộ 5 địa phương giám sát (Ngày T = hôm "
+        "Kết quả dự báo thật từ model đã huấn luyện, cho toàn bộ 5 địa phương giám sát (Ngày T = hôm "
         "nay, đến T+13), dựa trên dữ liệu thời tiết dự báo mới nhất từ Open-Meteo Forecast API. Trang "
         f"này tự động kiểm tra và làm mới mỗi {LIVE_TAB_AUTO_REFRESH_INTERVAL} khi đang mở."
     )
@@ -3889,7 +3889,7 @@ def build_smart_routing_map(
             risk_status = risk_rows.iloc[0] if not risk_rows.empty else "Không xác định"
             fill_color = RISK_FILL_COLOR_MAP.get(risk_status, "#9CA3AF")
             tooltip_label = RISK_TOOLTIP_LABEL_MAP.get(
-                risk_status, "KHÔNG XÁC ĐỊNH được (lỗi model/dữ liệu - cần kiểm tra thủ công)"
+                risk_status, "Không xác định được (lỗi model/dữ liệu - cần kiểm tra thủ công)"
             )
             location_forecast_df = (
                 forecast_by_location.get(location_name) if forecast_by_location is not None else None
@@ -3937,7 +3937,7 @@ def build_smart_routing_map(
             else:
                 folium.Marker(
                     location=coordinates,
-                    tooltip=f"{location_name}: KHÔNG XÁC ĐỊNH được (lỗi model/dữ liệu - cần kiểm tra thủ công)",
+                    tooltip=f"{location_name}: không xác định được (lỗi model/dữ liệu - cần kiểm tra thủ công)",
                     popup=popup,
                     icon=folium.Icon(color="gray", icon="question", prefix="fa"),
                 ).add_to(routing_map)
@@ -4018,9 +4018,9 @@ def render_smart_routing_tab() -> None:
     """
     st.subheader("Bản đồ tránh ngập")
     st.caption(
-        "Bước 4/4 của pipeline: giám sát 5 địa phương THỰC TẾ tại Thừa Thiên Huế bằng kết quả dự báo "
-        "của model AI. Click trực tiếp lên bản đồ để đặt điểm xuất phát/điểm đến ở BẤT KỲ vị trí nào - "
-        "khi có địa phương đang ngập, hệ thống TỰ ĐỘNG tính lại tuyến né vùng ngập, không cần bấm nút."
+        "Bước 4/4 của pipeline: giám sát 5 địa phương thực tế tại Thừa Thiên Huế bằng kết quả dự báo "
+        "của model AI. Click trực tiếp lên bản đồ để đặt điểm xuất phát/điểm đến ở bất kỳ vị trí nào - "
+        "khi có địa phương đang ngập, hệ thống tự động tính lại tuyến né vùng ngập, không cần bấm nút."
     )
 
     # ==============================================================================================
@@ -4065,7 +4065,7 @@ def render_smart_routing_tab() -> None:
         # vực này vì không có đủ dữ liệu để dựng vùng ngập, nên cần con người kiểm tra thủ công.
         st.warning(
             f"Không xác định được nguy cơ ngập cho: {', '.join(unknown_location_names)} "
-            "(model/dữ liệu lỗi - xem log server). Các địa phương này KHÔNG được tự động né khi định "
+            "(model/dữ liệu lỗi - xem log server). Các địa phương này không được tự động né khi định "
             "tuyến - vui lòng kiểm tra thủ công trước khi di chuyển qua khu vực này."
         )
 
