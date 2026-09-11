@@ -1667,6 +1667,12 @@ def train_lstm_sequence_model(
         evaluation_scope="daily_sequence",
     )
     metrics["roc_auc_ovr_macro"] = safe_compute_roc_auc_ovr_macro(y_test_seq, probabilities)
+    # Kiểm tra "học vẹt" - xem docstring `attach_train_test_gap()`. Suy luận lại trên CHÍNH tập train
+    # (X_train_seq) để so sánh F1-Macro train vs test, giống hệt nguyên tắc đã áp dụng cho model dạng
+    # bảng - trước đây bị bỏ sót cho model dạng sequence, khiến UI hiện "-" ở 2 cột này.
+    train_probabilities = lstm_model.predict(X_train_seq, verbose=0)
+    train_predictions = np.argmax(train_probabilities, axis=1)
+    attach_train_test_gap(metrics, model_name, "Deep Learning", False, y_train_seq, train_predictions)
     return metrics, lstm_model, seq_scaler, np.asarray(y_test_seq, dtype=int), np.asarray(probabilities, dtype=float)
 
 
@@ -1716,6 +1722,12 @@ def train_sequence_deep_model(
             evaluation_scope="daily_sequence",
         )
         metrics["roc_auc_ovr_macro"] = safe_compute_roc_auc_ovr_macro(y_test_seq, probabilities)
+        # Kiểm tra "học vẹt" - xem docstring `attach_train_test_gap()`. Suy luận lại trên CHÍNH tập
+        # train (X_train_seq) để so sánh F1-Macro train vs test - trước đây bị bỏ sót cho model dạng
+        # sequence (GRU/1D-CNN/CNN-LSTM), khiến UI hiện "-" ở 2 cột này.
+        train_probabilities = model.predict(X_train_seq, verbose=0)
+        train_predictions = np.argmax(train_probabilities, axis=1)
+        attach_train_test_gap(metrics, model_name, "Deep Learning", False, y_train_seq, train_predictions)
         # Trả về `model` TRƯỚC khi `finally` gọi `clear_tensorflow_session()`. Lưu ý kỹ thuật: giá trị
         # trả về đã được Python đánh giá xong (model đã là 1 object cụ thể với trọng số cụ thể) trước
         # khi khối `finally` chạy, nên `K.clear_session()` (chỉ xóa graph/bộ đếm tên layer TOÀN CỤC
@@ -1788,6 +1800,11 @@ def train_lstm_xgboost_hybrid_model(
         except Exception:
             hybrid_proba = None
             metrics["roc_auc_ovr_macro"] = None
+        # Kiểm tra "học vẹt" - xem docstring `attach_train_test_gap()`. Tái sử dụng LUÔN
+        # `train_embeddings` đã tính sẵn ở trên (dùng để `.fit()` hybrid_classifier) - chỉ cần thêm 1
+        # lượt `.predict()` rẻ của XGBoost (không cần chạy lại Keras), không tốn thêm suy luận nặng.
+        train_predictions_for_gap = hybrid_classifier.predict(train_embeddings)
+        attach_train_test_gap(metrics, model_name, "Hybrid", False, y_train_seq, train_predictions_for_gap)
         # Trả về CẢ 2 thành phần đã fit (feature_extractor + hybrid_classifier) và seq_scaler - xem
         # giải thích về `clear_tensorflow_session()` trong `finally` ở `train_sequence_deep_model()`,
         # nguyên tắc tương tự áp dụng ở đây: object đã được return trước khi session bị clear.
@@ -1892,6 +1909,11 @@ def train_lstm_gru_xgboost_hybrid_model(
         except Exception:
             hybrid_proba = None
             metrics["roc_auc_ovr_macro"] = None
+        # Kiểm tra "học vẹt" - xem docstring `attach_train_test_gap()`. Tái sử dụng LUÔN
+        # `train_combined_embeddings` đã tính sẵn ở trên (dùng để `.fit()` hybrid_classifier) - chỉ
+        # cần thêm 1 lượt `.predict()` rẻ của XGBoost, không cần chạy lại 2 mạng LSTM/GRU.
+        train_predictions_for_gap = hybrid_classifier.predict(train_combined_embeddings)
+        attach_train_test_gap(metrics, model_name, "Hybrid", False, y_train_seq, train_predictions_for_gap)
 
         return (
             metrics,
