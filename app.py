@@ -2158,22 +2158,7 @@ def render_overfitting_check_section(metrics_df: pd.DataFrame) -> None:
             )
 
 
-# Ngưỡng xếp loại (1-Tốt / 2-Trung bình / 3-Yếu) - CÓ 2 NGUỒN CĂN CỨ RIÊNG, không phải số tự chế:
-#
-# 1) ROC-AUC: lấy ĐÚNG mốc kinh điển của Hosmer & Lemeshow, "Applied Logistic Regression" (Wiley,
-#    2000), tr. 177 - tài liệu thống kê được trích dẫn RẤT RỘNG RÃI cho việc diễn giải AUC:
-#    0.5 = No discrimination | 0.5-0.7 = Poor | 0.7-0.8 = Acceptable | 0.8-0.9 = Excellent | >0.9 =
-#    Outstanding. Ở đây gộp "Excellent/Outstanding" (>=0.8) -> Tốt, "Acceptable" (0.7-0.8) -> Trung
-#    bình, "Poor" (<0.7) -> Yếu.
-#
-# 2) Accuracy/Precision/Recall/F1-Macro: KHÔNG có 1 mốc kinh điển tương đương Hosmer-Lemeshow cho các
-#    độ đo này (vì "tốt" phụ thuộc mạnh vào mức mất cân bằng của TỪNG bài toán cụ thể) - thay vào đó,
-#    ngưỡng được neo vào NGƯỠNG SÀN TÍNH ĐƯỢC CỤ THỂ cho ĐÚNG dữ liệu của đồ án: baseline "ngây thơ"
-#    (naive) luôn đoán lớp đa số (0 - An toàn, chiếm ~98.6% dữ liệu) đạt Accuracy ~98.6% nhưng
-#    F1-Macro chỉ ~0.33 (vì 2 lớp thiểu số có F1=0 do không bao giờ được dự đoán đúng) - xem
-#    `compute_naive_baseline_f1_macro()`. Ngưỡng "Yếu" (0.4) và "Trung bình" (0.6) được đặt CAO HƠN
-#    HẲN mốc sàn ~0.33 này để đảm bảo model phải THỰC SỰ học được điều gì đó vượt xa việc "chỉ đoán
-#    lớp đa số", không phải số chọn tuỳ tiện.
+# Ngưỡng xếp loại (1-Tốt / 2-Trung bình / 3-Yếu) cho bảng xếp loại độ đo.
 METRIC_RATING_THRESHOLDS: dict[str, tuple[float, float]] = {
     "Accuracy": (0.75, 0.5),
     "Precision (Macro)": (0.6, 0.4),
@@ -2181,26 +2166,6 @@ METRIC_RATING_THRESHOLDS: dict[str, tuple[float, float]] = {
     "F1 (Macro)": (0.6, 0.4),
     "ROC-AUC (OvR Macro)": (0.8, 0.7),
 }
-
-
-def compute_naive_baseline_f1_macro(eda_df: pd.DataFrame, num_classes: int = 3) -> float | None:
-    """
-    Tính F1-Macro của model 'ngây thơ' luôn đoán LỚP ĐA SỐ (0 - An toàn) trên ĐÚNG phân phối lớp thật
-    của dữ liệu lịch sử hiện có - dùng làm MỐC SÀN cụ thể, tính được, để neo ngưỡng xếp loại
-    Accuracy/Precision/Recall/F1 thay vì chọn số tuỳ tiện (xem `METRIC_RATING_THRESHOLDS`).
-
-    Công thức: lớp đa số có Precision = tỉ lệ chiếm/tổng, Recall = 1.0 (đoán MỌI dòng là lớp đó) ->
-    F1 = 2PR/(P+R); các lớp còn lại KHÔNG BAO GIỜ được đoán đúng -> F1 = 0. F1-Macro = trung bình
-    KHÔNG trọng số qua `num_classes` lớp (đúng định nghĩa macro, không phải chỉ các lớp có mặt).
-    """
-    if eda_df.empty or "Nguy_cơ_ngập" not in eda_df.columns:
-        return None
-    class_counts = pd.to_numeric(eda_df["Nguy_cơ_ngập"], errors="coerce").value_counts()
-    if class_counts.empty:
-        return None
-    majority_share = class_counts.max() / class_counts.sum()
-    majority_class_f1 = 2 * majority_share / (1 + majority_share)
-    return majority_class_f1 / num_classes
 METRIC_RATING_STYLE: dict[str, tuple[str, str]] = {
     "1 - Tốt": ("#166534", "#f0fdf4"),
     "2 - Trung bình": ("#92400e", "#fffbeb"),
@@ -2275,22 +2240,6 @@ def render_metric_rating_table(best_model_metric_values: dict, best_model_name: 
         .apply(highlight_rating_column, axis=1)
     )
     render_styled_table(rating_styler, height=min(90 + 38 * len(rating_df), 280))
-
-    naive_baseline_f1 = compute_naive_baseline_f1_macro(load_eda_sample_dataframe())
-    baseline_text = (
-        f"~{naive_baseline_f1:.2f}" if naive_baseline_f1 is not None else "~0.33 (ước tính lý thuyết)"
-    )
-    render_chart_discussion(
-        "Ngưỡng xếp loại **KHÔNG phải số tự chọn tuỳ tiện** - có 2 căn cứ riêng cho 2 nhóm độ đo:\n\n"
-        "- **ROC-AUC**: lấy đúng mốc kinh điển của Hosmer & Lemeshow (*Applied Logistic Regression*, "
-        "Wiley 2000, tr. 177) - tài liệu thống kê được trích dẫn rộng rãi cho việc diễn giải AUC "
-        "(≥0.8 = Excellent/Outstanding, 0.7-0.8 = Acceptable, <0.7 = Poor).\n"
-        f"- **Accuracy/Precision/Recall/F1-Macro**: neo vào mốc sàn TÍNH ĐƯỢC CỤ THỂ cho đúng dữ liệu "
-        f"đồ án - model 'ngây thơ' luôn đoán lớp đa số (An toàn) đạt F1-Macro chỉ **{baseline_text}** "
-        "dù Accuracy trông có vẻ cao (minh chứng trực tiếp vì sao KHÔNG dùng Accuracy làm tiêu chí "
-        "chính - xem Mục 4 tài liệu kỹ thuật). Ngưỡng Yếu/Trung bình được đặt cao hơn hẳn mốc sàn này "
-        "để đảm bảo model phải học được điều gì đó thật sự, không chỉ đoán mù lớp đa số."
-    )
 
 
 def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) -> None:
