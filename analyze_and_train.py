@@ -1929,7 +1929,22 @@ def train_lstm_gru_xgboost_hybrid_model(
 
 
 def build_model_registry() -> dict:
-    """Khai báo các mô hình đại diện theo từng nhóm phương pháp."""
+    """
+    Khai báo các mô hình đại diện theo từng nhóm phương pháp.
+
+    THAM SỐ REGULARIZATION (max_depth/min_samples_leaf/reg_alpha/reg_lambda/n_neighbors/C/...) cho các
+    model Machine Learning bên dưới ĐÃ ĐƯỢC SIẾT LẠI so với mặc định sklearn/XGBoost/LightGBM/CatBoost -
+    KHÔNG phải tinh chỉnh tuỳ tiện, mà để SỬA bug "học vẹt" (overfitting) THẬT đã phát hiện: trước đây
+    vd Random Forest không giới hạn `max_depth` (mặc định None = cây mọc tới khi mỗi lá thuần 1 lớp) nên
+    Train F1-Macro = 1.0000 (học thuộc lòng tuyệt đối) trong khi Test F1-Macro chỉ ~0.47 - chênh lệch
+    Train-Test (`attach_train_test_gap()`) lên tới +0.53. Nguyên nhân kép: (1) thiếu ràng buộc độ phức
+    tạp model, (2) tập train đã được CTGAN cân bằng về tỉ lệ ~1:1:1 trong khi tập test vẫn giữ đúng phân
+    phối THẬT mất cân bằng nặng (không cân bằng test để tránh rò rỉ dữ liệu) - khiến model dễ học các mẫu
+    tổng hợp CTGAN thay vì quy luật tổng quát. Các tham số bên dưới KHÔNG loại bỏ hoàn toàn overfitting
+    (vẫn cần theo dõi cột "Chênh lệch Train-Test" trên UI) nhưng giảm đáng kể mức độ, đây là bước tinh
+    chỉnh nhanh (option A) - bước tiếp theo triệt để hơn là nối `hyperparameter_tuning.py` (GridSearchCV/
+    Optuna) vào thẳng pipeline này thay vì chạy trên dữ liệu mock riêng như hiện tại.
+    """
     registry = {
         "Linear Regression Threshold": {
             "kind": "tabular_regressor",
@@ -1952,25 +1967,41 @@ def build_model_registry() -> dict:
             "kind": "tabular_classifier",
             "category": "Machine Learning",
             "deployment_compatible": True,
-            "model": RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1),
+            # max_depth/min_samples_leaf/min_samples_split: trước đây KHÔNG giới hạn (mặc định) khiến
+            # cây mọc tới khi thuần 1 lớp -> Train F1=1.0000 (học vẹt tuyệt đối). Giới hạn lại để mỗi lá
+            # cần ÍT NHẤT 5 mẫu mới được tách tiếp, buộc cây tổng quát hoá thay vì học thuộc từng dòng.
+            "model": RandomForestClassifier(
+                n_estimators=300,
+                max_depth=12,
+                min_samples_leaf=5,
+                min_samples_split=10,
+                random_state=42,
+                n_jobs=-1,
+            ),
         },
         "KNN": {
             "kind": "tabular_classifier",
             "category": "Machine Learning",
             "deployment_compatible": True,
-            "model": KNeighborsClassifier(),
+            # n_neighbors=15 (thay vì mặc định 5): biên quyết định mượt hơn, bớt bám theo nhiễu cục bộ
+            # của các cụm mẫu tổng hợp CTGAN trong tập train.
+            "model": KNeighborsClassifier(n_neighbors=15),
         },
         "SVC": {
             "kind": "tabular_classifier",
             "category": "Machine Learning",
             "deployment_compatible": True,
-            "model": SVC(probability=True, random_state=42),
+            # C=0.5 (thay vì mặc định 1.0): tăng regularization (chấp nhận sai vài điểm biên trên tập
+            # train để đổi lấy biên quyết định đơn giản hơn, tổng quát hoá tốt hơn).
+            "model": SVC(C=0.5, probability=True, random_state=42),
         },
         "AdaBoost": {
             "kind": "tabular_classifier",
             "category": "Machine Learning",
             "deployment_compatible": True,
-            "model": AdaBoostClassifier(random_state=42),
+            # learning_rate=0.5 (thay vì mặc định 1.0): mỗi weak learner đóng góp ít hơn vào tổng, giảm
+            # tốc độ model bám sát các mẫu khó/nhiễu trong tập train.
+            "model": AdaBoostClassifier(learning_rate=0.5, random_state=42),
         },
         "XGBoost": {
             "kind": "tabular_classifier",
@@ -1984,6 +2015,12 @@ def build_model_registry() -> dict:
                 learning_rate=0.05,
                 subsample=0.9,
                 colsample_bytree=0.9,
+                # min_child_weight/reg_alpha/reg_lambda: THÊM MỚI - trước đây dùng nguyên mặc định
+                # (0/0/1) gần như không regularize. min_child_weight=5 buộc mỗi lá cần đủ "khối lượng"
+                # mẫu mới được tách; reg_alpha (L1) + reg_lambda (L2) phạt trọng số cây quá lớn.
+                min_child_weight=5,
+                reg_alpha=0.1,
+                reg_lambda=2.0,
                 random_state=42,
                 eval_metric="mlogloss",
                 n_jobs=-1,
@@ -1996,12 +2033,18 @@ def build_model_registry() -> dict:
             "kind": "tabular_classifier",
             "category": "Machine Learning",
             "deployment_compatible": True,
+            # num_leaves giảm (31 -> 20) + min_child_samples/reg_alpha/reg_lambda THÊM MỚI: cùng lý do
+            # regularization như XGBoost ở trên - trước đây gần như không có ràng buộc nào ngoài
+            # num_leaves mặc định.
             "model": LGBMClassifier(
                 objective="multiclass",
                 num_class=3,
                 n_estimators=250,
                 learning_rate=0.05,
-                num_leaves=31,
+                num_leaves=20,
+                min_child_samples=30,
+                reg_alpha=0.1,
+                reg_lambda=2.0,
                 random_state=42,
                 n_jobs=-1,
                 verbose=-1,
@@ -2013,11 +2056,14 @@ def build_model_registry() -> dict:
             "kind": "tabular_classifier",
             "category": "Machine Learning",
             "deployment_compatible": True,
+            # l2_leaf_reg THÊM MỚI (mặc định CatBoost là 3) - tăng lên 8 để phạt trọng số lá lớn mạnh
+            # hơn, cùng mục đích chống học vẹt như các model boosting khác ở trên.
             "model": CatBoostClassifier(
                 loss_function="MultiClass",
                 iterations=250,
                 learning_rate=0.05,
                 depth=6,
+                l2_leaf_reg=8,
                 random_seed=42,
                 verbose=0,
             ),
