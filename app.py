@@ -3807,6 +3807,17 @@ def render_location_forecast_combo_chart(location_name: str, location_forecast_d
         st.info(f"Chưa có dữ liệu dự báo cho {location_name}.")
         return
 
+    if "Nhiệt độ dự báo (°C)" not in location_forecast_df.columns:
+        # Cột này mới thêm sau (bản trước chỉ có mưa/nhãn ngập) - nếu thiếu, nghĩa là đang đọc phải
+        # CACHE ĐĨA CŨ của `_compute_forecast_4day_result()` (Streamlit cache_data KHÔNG tự phát hiện
+        # được khi hàm CON bên trong như `_build_forecast_row()` thay đổi, chỉ hàm được decorate trực
+        # tiếp) - báo rõ cho người dùng thay vì crash KeyError, và tự hướng dẫn cách xoá cache đúng.
+        st.warning(
+            f"Chưa có dữ liệu nhiệt độ cho {location_name} - có thể do cache cũ trước khi tính năng "
+            "này được thêm vào. Bấm nút 'Làm mới toàn bộ cache' ở sidebar rồi tải lại trang."
+        )
+        return
+
     # Rút gọn nhãn trục X: "12/09/2026 (Hôm nay)" -> "12/09" - đủ để phân biệt các ngày, không chiếm
     # quá nhiều chỗ ngang khi hiển thị đủ 14 cột trên 1 biểu đồ.
     short_day_labels = location_forecast_df["Ngày"].str.extract(r"^(\d{2}/\d{2})")[0]
