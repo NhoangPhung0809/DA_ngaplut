@@ -900,13 +900,14 @@ def render_full_width_image(image_path: str) -> None:
 # Màu tô nổi 3 hạng đầu trong bảng xếp hạng model (huy chương vàng/bạc/đồng) - DÙNG CHUNG cho mọi
 # bảng xếp hạng trong app (đánh giá mô hình...), tránh mỗi nơi tự chọn 1 bộ màu khác nhau.
 #
-# ĐÃ GIẢM ĐỘ CHÓI (bản trước tô CẢ DÒNG bằng màu vàng/bạc/đồng ĐẶC, người dùng phản ánh "chối mắt"):
-# giờ chỉ tô nền TỐI PHA MÀU nhẹ (giữ đúng tông tối của bảng) + 1 VIỀN TRÁI ĐẬM màu huy chương làm dấu
-# hiệu nhận biết hạng - vẫn đủ nổi bật để phân biệt Top 3, nhưng không chói/lấn át nội dung số liệu.
+# ĐÃ GIẢM ĐỘ CHÓI (bản đầu tô CẢ DÒNG bằng màu vàng/bạc/đồng ĐẶC, người dùng phản ánh "chối mắt") RỒI
+# THÊM GRADIENT ĐỘ SÁNG (theo góp ý sau đó): nền SÁNG NHẤT ở Hạng 1, giảm dần độ sáng xuống Hạng 2,
+# 3 - tạo cảm giác "giảm dần theo thứ hạng" trực quan hơn thay vì 3 màu độ sáng ngang nhau khó phân
+# biệt nhanh bằng mắt. Vẫn giữ viền trái đậm màu huy chương làm dấu hiệu phân biệt hạng rõ ràng.
 RANK_MEDAL_COLORS: dict[int, tuple[str, str, str]] = {
-    0: ("#3a2f10", "#f8fafc", "#eab308"),  # Hạng 1 - nền vàng tối pha, viền trái vàng đậm.
-    1: ("#242a33", "#f8fafc", "#94a3b8"),  # Hạng 2 - nền bạc tối pha, viền trái bạc.
-    2: ("#33230f", "#f8fafc", "#b45309"),  # Hạng 3 - nền đồng tối pha, viền trái đồng đậm.
+    0: ("#5c4a1a", "#f8fafc", "#eab308"),  # Hạng 1 - nền vàng SÁNG NHẤT, viền trái vàng đậm.
+    1: ("#333b46", "#f8fafc", "#94a3b8"),  # Hạng 2 - nền bạc sáng vừa, viền trái bạc.
+    2: ("#2a1d10", "#f8fafc", "#b45309"),  # Hạng 3 - nền đồng TỐI NHẤT, viền trái đồng đậm.
 }
 
 
@@ -923,26 +924,32 @@ def build_contrast_styler(
     ngựa vằn mặc định cho đúng 3 dòng đó, dùng cho các bảng xếp hạng model theo điểm số.
 
     ----------------------------------------------------------------------------------------------
-    ĐÃ SỬA LỖI CRASH THẬT KHI CHẠY (TypeError: unsupported format string passed to NoneType.__format__):
+    ĐÃ SỬA LỖI CRASH THẬT (TypeError: unsupported format string passed to NoneType.__format__) VÀ LỖI
+    HIỂN THỊ THẬT (chữ "None" xuất hiện trên bảng thay vì "-"):
     ----------------------------------------------------------------------------------------------
     Nếu 1 cột trong `numeric_formats` có giá trị `None` (ví dụ model chưa từng chạy qua bước tính chỉ
-    số đó - xem `attach_train_test_gap()`), và TOÀN BỘ cột đó là `None` (không có dòng nào là số),
-    pandas giữ dtype `object` thay vì tự ép về số. Format string kiểu `"{:.4f}"` xử lý được `NaN`
-    (Python format trả về chuỗi "nan") nhưng CRASH khi gặp `None` trực tiếp - 2 khái niệm khác nhau.
-    Chủ động ép các cột có `numeric_formats` về kiểu số thật bằng `pd.to_numeric(..., errors="coerce")`
-    (None/chuỗi không hợp lệ -> NaN) TRƯỚC khi format, rồi hiển thị "-" cho ô thiếu dữ liệu (`na_rep`)
-    thay vì để crash hoặc hiện chữ "nan" xấu trên giao diện.
+    số đó - xem `attach_train_test_gap()`), pandas có thể giữ dtype `object` thay vì tự ép về số.
+    Format string kiểu `"{:.4f}"` CRASH khi gặp `None` trực tiếp.
+
+    Bản đầu chỉ ép kiểu số (`pd.to_numeric`) rồi GIAO `na_rep="-"` cho `Styler.format()` tự xử lý -
+    nhưng `st.dataframe()` KHÔNG áp dụng `Styler.format()` một cách đáng tin cậy ở mọi phiên bản
+    Streamlit (bug thực tế đã gặp: dữ liệu gốc đã là `NaN` sạch, nhưng UI vẫn hiện chữ "None" thay vì
+    "-" vì `st.dataframe` đôi khi bỏ qua format của Styler, tự hiển thị thẳng giá trị thô). Sửa TẬN GỐC
+    bằng cách tự đưa các cột trong `numeric_formats` thành CHUỖI ĐÃ ĐỊNH DẠNG SẴN (bao gồm cả xử lý
+    `NaN` -> "-") NGAY TRONG PYTHON trước khi tạo Styler - không phụ thuộc Streamlit có tôn trọng
+    `Styler.format()` hay không nữa, cùng nguyên tắc đã dùng cho bảng CTGAN/case study trước đó.
     """
     df = df.copy()
     if numeric_formats:
-        for column in numeric_formats:
-            if column in df.columns:
-                df[column] = pd.to_numeric(df[column], errors="coerce")
+        for column, format_spec in numeric_formats.items():
+            if column not in df.columns:
+                continue
+            numeric_series = pd.to_numeric(df[column], errors="coerce")
+            df[column] = numeric_series.map(
+                lambda value, spec=format_spec: "-" if pd.isna(value) else spec.format(value)
+            )
 
     styled_df = df.style
-
-    if numeric_formats:
-        styled_df = styled_df.format(numeric_formats, na_rep="-")
 
     def zebra_rows(row):
         medal = RANK_MEDAL_COLORS.get(row.name) if rank_highlight else None
