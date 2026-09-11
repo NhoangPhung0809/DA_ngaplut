@@ -2681,26 +2681,22 @@ def plot_feature_importance(best_model, X_test_scaled: pd.DataFrame, y_test: pd.
     chạy lại `extract_feature_importance()` - vốn có thể tốn thời gian với `permutation_importance`
     (nhiều lần suy luận lại trên tập test).
 
-    MÀU SẮC: dùng CÙNG 1 THANG MÀU XANH (seaborn "Blues", nhạt -> đậm theo mức độ quan trọng TĂNG DẦN)
-    như bản Plotly tương tác trong app.py - KHÔNG dùng bảng màu phân loại nhiều màu (mỗi thanh 1 màu
-    khác nhau) như trước, vì đây là so sánh ĐỘ LỚN giữa các biến (1 đại lượng liên tục), không phải so
-    sánh danh tính - dùng nhiều màu ngẫu nhiên dễ khiến người xem lầm tưởng có ý nghĩa phân loại.
+    MÀU SẮC: TẤT CẢ các thanh dùng CHUNG 1 MÀU (không tô gradient theo giá trị) - khớp đúng quyết định
+    đã chốt cho bản Plotly tương tác ở app.py (`render_feature_importance_bar_chart`, theo phản hồi
+    thật của GVHD): các thanh đang biểu diễn CÙNG 1 đại lượng (mức độ quan trọng), độ dài thanh đã đủ
+    thể hiện sự khác biệt, tô nhiều màu/gradient theo giá trị chỉ gây rối mắt không cần thiết.
     """
     importance_df = extract_feature_importance(best_model, X_test_scaled, y_test)
-    # Sắp TĂNG DẦN vì matplotlib/seaborn vẽ barplot ngang từ TRÊN XUỐNG theo thứ tự dòng - cần dòng
-    # ĐẦU (importance thấp nhất) tương ứng màu NHẠT nhất trong palette, dòng CUỐI (cao nhất) đậm nhất.
-    importance_df_sorted = importance_df.sort_values("Importance", ascending=True).reset_index(drop=True)
-    blue_palette = sns.color_palette("Blues", n_colors=len(importance_df_sorted))
+    # Sắp GIẢM DẦN vì matplotlib/seaborn vẽ barplot ngang từ TRÊN XUỐNG theo thứ tự dòng - biến quan
+    # trọng nhất cần nằm TRÊN CÙNG.
+    importance_df_sorted = importance_df.sort_values("Importance", ascending=False).reset_index(drop=True)
 
     plt.figure(figsize=(10, 6))
     sns.barplot(
         data=importance_df_sorted,
         x="Importance",
         y="Feature",
-        hue="Feature",
-        palette=blue_palette,
-        dodge=False,
-        legend=False,
+        color="#4C78A8",
     )
     plt.title("Feature Importance - Best Model")
     plt.tight_layout()
@@ -2865,32 +2861,39 @@ def copy_artifact_to_latest(source_path: Path, target_name: str) -> Path:
     return destination
 
 
-def remove_stale_latest_artifact(target_name: str) -> None:
-    """
-    Xoá 1 artifact CŨ khỏi `models/latest/` (và `plots/` nếu có) khi lần train NÀY không tạo ra artifact
-    tương ứng (ví dụ model tốt nhất đổi từ dạng bảng sang dạng sequence, khiến `feature_importance.png`
-    không còn được sinh ra nữa).
-
-    LÝ DO CẦN HÀM NÀY (bug thực tế đã gặp): trước đây `copy_artifact_to_latest()` chỉ ĐƯỢC GỌI khi
-    artifact mới thực sự tồn tại - nếu KHÔNG gọi thì file CŨ từ 1 lần train TRƯỚC ĐÓ (khi model khác
-    đang thắng) vẫn nằm nguyên trong `models/latest/` mãi mãi, khiến UI hiển thị 1 biểu đồ trông như
-    "kết quả hiện tại" nhưng THỰC RA thuộc về 1 model đã không còn được triển khai - gây hiểu lầm
-    nghiêm trọng khi đọc kết quả (ví dụ Confusion Matrix mới nhưng Feature Importance lại là của model
-    cũ từ nhiều lần train trước, hoàn toàn không khớp nhau).
-    """
-    for directory in (LATEST_MODELS_DIR, PLOTS_DIR):
-        stale_path = directory / target_name
-        if stale_path.exists():
-            stale_path.unlink()
-            print(f"Removed stale artifact (model hiện tại không còn sinh ra file này): {stale_path}")
-
-
 def copy_artifact_to_plots(source_path: Path, target_name: str) -> Path:
     """Đồng bộ artifact sang `plots/` để tránh tồn tại file cũ gây hiểu nhầm."""
     destination = PLOTS_DIR / target_name
     shutil.copy2(source_path, destination)
     print(f"Synced plot artifact  : {destination}")
     return destination
+
+
+def remove_stale_latest_artifact(target_name: str) -> None:
+    """
+    Xoá file CŨ (nếu có) ở `models/latest/<target_name>` và `plots/<target_name>` - dùng khi lần train
+    NÀY không sinh ra artifact đó (ví dụ model thắng cuộc là dạng chuỗi/hybrid nên không có
+    `feature_importance.png`/`.json` kiểu tabular - xem nhánh `elif`/`else` trong `run_training_pipeline()`).
+
+    ----------------------------------------------------------------------------------------------
+    TẠI SAO CẦN HÀM NÀY (đã từng gây hiểu lầm THẬT khi demo cho GVHD):
+    ----------------------------------------------------------------------------------------------
+    TRƯỚC ĐÂY, khi 1 lần train có model thắng cuộc KHÔNG hỗ trợ artifact nào đó, code chỉ đơn giản
+    KHÔNG COPY artifact mới, nhưng cũng KHÔNG XOÁ file CŨ từ 1 lần train TRƯỚC (thời điểm đó có model
+    tabular thắng, đã từng sinh ra artifact) - hậu quả: `models/latest/feature_importance.png` vẫn
+    còn nguyên từ lần chạy CŨ, và `app.py` (chỉ kiểm tra "file có tồn tại không") vô tình hiển thị lại
+    ảnh CŨ như thể đó là kết quả của lần train MỚI NHẤT - gây hiểu lầm nghiêm trọng vì ảnh không khớp
+    với model đang thực sự triển khai. Gọi hàm này ngay khi biết chắc lần train này không sinh ra
+    artifact đó, để UI hiển thị ĐÚNG "chưa có/không áp dụng" thay vì âm thầm hiện dữ liệu lỗi thời.
+    """
+    for directory in (LATEST_MODELS_DIR, PLOTS_DIR):
+        stale_path = directory / target_name
+        if stale_path.exists():
+            try:
+                stale_path.unlink()
+                print(f"Removed stale artifact (không áp dụng cho model lần này): {stale_path}")
+            except Exception as exc:
+                print(f"[Warning] Không xoá được artifact cũ {stale_path}: {exc}")
 
 
 def run_training_pipeline(selected_models_list: list[str], balancing_method: str = "auto"):
@@ -3044,6 +3047,9 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
         key: copy_artifact_to_latest(path, Path(path).name) for key, path in artifacts.items()
     }
 
+    # XOÁ artifact CŨ (nếu có) cho những loại mà LẦN TRAIN NÀY không sinh ra - xem docstring
+    # `remove_stale_latest_artifact()` để biết lý do (tránh app.py hiển thị nhầm ảnh/json từ lần train
+    # trước, thuộc về 1 model_type khác, như thể đó là kết quả của model đang triển khai hiện tại).
     if confusion_matrix_path:
         latest_confusion_path = copy_artifact_to_latest(confusion_matrix_path, "confusion_matrix.png")
     else:
@@ -3086,7 +3092,11 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
     # Case study (misclassified_samples.csv) đã bị BỎ khỏi UI - dọn nốt file CŨ (nếu còn sót từ trước
     # khi tính năng này bị gỡ) để không có artifact chết nằm lại trong models/latest/.
     remove_stale_latest_artifact("misclassified_samples.csv")
-    latest_roc_curve_path = copy_artifact_to_latest(roc_curve_path, "roc_curve_data.json") if roc_curve_path else None
+    if roc_curve_path:
+        latest_roc_curve_path = copy_artifact_to_latest(roc_curve_path, "roc_curve_data.json")
+    else:
+        remove_stale_latest_artifact("roc_curve_data.json")
+        latest_roc_curve_path = None
     if latest_confusion_path:
         copy_artifact_to_plots(latest_confusion_path, "confusion_matrix.png")
     if latest_feature_importance_path:
