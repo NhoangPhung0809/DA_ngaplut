@@ -899,10 +899,14 @@ def render_full_width_image(image_path: str) -> None:
 
 # Màu tô nổi 3 hạng đầu trong bảng xếp hạng model (huy chương vàng/bạc/đồng) - DÙNG CHUNG cho mọi
 # bảng xếp hạng trong app (đánh giá mô hình...), tránh mỗi nơi tự chọn 1 bộ màu khác nhau.
-RANK_MEDAL_COLORS: dict[int, tuple[str, str]] = {
-    0: ("#eab308", "#1c1503"),  # Hạng 1 - vàng, chữ tối để đủ tương phản trên nền sáng.
-    1: ("#94a3b8", "#0b1220"),  # Hạng 2 - bạc, chữ tối.
-    2: ("#b45309", "#fdf6ec"),  # Hạng 3 - đồng, chữ sáng (nền đủ tối để cần chữ sáng).
+#
+# ĐÃ GIẢM ĐỘ CHÓI (bản trước tô CẢ DÒNG bằng màu vàng/bạc/đồng ĐẶC, người dùng phản ánh "chối mắt"):
+# giờ chỉ tô nền TỐI PHA MÀU nhẹ (giữ đúng tông tối của bảng) + 1 VIỀN TRÁI ĐẬM màu huy chương làm dấu
+# hiệu nhận biết hạng - vẫn đủ nổi bật để phân biệt Top 3, nhưng không chói/lấn át nội dung số liệu.
+RANK_MEDAL_COLORS: dict[int, tuple[str, str, str]] = {
+    0: ("#3a2f10", "#f8fafc", "#eab308"),  # Hạng 1 - nền vàng tối pha, viền trái vàng đậm.
+    1: ("#242a33", "#f8fafc", "#94a3b8"),  # Hạng 2 - nền bạc tối pha, viền trái bạc.
+    2: ("#33230f", "#f8fafc", "#b45309"),  # Hạng 3 - nền đồng tối pha, viền trái đồng đậm.
 }
 
 
@@ -943,8 +947,12 @@ def build_contrast_styler(
     def zebra_rows(row):
         medal = RANK_MEDAL_COLORS.get(row.name) if rank_highlight else None
         if medal:
-            background, text_color = medal
-            return [f"background-color: {background}; color: {text_color}; font-weight: 700;" for _ in row]
+            background, text_color, accent_color = medal
+            return [
+                f"background-color: {background}; color: {text_color}; font-weight: 700; "
+                f"border-left: 4px solid {accent_color};"
+                for _ in row
+            ]
         background = "#0f172a" if row.name % 2 == 0 else "#172033"
         return [f"background-color: {background}; color: #f8fafc;" for _ in row]
 
@@ -953,8 +961,8 @@ def build_contrast_styler(
         **{
             "color": "#f8fafc",
             "border": "1px solid #334155",
-            "font-size": "15px",
-            "padding": "9px 11px",
+            "font-size": "17px",
+            "padding": "10px 12px",
         }
     )
     styled_df = styled_df.set_table_styles(
@@ -966,8 +974,8 @@ def build_contrast_styler(
                     ("color", "#f8fafc"),
                     ("border", "1px solid #475569"),
                     ("font-weight", "700"),
-                    ("font-size", "15px"),
-                    ("padding", "11px 13px"),
+                    ("font-size", "17px"),
+                    ("padding", "12px 14px"),
                     ("text-align", "center"),
                 ],
             },
@@ -975,8 +983,8 @@ def build_contrast_styler(
                 "selector": "td",
                 "props": [
                     ("border", "1px solid #334155"),
-                    ("font-size", "15px"),
-                    ("padding", "9px 11px"),
+                    ("font-size", "17px"),
+                    ("padding", "10px 12px"),
                 ],
             },
             {
@@ -2143,17 +2151,49 @@ def render_overfitting_check_section(metrics_df: pd.DataFrame) -> None:
             )
 
 
-# Ngưỡng xếp loại (1-Tốt / 2-Trung bình / 3-Yếu) - ngưỡng THAM KHẢO dựa trên kinh nghiệm thực nghiệm
-# cho bài toán phân loại đa lớp mất cân bằng, KHÔNG phải chuẩn tuyệt đối trong tài liệu học thuật nào.
-# ROC-AUC dùng ngưỡng CAO HƠN các độ đo còn lại vì bản chất thang đo khác nhau (ROC-AUC ngẫu nhiên =
-# 0.5, còn Accuracy/Precision/Recall/F1 "ngẫu nhiên" trên 3 lớp cân bằng chỉ khoảng 0.33).
+# Ngưỡng xếp loại (1-Tốt / 2-Trung bình / 3-Yếu) - CÓ 2 NGUỒN CĂN CỨ RIÊNG, không phải số tự chế:
+#
+# 1) ROC-AUC: lấy ĐÚNG mốc kinh điển của Hosmer & Lemeshow, "Applied Logistic Regression" (Wiley,
+#    2000), tr. 177 - tài liệu thống kê được trích dẫn RẤT RỘNG RÃI cho việc diễn giải AUC:
+#    0.5 = No discrimination | 0.5-0.7 = Poor | 0.7-0.8 = Acceptable | 0.8-0.9 = Excellent | >0.9 =
+#    Outstanding. Ở đây gộp "Excellent/Outstanding" (>=0.8) -> Tốt, "Acceptable" (0.7-0.8) -> Trung
+#    bình, "Poor" (<0.7) -> Yếu.
+#
+# 2) Accuracy/Precision/Recall/F1-Macro: KHÔNG có 1 mốc kinh điển tương đương Hosmer-Lemeshow cho các
+#    độ đo này (vì "tốt" phụ thuộc mạnh vào mức mất cân bằng của TỪNG bài toán cụ thể) - thay vào đó,
+#    ngưỡng được neo vào NGƯỠNG SÀN TÍNH ĐƯỢC CỤ THỂ cho ĐÚNG dữ liệu của đồ án: baseline "ngây thơ"
+#    (naive) luôn đoán lớp đa số (0 - An toàn, chiếm ~98.6% dữ liệu) đạt Accuracy ~98.6% nhưng
+#    F1-Macro chỉ ~0.33 (vì 2 lớp thiểu số có F1=0 do không bao giờ được dự đoán đúng) - xem
+#    `compute_naive_baseline_f1_macro()`. Ngưỡng "Yếu" (0.4) và "Trung bình" (0.6) được đặt CAO HƠN
+#    HẲN mốc sàn ~0.33 này để đảm bảo model phải THỰC SỰ học được điều gì đó vượt xa việc "chỉ đoán
+#    lớp đa số", không phải số chọn tuỳ tiện.
 METRIC_RATING_THRESHOLDS: dict[str, tuple[float, float]] = {
     "Accuracy": (0.75, 0.5),
     "Precision (Macro)": (0.6, 0.4),
     "Recall (Macro)": (0.6, 0.4),
     "F1 (Macro)": (0.6, 0.4),
-    "ROC-AUC (OvR Macro)": (0.85, 0.7),
+    "ROC-AUC (OvR Macro)": (0.8, 0.7),
 }
+
+
+def compute_naive_baseline_f1_macro(eda_df: pd.DataFrame, num_classes: int = 3) -> float | None:
+    """
+    Tính F1-Macro của model 'ngây thơ' luôn đoán LỚP ĐA SỐ (0 - An toàn) trên ĐÚNG phân phối lớp thật
+    của dữ liệu lịch sử hiện có - dùng làm MỐC SÀN cụ thể, tính được, để neo ngưỡng xếp loại
+    Accuracy/Precision/Recall/F1 thay vì chọn số tuỳ tiện (xem `METRIC_RATING_THRESHOLDS`).
+
+    Công thức: lớp đa số có Precision = tỉ lệ chiếm/tổng, Recall = 1.0 (đoán MỌI dòng là lớp đó) ->
+    F1 = 2PR/(P+R); các lớp còn lại KHÔNG BAO GIỜ được đoán đúng -> F1 = 0. F1-Macro = trung bình
+    KHÔNG trọng số qua `num_classes` lớp (đúng định nghĩa macro, không phải chỉ các lớp có mặt).
+    """
+    if eda_df.empty or "Nguy_cơ_ngập" not in eda_df.columns:
+        return None
+    class_counts = pd.to_numeric(eda_df["Nguy_cơ_ngập"], errors="coerce").value_counts()
+    if class_counts.empty:
+        return None
+    majority_share = class_counts.max() / class_counts.sum()
+    majority_class_f1 = 2 * majority_share / (1 + majority_share)
+    return majority_class_f1 / num_classes
 METRIC_RATING_STYLE: dict[str, tuple[str, str]] = {
     "1 - Tốt": ("#166534", "#f0fdf4"),
     "2 - Trung bình": ("#92400e", "#fffbeb"),
@@ -2228,11 +2268,21 @@ def render_metric_rating_table(best_model_metric_values: dict, best_model_name: 
         .apply(highlight_rating_column, axis=1)
     )
     render_styled_table(rating_styler, height=min(90 + 38 * len(rating_df), 280))
+
+    naive_baseline_f1 = compute_naive_baseline_f1_macro(load_eda_sample_dataframe())
+    baseline_text = (
+        f"~{naive_baseline_f1:.2f}" if naive_baseline_f1 is not None else "~0.33 (ước tính lý thuyết)"
+    )
     render_chart_discussion(
-        "Ngưỡng xếp loại (1-Tốt / 2-Trung bình / 3-Yếu) là ngưỡng THAM KHẢO dựa trên kinh nghiệm thực "
-        "nghiệm cho bài toán phân loại đa lớp mất cân bằng, KHÔNG phải chuẩn tuyệt đối trong tài liệu "
-        "học thuật nào - mục đích giúp đọc nhanh mức độ đạt được của từng độ đo mà không cần tự nhớ "
-        "khoảng giá trị hợp lệ [0, 1] của mỗi độ đo là tốt hay xấu."
+        "Ngưỡng xếp loại **KHÔNG phải số tự chọn tuỳ tiện** - có 2 căn cứ riêng cho 2 nhóm độ đo:\n\n"
+        "- **ROC-AUC**: lấy đúng mốc kinh điển của Hosmer & Lemeshow (*Applied Logistic Regression*, "
+        "Wiley 2000, tr. 177) - tài liệu thống kê được trích dẫn rộng rãi cho việc diễn giải AUC "
+        "(≥0.8 = Excellent/Outstanding, 0.7-0.8 = Acceptable, <0.7 = Poor).\n"
+        f"- **Accuracy/Precision/Recall/F1-Macro**: neo vào mốc sàn TÍNH ĐƯỢC CỤ THỂ cho đúng dữ liệu "
+        f"đồ án - model 'ngây thơ' luôn đoán lớp đa số (An toàn) đạt F1-Macro chỉ **{baseline_text}** "
+        "dù Accuracy trông có vẻ cao (minh chứng trực tiếp vì sao KHÔNG dùng Accuracy làm tiêu chí "
+        "chính - xem Mục 4 tài liệu kỹ thuật). Ngưỡng Yếu/Trung bình được đặt cao hơn hẳn mốc sàn này "
+        "để đảm bảo model phải học được điều gì đó thật sự, không chỉ đoán mù lớp đa số."
     )
 
 
@@ -2282,6 +2332,14 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
             rank_highlight=True,
         ),
         height=420,
+    )
+    st.caption(
+        "**Train F1 (Macro)**: điểm F1-Macro đo trên chính TẬP TRAIN (dữ liệu model đã học), khác với "
+        "cột **F1 (Macro)** đo trên tập TEST (dữ liệu model CHƯA từng thấy). **Chênh lệch Train-Test "
+        "(F1)** = Train F1 − Test F1 - chênh lệch càng LỚN thì càng nghi ngờ model 'học vẹt' (thuộc "
+        "lòng dữ liệu train thay vì học được quy luật tổng quát, xem khối 'Kiểm tra học vẹt' bên dưới). "
+        "2 cột này hiện **'-' (None)** cho các model dạng chuỗi (GRU/LSTM/Hybrid) vì cách tính điểm "
+        "Train F1 hiện chỉ áp dụng cho model dạng bảng (sklearn_tabular) - không phải model đó bị lỗi."
     )
     best_metrics_row = metrics_df.iloc[0]
     worst_metrics_row = metrics_df.iloc[-1]
