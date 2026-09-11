@@ -3913,6 +3913,118 @@ def load_district_boundaries() -> dict | None:
         return None
 
 
+def _points_in_polygon(px: np.ndarray, py: np.ndarray, poly_x: np.ndarray, poly_y: np.ndarray) -> np.ndarray:
+    """Ray casting (even-odd rule), vector hoá bằng numpy trên toàn bộ điểm lưới cùng lúc."""
+    inside = np.zeros(len(px), dtype=bool)
+    n = len(poly_x)
+    j = n - 1
+    for i in range(n):
+        xi, yi, xj, yj = poly_x[i], poly_y[i], poly_x[j], poly_y[j]
+        crosses = (yi > py) != (yj > py)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            x_intersect = (xj - xi) * (py - yi) / (yj - yi) + xi
+        inside ^= crosses & (px < x_intersect)
+        j = i
+    return inside
+
+
+def _min_distance_to_ring(px: np.ndarray, py: np.ndarray, ring_x: np.ndarray, ring_y: np.ndarray) -> np.ndarray:
+    """Khoảng cách nhỏ nhất từ mỗi điểm tới các cạnh polygon (đơn vị độ kinh/vĩ - chỉ cần dùng để SO
+    SÁNH tương đối trong phạm vi hẹp 1 tỉnh, không cần quy đổi mét)."""
+    min_distance = np.full(len(px), np.inf)
+    n = len(ring_x)
+    for i in range(n):
+        x1, y1, x2, y2 = ring_x[i], ring_y[i], ring_x[(i + 1) % n], ring_y[(i + 1) % n]
+        segment_dx, segment_dy = x2 - x1, y2 - y1
+        segment_length_sq = segment_dx**2 + segment_dy**2
+        if segment_length_sq == 0:
+            t = np.zeros(len(px))
+        else:
+            t = np.clip(((px - x1) * segment_dx + (py - y1) * segment_dy) / segment_length_sq, 0, 1)
+        distance = np.hypot(px - (x1 + t * segment_dx), py - (y1 + t * segment_dy))
+        min_distance = np.minimum(min_distance, distance)
+    return min_distance
+
+
+def _find_polygon_label_anchor(ring: list[list[float]], grid_size: int = 40) -> tuple[float, float]:
+    """
+    Tìm điểm (lon, lat) TỐT NHẤT để đặt nhãn tên bên trong 1 polygon ranh giới hành chính - xấp xỉ
+    thuật toán "pole of inaccessibility" (điểm nằm bên trong polygon và XA BIÊN nhất) bằng lưới thô rồi
+    tinh chỉnh thêm 1 lớp lưới mịn quanh điểm tốt nhất.
+
+    TẠI SAO CẦN HÀM NÀY: trước đây nhãn tên địa phương dùng thẳng toạ độ cố định ở
+    `REAL_MONITORED_LOCATIONS` (1 điểm đại diện trung tâm thị trấn) - toạ độ đó KHÔNG nhất thiết rơi
+    vào phần "thân" chính của polygon ranh giới THẬT (`load_district_boundaries()`), đặc biệt với các
+    địa phương có hình dạng lồi lõm/kéo dài dọc sông (vd Hương Trà) - khiến nhãn hiển thị LỆCH hẳn ra
+    ngoài vùng tô màu xanh/đỏ trên bản đồ, đã thấy lỗi này thật khi xem bản đồ đã publish. Không dùng
+    centroid diện tích đơn thuần vì với polygon lõm/phân nhánh, centroid có thể rơi ra NGOÀI polygon
+    (vào đúng chỗ lõm). Không thêm dependency `shapely`/`geopandas` (có tên trong requirements.txt
+    nhưng chưa cài trong venv hiện tại) - chỉ dùng numpy đã có sẵn.
+    """
+    ring_x = np.array([point[0] for point in ring], dtype=float)
+    ring_y = np.array([point[1] for point in ring], dtype=float)
+
+    def best_inside_point(x_min, x_max, y_min, y_max):
+        grid_x, grid_y = np.meshgrid(np.linspace(x_min, x_max, grid_size), np.linspace(y_min, y_max, grid_size))
+        grid_x, grid_y = grid_x.ravel(), grid_y.ravel()
+        inside = _points_in_polygon(grid_x, grid_y, ring_x, ring_y)
+        if not inside.any():
+            return None
+        candidates_x, candidates_y = grid_x[inside], grid_y[inside]
+        distances = _min_distance_to_ring(candidates_x, candidates_y, ring_x, ring_y)
+        best_index = int(np.argmax(distances))
+        return float(candidates_x[best_index]), float(candidates_y[best_index])
+
+    x_min, x_max, y_min, y_max = ring_x.min(), ring_x.max(), ring_y.min(), ring_y.max()
+    coarse_best = best_inside_point(x_min, x_max, y_min, y_max)
+    if coarse_best is None:
+        # Lưới thô không trúng điểm nào bên trong (polygon quá mỏng) - dự phòng bằng centroid các đỉnh.
+        return float(ring_x.mean()), float(ring_y.mean())
+
+    step_x, step_y = (x_max - x_min) / grid_size, (y_max - y_min) / grid_size
+    refined_best = best_inside_point(
+        coarse_best[0] - step_x, coarse_best[0] + step_x, coarse_best[1] - step_y, coarse_best[1] + step_y
+    )
+    return refined_best if refined_best is not None else coarse_best
+
+
+@st.cache_data(show_spinner=False)
+def compute_district_label_anchors() -> dict[str, tuple[float, float]]:
+    """
+    Trả về `{tên địa phương: (lat, lon)}` - điểm neo để đặt NHÃN TÊN, tính từ chính polygon ranh giới
+    thật (`load_district_boundaries()`) bằng `_find_polygon_label_anchor()`, thay vì dùng thẳng toạ độ
+    cố định ở `REAL_MONITORED_LOCATIONS`. Xem docstring `_find_polygon_label_anchor()` để biết lý do.
+    Rỗng nếu thiếu file ranh giới - khi đó `build_smart_routing_map()` tự rơi về dùng
+    `REAL_MONITORED_LOCATIONS` như cũ.
+    """
+    district_boundaries = load_district_boundaries()
+    if not district_boundaries:
+        return {}
+
+    anchors: dict[str, tuple[float, float]] = {}
+    for feature in district_boundaries["features"]:
+        location_name = feature.get("properties", {}).get("name")
+        geometry = feature.get("geometry", {})
+        coordinates = geometry.get("coordinates") or []
+        if geometry.get("type") == "MultiPolygon":
+            candidate_rings = [polygon[0] for polygon in coordinates if polygon]
+        else:
+            candidate_rings = [coordinates[0]] if coordinates else []
+        if not location_name or not candidate_rings:
+            continue
+        # Nhãn nên đặt trên phần đất CHÍNH (mảnh lớn nhất theo diện tích bounding box), không phải 1
+        # mảnh nhỏ tách rời khi polygon là MultiPolygon.
+        exterior_ring = max(
+            candidate_rings,
+            key=lambda ring: (
+                max(p[0] for p in ring) - min(p[0] for p in ring)
+            ) * (max(p[1] for p in ring) - min(p[1] for p in ring)),
+        )
+        anchor_lon, anchor_lat = _find_polygon_label_anchor(exterior_ring)
+        anchors[location_name] = (anchor_lat, anchor_lon)
+    return anchors
+
+
 # Màu tô theo trạng thái nguy cơ - dùng chung cho cả nhánh tô ranh giới (GeoJson) lẫn nhánh marker
 # dự phòng, đảm bảo 2 cách hiển thị luôn nhất quán màu sắc với nhau.
 RISK_FILL_COLOR_MAP = {"Ngập": "#EF4444", "An toàn": "#22C55E"}
@@ -4094,19 +4206,25 @@ def build_smart_routing_map(
     # tooltip/popup ở trên) - dùng `DivIcon` (nhãn chữ thuần, không phải icon ghim) đặt NGAY TRÊN mỗi
     # vùng/điểm giám sát, màu viền theo đúng 'Nguy cơ' để vừa đọc được tên vừa nhận biết trạng thái
     # ngay từ cái nhìn đầu tiên, không phải tương tác mới biết đây là địa phương nào.
-    for location_name, coordinates in REAL_MONITORED_LOCATIONS.items():
+    # VỊ TRÍ NHÃN: ưu tiên điểm neo tính từ chính polygon ranh giới thật (`compute_district_label_
+    # anchors()`) để nhãn LUÔN nằm bên trong vùng tô màu xanh/đỏ - trước đây dùng thẳng toạ độ cố định
+    # ở REAL_MONITORED_LOCATIONS nên có địa phương (vd Hương Trà, hình dạng kéo dài dọc sông) bị lệch
+    # nhãn ra hẳn ngoài vùng tô màu. Chỉ rơi về REAL_MONITORED_LOCATIONS khi thiếu file ranh giới.
+    district_label_anchors = compute_district_label_anchors()
+    for location_name, fallback_coordinates in REAL_MONITORED_LOCATIONS.items():
+        label_position = district_label_anchors.get(location_name, fallback_coordinates)
         risk_rows = df_predictions.loc[df_predictions["Địa phương"] == location_name, "Nguy cơ"]
         risk_status = risk_rows.iloc[0] if not risk_rows.empty else "Không xác định"
         label_border_color = RISK_FILL_COLOR_MAP.get(risk_status, "#9CA3AF")
         folium.Marker(
-            location=coordinates,
+            location=label_position,
             icon=folium.DivIcon(
                 html=(
                     '<div style="'
                     "font-size: 12px; font-weight: 700; color: #f8fafc; "
                     "background: rgba(15, 23, 42, 0.85); padding: 2px 7px; border-radius: 4px; "
                     f"border: 1.5px solid {label_border_color}; white-space: nowrap; "
-                    'transform: translate(-50%, -160%);">'
+                    'transform: translate(-50%, -50%);">'
                     f"{location_name}</div>"
                 )
             ),
