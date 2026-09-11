@@ -275,7 +275,7 @@ def render_admin_api_key_panel() -> None:
             key=f"admin_panel_key_input_{selected_provider['secret_key']}",
         )
         session_only = st.checkbox(
-            "Chỉ lưu tạm cho phiên này (KHÔNG ghi ra đĩa - mất khi reload)",
+            "Chỉ lưu tạm cho phiên này (không ghi ra đĩa - mất khi reload)",
             value=False,
             key="admin_panel_session_only_checkbox",
             help=(
@@ -704,9 +704,16 @@ def initialize_system():
 
 
 @st.cache_resource(show_spinner=False)
-def load_evaluation_artifacts():
+def _load_evaluation_artifacts_cached(metrics_mtime: float, deployment_mtime: float):
     """
     Nạp `evaluation_metrics.json` + `deployment_config.json` + thông tin runtime cho Tab Đánh giá.
+    `metrics_mtime`/`deployment_mtime` KHÔNG dùng trong thân hàm - chỉ tồn tại để LÀM CACHE KEY, ép
+    Streamlit tự đọc lại 2 file JSON này mỗi khi `analyze_and_train.py` ghi đè bằng lần train mới
+    (mtime đổi), thay vì cache VĨNH VIỄN kết quả của lần train ĐẦU TIÊN cho tới khi ai đó bấm '🔄 Làm
+    mới toàn bộ cache' thủ công - đúng lỗi thực tế đã gặp (Confusion Matrix/leaderboard trông như
+    "đứng yên" dù đã train lại nhiều lần), cùng nguyên nhân và cách sửa như
+    `_load_ctgan_comparison_artifacts_cached()` ở trên.
+
     Lưu ý: hàm này chỉ đọc THÔNG TIN MÔ TẢ (JSON nhẹ), CHƯA nạp model thật vào bộ nhớ (không
     joblib.load()/keras.load_model() ở đây) - việc nạp model thật chỉ nên thực hiện khi thật sự cần
     suy luận, xem `load_deployment_model()` bên dưới, để tránh tốn RAM/thời gian tải chỉ để xem bảng
@@ -718,6 +725,13 @@ def load_evaluation_artifacts():
     with open(runtime_info["deployment_config_path"], "r", encoding="utf-8") as file:
         deployment_config = json.load(file)
     return evaluation_metrics, deployment_config, runtime_info
+
+
+def load_evaluation_artifacts():
+    runtime_info = initialize_system()
+    metrics_mtime = Path(runtime_info["metrics_path"]).stat().st_mtime
+    deployment_mtime = Path(runtime_info["deployment_config_path"]).stat().st_mtime
+    return _load_evaluation_artifacts_cached(metrics_mtime, deployment_mtime)
 
 
 def load_deployment_model(deployment_config: dict, latest_dir: str | Path) -> dict:
@@ -885,10 +899,15 @@ def render_full_width_image(image_path: str) -> None:
 
 # Màu tô nổi 3 hạng đầu trong bảng xếp hạng model (huy chương vàng/bạc/đồng) - DÙNG CHUNG cho mọi
 # bảng xếp hạng trong app (đánh giá mô hình...), tránh mỗi nơi tự chọn 1 bộ màu khác nhau.
-RANK_MEDAL_COLORS: dict[int, tuple[str, str]] = {
-    0: ("#eab308", "#1c1503"),  # Hạng 1 - vàng, chữ tối để đủ tương phản trên nền sáng.
-    1: ("#94a3b8", "#0b1220"),  # Hạng 2 - bạc, chữ tối.
-    2: ("#b45309", "#fdf6ec"),  # Hạng 3 - đồng, chữ sáng (nền đủ tối để cần chữ sáng).
+#
+# ĐÃ GIẢM ĐỘ CHÓI (bản đầu tô CẢ DÒNG bằng màu vàng/bạc/đồng ĐẶC, người dùng phản ánh "chối mắt") RỒI
+# THÊM GRADIENT ĐỘ SÁNG (theo góp ý sau đó): nền SÁNG NHẤT ở Hạng 1, giảm dần độ sáng xuống Hạng 2,
+# 3 - tạo cảm giác "giảm dần theo thứ hạng" trực quan hơn thay vì 3 màu độ sáng ngang nhau khó phân
+# biệt nhanh bằng mắt. Vẫn giữ viền trái đậm màu huy chương làm dấu hiệu phân biệt hạng rõ ràng.
+RANK_MEDAL_COLORS: dict[int, tuple[str, str, str]] = {
+    0: ("#5c4a1a", "#f8fafc", "#eab308"),  # Hạng 1 - nền vàng SÁNG NHẤT, viền trái vàng đậm.
+    1: ("#333b46", "#f8fafc", "#94a3b8"),  # Hạng 2 - nền bạc sáng vừa, viền trái bạc.
+    2: ("#2a1d10", "#f8fafc", "#b45309"),  # Hạng 3 - nền đồng TỐI NHẤT, viền trái đồng đậm.
 }
 
 
@@ -905,32 +924,42 @@ def build_contrast_styler(
     ngựa vằn mặc định cho đúng 3 dòng đó, dùng cho các bảng xếp hạng model theo điểm số.
 
     ----------------------------------------------------------------------------------------------
-    ĐÃ SỬA LỖI CRASH THẬT KHI CHẠY (TypeError: unsupported format string passed to NoneType.__format__):
+    ĐÃ SỬA LỖI CRASH THẬT (TypeError: unsupported format string passed to NoneType.__format__) VÀ LỖI
+    HIỂN THỊ THẬT (chữ "None" xuất hiện trên bảng thay vì "-"):
     ----------------------------------------------------------------------------------------------
     Nếu 1 cột trong `numeric_formats` có giá trị `None` (ví dụ model chưa từng chạy qua bước tính chỉ
-    số đó - xem `attach_train_test_gap()`), và TOÀN BỘ cột đó là `None` (không có dòng nào là số),
-    pandas giữ dtype `object` thay vì tự ép về số. Format string kiểu `"{:.4f}"` xử lý được `NaN`
-    (Python format trả về chuỗi "nan") nhưng CRASH khi gặp `None` trực tiếp - 2 khái niệm khác nhau.
-    Chủ động ép các cột có `numeric_formats` về kiểu số thật bằng `pd.to_numeric(..., errors="coerce")`
-    (None/chuỗi không hợp lệ -> NaN) TRƯỚC khi format, rồi hiển thị "-" cho ô thiếu dữ liệu (`na_rep`)
-    thay vì để crash hoặc hiện chữ "nan" xấu trên giao diện.
+    số đó - xem `attach_train_test_gap()`), pandas có thể giữ dtype `object` thay vì tự ép về số.
+    Format string kiểu `"{:.4f}"` CRASH khi gặp `None` trực tiếp.
+
+    Bản đầu chỉ ép kiểu số (`pd.to_numeric`) rồi GIAO `na_rep="-"` cho `Styler.format()` tự xử lý -
+    nhưng `st.dataframe()` KHÔNG áp dụng `Styler.format()` một cách đáng tin cậy ở mọi phiên bản
+    Streamlit (bug thực tế đã gặp: dữ liệu gốc đã là `NaN` sạch, nhưng UI vẫn hiện chữ "None" thay vì
+    "-" vì `st.dataframe` đôi khi bỏ qua format của Styler, tự hiển thị thẳng giá trị thô). Sửa TẬN GỐC
+    bằng cách tự đưa các cột trong `numeric_formats` thành CHUỖI ĐÃ ĐỊNH DẠNG SẴN (bao gồm cả xử lý
+    `NaN` -> "-") NGAY TRONG PYTHON trước khi tạo Styler - không phụ thuộc Streamlit có tôn trọng
+    `Styler.format()` hay không nữa, cùng nguyên tắc đã dùng cho bảng CTGAN/case study trước đó.
     """
     df = df.copy()
     if numeric_formats:
-        for column in numeric_formats:
-            if column in df.columns:
-                df[column] = pd.to_numeric(df[column], errors="coerce")
+        for column, format_spec in numeric_formats.items():
+            if column not in df.columns:
+                continue
+            numeric_series = pd.to_numeric(df[column], errors="coerce")
+            df[column] = numeric_series.map(
+                lambda value, spec=format_spec: "-" if pd.isna(value) else spec.format(value)
+            )
 
     styled_df = df.style
-
-    if numeric_formats:
-        styled_df = styled_df.format(numeric_formats, na_rep="-")
 
     def zebra_rows(row):
         medal = RANK_MEDAL_COLORS.get(row.name) if rank_highlight else None
         if medal:
-            background, text_color = medal
-            return [f"background-color: {background}; color: {text_color}; font-weight: 700;" for _ in row]
+            background, text_color, accent_color = medal
+            return [
+                f"background-color: {background}; color: {text_color}; font-weight: 700; "
+                f"border-left: 4px solid {accent_color};"
+                for _ in row
+            ]
         background = "#0f172a" if row.name % 2 == 0 else "#172033"
         return [f"background-color: {background}; color: #f8fafc;" for _ in row]
 
@@ -939,8 +968,8 @@ def build_contrast_styler(
         **{
             "color": "#f8fafc",
             "border": "1px solid #334155",
-            "font-size": "15px",
-            "padding": "9px 11px",
+            "font-size": "17px",
+            "padding": "10px 12px",
         }
     )
     styled_df = styled_df.set_table_styles(
@@ -952,8 +981,8 @@ def build_contrast_styler(
                     ("color", "#f8fafc"),
                     ("border", "1px solid #475569"),
                     ("font-weight", "700"),
-                    ("font-size", "15px"),
-                    ("padding", "11px 13px"),
+                    ("font-size", "17px"),
+                    ("padding", "12px 14px"),
                     ("text-align", "center"),
                 ],
             },
@@ -961,8 +990,8 @@ def build_contrast_styler(
                 "selector": "td",
                 "props": [
                     ("border", "1px solid #334155"),
-                    ("font-size", "15px"),
-                    ("padding", "9px 11px"),
+                    ("font-size", "17px"),
+                    ("padding", "10px 12px"),
                 ],
             },
             {
@@ -1029,7 +1058,57 @@ def load_eda_sample_dataframe() -> pd.DataFrame:
         combined_df["Thời_gian"] = pd.to_datetime(combined_df["Thời_gian"], errors="coerce")
         combined_df = combined_df.dropna(subset=["Thời_gian"]).sort_values("Thời_gian").reset_index(drop=True)
 
+    combined_df = regenerate_flood_risk_label(combined_df)
     return combined_df
+
+
+def regenerate_flood_risk_label(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tính lại cột `Nguy_cơ_ngập` 3 lớp (0/1/2) bằng ĐÚNG luật chuyên gia dùng trong
+    `create_multiclass_flood_label()` (analyze_and_train.py), thay vì tin thẳng cột `Nguy_cơ_ngập` sẵn
+    có trong CSV thô.
+
+    LÝ DO CẦN HÀM NÀY (bug thực tế đã gặp): CSV thô trong `data/historical/` lưu nhãn từ MỘT phiên bản
+    fetch/label CŨ hơn (có thể chỉ 0/1 nhị phân, không có lớp 'Ngập nặng'), KHÁC với nhãn 3 lớp rule-
+    based mà pipeline huấn luyện thật sự dùng - `eda_analysis.py` (script độc lập cũ) đã biết vấn đề
+    này và tự quy định lại nhãn trước khi vẽ biểu đồ (xem docstring `save_eda_metadata()` ở đó), nhưng
+    `load_eda_sample_dataframe()` ở `app.py` trước đây LẤY THẲNG cột CSV thô - khiến Tab EDA hiển thị
+    sai lệch nhãn so với thực tế model đang học (ví dụ biểu đồ phân bố lớp bị THIẾU HẲN lớp 'Ngập
+    nặng' dù dữ liệu vẫn có các đợt mưa/triều đủ lớn để được xếp vào lớp đó).
+
+    ĐƠN GIẢN HOÁ so với bản training thật: dùng `fillna(0)` trực tiếp cho 3 biến quyết định nhãn (mưa/
+    độ ẩm đất/triều), KHÔNG áp dụng bước điền median-theo-tập-train phức tạp của
+    `compute_train_only_medians()` - bước đó chỉ cần thiết để tránh rò rỉ dữ liệu khi HUẤN LUYỆN model,
+    không ảnh hưởng tới mục đích XEM PHÂN BỐ dữ liệu ở Tab EDA.
+    """
+    if df.empty:
+        return df
+
+    required_columns = {"Lượng_mưa_mm", "Độ_ẩm_đất", "Chiều_cao_triều_m"}
+    if not required_columns.issubset(df.columns):
+        return df
+
+    labeled_df = df.copy()
+    rain = pd.to_numeric(labeled_df["Lượng_mưa_mm"], errors="coerce").fillna(0)
+    soil = pd.to_numeric(labeled_df["Độ_ẩm_đất"], errors="coerce").fillna(0)
+    tide = pd.to_numeric(labeled_df["Chiều_cao_triều_m"], errors="coerce").fillna(0)
+
+    heavy_flood_mask = (
+        (rain > 50)
+        | ((rain > 30) & (soil > 0.45))
+        | ((rain > 20) & (soil > 0.40) & (tide > 1.50))
+        | (tide > 2.50)
+    )
+    light_flood_mask = (
+        (rain > 25)
+        | ((rain > 15) & (soil > 0.30))
+        | ((rain > 10) & (tide > 1.20))
+    )
+
+    labeled_df["Nguy_cơ_ngập"] = 0
+    labeled_df.loc[light_flood_mask, "Nguy_cơ_ngập"] = 1
+    labeled_df.loc[heavy_flood_mask, "Nguy_cơ_ngập"] = 2
+    return labeled_df
 
 
 def compute_outlier_summary_by_class(
@@ -1181,6 +1260,147 @@ def render_interactive_monthly_trend_chart(eda_df: pd.DataFrame) -> None:
     )
 
 
+def apply_dark_plotly_theme(fig, height: int = 420) -> None:
+    """
+    Style DÙNG CHUNG cho mọi biểu đồ Plotly trong app: nền TRONG SUỐT + chữ/trục sáng màu, khớp theme
+    tối toàn cục (`apply_global_ui_theme()`). Không áp style này thì Plotly mặc định nền TRẮNG, đặt
+    cạnh theme tối trông như 1 ảnh dán lì, không giống thành phần tương tác thật của trang (bug thực tế
+    đã gặp với Confusion Matrix trước khi thêm hàm này).
+    """
+    fig.update_layout(
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        # KHÔNG set `title=dict(font=...)` ở đây khi chưa có `title.text` - 1 số phiên bản Plotly.js
+        # render literal chữ "undefined" ngay dưới tiêu đề markdown khi `layout.title` tồn tại nhưng
+        # thiếu "text" (bug thực tế đã gặp). Màu chữ tiêu đề (khi CÓ set text ở nơi gọi) đã tự kế thừa
+        # từ `font` toàn cục bên dưới, không cần khai báo `title.font` riêng.
+        font=dict(color="#e5eefc"),
+        legend=dict(font=dict(color="#e5eefc")),
+        height=height,
+        margin=dict(t=50, b=40, l=10, r=10),
+    )
+    fig.update_xaxes(color="#cbd5e1", gridcolor="#334155", zerolinecolor="#334155")
+    fig.update_yaxes(color="#cbd5e1", gridcolor="#334155", zerolinecolor="#334155")
+
+
+def render_correlation_heatmap_interactive(eda_df: pd.DataFrame) -> None:
+    """Ma trận tương quan Pearson (Plotly heatmap tương tác) - thay cho `correlation_heatmap.png` tĩnh
+    do `eda_analysis.py` sinh sẵn. Tính TRỰC TIẾP từ `eda_df` (dữ liệu lịch sử thật đang nạp trong
+    app), không phụ thuộc file ảnh xuất sẵn."""
+    numeric_cols = [col for col in [*FEATURE_COLS_FOR_INFERENCE, "Nguy_cơ_ngập"] if col in eda_df.columns]
+    if eda_df.empty or len(numeric_cols) < 2:
+        st.info("Chưa đủ dữ liệu số để tính ma trận tương quan.")
+        return
+
+    corr_df = eda_df[numeric_cols].corr(method="pearson").round(2)
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=corr_df.values,
+            x=corr_df.columns.tolist(),
+            y=corr_df.columns.tolist(),
+            colorscale="RdYlBu_r",
+            zmid=0,
+            zmin=-1,
+            zmax=1,
+            hovertemplate="%{y} vs %{x}: %{z}<extra></extra>",
+            colorbar=dict(title="Hệ số"),
+        )
+    )
+    for row_index, row_label in enumerate(corr_df.index):
+        for col_index, col_label in enumerate(corr_df.columns):
+            value = corr_df.iloc[row_index, col_index]
+            fig.add_annotation(
+                x=col_label,
+                y=row_label,
+                text=f"{value:.2f}",
+                showarrow=False,
+                font=dict(size=12, color="#0f172a" if abs(value) < 0.6 else "#f8fafc"),
+            )
+    apply_dark_plotly_theme(fig, height=480)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_class_distribution_interactive(eda_df: pd.DataFrame) -> None:
+    """Phân bố lớp mục tiêu (Plotly bar chart tương tác) - thay cho `class_distribution.png` tĩnh."""
+    if eda_df.empty or "Nguy_cơ_ngập" not in eda_df.columns:
+        st.info("Chưa có dữ liệu để thống kê phân bố lớp.")
+        return
+
+    class_counts = pd.to_numeric(eda_df["Nguy_cơ_ngập"], errors="coerce").value_counts().sort_index()
+    class_labels = [f"{int(code)} - {CLASS_LABEL_VI.get(str(int(code)), str(code))}" for code in class_counts.index]
+    class_colors = {"0": "#4C78A8", "1": "#F58518", "2": "#E45756"}
+    bar_colors = [class_colors.get(str(int(code)), "#94a3b8") for code in class_counts.index]
+
+    fig = go.Figure(
+        data=go.Bar(
+            x=class_labels,
+            y=class_counts.values,
+            marker=dict(color=bar_colors, line=dict(color="#1F1F1F", width=1)),
+            text=[f"{int(v):,}" for v in class_counts.values],
+            textposition="outside",
+            hovertemplate="%{x}: %{y:,}<extra></extra>",
+        )
+    )
+    apply_dark_plotly_theme(fig)
+    fig.update_layout(xaxis=dict(title="Lớp nguy cơ ngập"), yaxis=dict(title="Số lượng quan sát"))
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_flood_share_by_location_interactive(eda_df: pd.DataFrame) -> None:
+    """Tỷ lệ ngập theo địa phương (Plotly pie chart tương tác) - thay cho
+    `flood_share_by_location.png` tĩnh."""
+    if eda_df.empty or "Nguy_cơ_ngập" not in eda_df.columns or "Địa phương" not in eda_df.columns:
+        st.info("Chưa có dữ liệu để tính tỷ lệ ngập theo địa phương.")
+        return
+
+    flood_df = eda_df[pd.to_numeric(eda_df["Nguy_cơ_ngập"], errors="coerce") > 0]
+    if flood_df.empty:
+        st.info("Không có bản ghi ngập nào trong dữ liệu hiện có.")
+        return
+
+    location_counts = flood_df["Địa phương"].value_counts()
+    fig = go.Figure(
+        data=go.Pie(
+            labels=location_counts.index.tolist(),
+            values=location_counts.values.tolist(),
+            hovertemplate="%{label}: %{value:,} (%{percent})<extra></extra>",
+            textinfo="label+percent",
+            marker=dict(line=dict(color="#0b1220", width=2)),
+        )
+    )
+    apply_dark_plotly_theme(fig)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_feature_distribution_by_class_interactive(eda_df: pd.DataFrame, feature_col: str, title: str) -> None:
+    """Phân bố 1 biến số (mưa/triều cường...) theo TỪNG lớp nguy cơ ngập (Plotly histogram chồng lớp,
+    dạng density) - thay cho `rain_distribution_by_class.png`/`tide_distribution_by_class.png` tĩnh."""
+    if eda_df.empty or feature_col not in eda_df.columns or "Nguy_cơ_ngập" not in eda_df.columns:
+        st.info(f"Chưa có dữ liệu để vẽ phân bố `{feature_col}`.")
+        return
+
+    plot_df = eda_df.copy()
+    plot_df["Nguy_cơ_ngập"] = pd.to_numeric(plot_df["Nguy_cơ_ngập"], errors="coerce")
+    plot_df = plot_df.dropna(subset=["Nguy_cơ_ngập", feature_col])
+    plot_df["Mức độ ngập"] = plot_df["Nguy_cơ_ngập"].astype(int).astype(str).map(CLASS_LABEL_VI)
+
+    class_colors = {"Không ngập": "#4C78A8", "Ngập nhẹ": "#F58518", "Ngập nặng": "#E45756"}
+    fig = px.histogram(
+        plot_df,
+        x=feature_col,
+        color="Mức độ ngập",
+        histnorm="probability density",
+        barmode="overlay",
+        opacity=0.55,
+        nbins=40,
+        color_discrete_map=class_colors,
+        category_orders={"Mức độ ngập": ["Không ngập", "Ngập nhẹ", "Ngập nặng"]},
+    )
+    apply_dark_plotly_theme(fig)
+    fig.update_layout(title=dict(text=title), yaxis=dict(title="Mật độ phân bố"))
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def render_eda_tab() -> None:
     """
     Nội dung Tab 1 - Khám phá dữ liệu (EDA), bước ĐẦU TIÊN của vòng đời Data Science.
@@ -1253,30 +1473,36 @@ def render_eda_tab() -> None:
 
     st.markdown("---")
 
-    # ---- Hàng 2: biểu đồ phân phối / tương quan (ảnh tĩnh do eda_analysis.py sinh sẵn) ----
+    # ---- Hàng 2: biểu đồ phân phối / tương quan - TƯƠNG TÁC (Plotly, tính trực tiếp từ eda_df thật,
+    # thay cho 5 ảnh PNG tĩnh do eda_analysis.py sinh sẵn trước đây) ----
     with st.expander("Phân phối dữ liệu & ma trận tương quan (Distribution / Heatmap)", expanded=True):
-        # TODO: đây là placeholder hiển thị ẢNH TĨNH từ `eda_analysis.py` để tránh vẽ lại biểu đồ nặng
-        # mỗi lần Streamlit rerun. Nếu muốn biểu đồ TƯƠNG TÁC, có thể thay bằng `px.imshow()` (heatmap)
-        # hoặc `px.histogram()` (phân phối) ngay trong hàm này.
-        eda_chart_files = {
-            "Ma trận tương quan (Heatmap)": PLOTS_DIR / "correlation_heatmap.png",
-            "Phân bố lớp mục tiêu": PLOTS_DIR / "class_distribution.png",
-            "Tỷ lệ ngập theo địa phương": PLOTS_DIR / "flood_share_by_location.png",
-            "Phân bố lượng mưa theo lớp": PLOTS_DIR / "rain_distribution_by_class.png",
-            "Phân bố triều cường theo lớp": PLOTS_DIR / "tide_distribution_by_class.png",
-        }
         chart_columns = st.columns(2)
-        for index, (chart_title, chart_path) in enumerate(eda_chart_files.items()):
-            with chart_columns[index % 2]:
-                st.markdown(f"**{chart_title}**")
-                if chart_path.exists():
-                    render_full_width_image(str(chart_path))
-                else:
-                    st.info(f"Chưa có `{chart_path.name}`. Hãy chạy `python eda_analysis.py` để sinh ảnh.")
+        with chart_columns[0]:
+            st.markdown("**Ma trận tương quan (Heatmap)**")
+            render_correlation_heatmap_interactive(eda_df)
+        with chart_columns[1]:
+            st.markdown("**Phân bố lớp mục tiêu**")
+            render_class_distribution_interactive(eda_df)
+
+        chart_columns_2 = st.columns(2)
+        with chart_columns_2[0]:
+            st.markdown("**Tỷ lệ ngập theo địa phương**")
+            render_flood_share_by_location_interactive(eda_df)
+        with chart_columns_2[1]:
+            st.markdown("**Phân bố lượng mưa theo lớp**")
+            render_feature_distribution_by_class_interactive(
+                eda_df, "Lượng_mưa_mm", "Phân bố lượng mưa theo lớp nguy cơ ngập"
+            )
+
+        st.markdown("**Phân bố triều cường theo lớp**")
+        render_feature_distribution_by_class_interactive(
+            eda_df, "Chiều_cao_triều_m", "Phân bố triều cường theo lớp nguy cơ ngập"
+        )
+
         render_chart_discussion(
-            "Các biểu đồ trên tổng hợp quan hệ tương quan giữa các biến, phân phối lớp mục tiêu, xu hướng "
-            "mưa/ngập theo mùa vụ, và tỷ lệ ngập theo địa phương - cung cấp căn cứ định lượng cho khuyến "
-            "nghị quản trị ở Tab 3 (ví dụ: tháng nào, khu vực nào cần ưu tiên nguồn lực phòng chống ngập)."
+            "Các biểu đồ trên tổng hợp quan hệ tương quan giữa các biến, phân phối lớp mục tiêu, và tỷ "
+            "lệ ngập theo địa phương - cung cấp căn cứ định lượng cho khuyến nghị quản trị ở Tab 3 (ví "
+            "dụ: khu vực nào cần ưu tiên nguồn lực phòng chống ngập)."
         )
 
     # ---- Hàng 3: xử lý giá trị thiếu / ngoại lai ----
@@ -1323,11 +1549,11 @@ def render_eda_tab() -> None:
                     height=min(120 + 38 * len(outlier_summary), 460),
                 )
                 render_chart_discussion(
-                    "Bảng trên áp dụng CẢ 2 phương pháp - IQR (ngoài [Q1-1.5·IQR, Q3+1.5·IQR]) và Z-score "
-                    "(|z| > 3) - tính RIÊNG cho từng lớp `Nguy_cơ_ngập` (0/1/2), theo đúng khuyến nghị: gộp "
-                    "chung các lớp sẽ khiến phần lớn dòng dữ liệu THẬT của lớp `Ngập nặng` (mưa/triều cực đoan) "
-                    "bị nhầm là ngoại lai, vì đó chính là TÍN HIỆU THẬT có giá trị dự báo, không nên loại bỏ. "
-                    "Bảng này chỉ THỐNG KÊ để tham khảo, chưa tự động loại bỏ dòng nào khỏi dữ liệu."
+                    "Bảng trên áp dụng cả 2 phương pháp - IQR (ngoài [Q1-1.5·IQR, Q3+1.5·IQR]) và Z-score "
+                    "(|z| > 3) - tính riêng cho từng lớp `Nguy_cơ_ngập` (0/1/2), theo đúng khuyến nghị: gộp "
+                    "chung các lớp sẽ khiến phần lớn dòng dữ liệu thật của lớp `Ngập nặng` (mưa/triều cực đoan) "
+                    "bị nhầm là ngoại lai, vì đó chính là tín hiệu thật có giá trị dự báo, không nên loại bỏ. "
+                    "Bảng này chỉ thống kê để tham khảo, chưa tự động loại bỏ dòng nào khỏi dữ liệu."
                 )
 
 
@@ -1420,9 +1646,9 @@ def render_ctgan_before_after_chart(before_distribution_df: pd.DataFrame, after_
     )
     st.plotly_chart(fig, use_container_width=True)
     render_chart_discussion(
-        "Biểu đồ trên đặt CẠNH NHAU 2 giai đoạn để thấy ngay hiệu quả xử lý mất cân bằng: cột xám "
+        "Biểu đồ trên đặt cạnh nhau 2 giai đoạn để thấy ngay hiệu quả xử lý mất cân bằng: cột xám "
         "(trước xử lý) lệch hẳn về lớp `Không ngập`, trong khi cột xanh (sau xử lý) gần bằng nhau giữa "
-        "3 lớp - đúng mục tiêu của CTGAN/SMOTE là giúp model KHÔNG học lệch về phía lớp đa số, tránh "
+        "3 lớp - đúng mục tiêu của CTGAN/SMOTE là giúp model không học lệch về phía lớp đa số, tránh "
         "bỏ sót các trường hợp `Ngập nhẹ`/`Ngập nặng` (hiếm gặp hơn nhưng quan trọng hơn để cảnh báo)."
     )
 
@@ -1459,14 +1685,19 @@ def render_ctgan_dataset_panel(title: str, subtitle: str, summary: dict | None, 
     total_rows = (summary or {}).get("total_rows")
     sample_rows = (summary or {}).get("sample_rows")
     metric_col_1, metric_col_2 = st.columns(2)
-    metric_col_1.metric("Tổng số dòng", total_rows if total_rows is not None else "N/A")
-    metric_col_2.metric("Số dòng hiển thị", sample_rows if sample_rows is not None else "N/A")
+    metric_col_1.metric("Tổng số dòng", f"{total_rows:,}" if total_rows is not None else "N/A")
+    metric_col_2.metric("Số dòng hiển thị", f"{sample_rows:,}" if sample_rows is not None else "N/A")
 
     distribution_df = build_ctgan_distribution_dataframe(summary)
     if distribution_df.empty:
         st.info("Chưa có thống kê phân phối lớp.")
     else:
-        st.dataframe(distribution_df, use_container_width=True, hide_index=True, height=160)
+        # Giữ `distribution_df` GỐC ở dạng số (truyền cho build_ctgan_distribution_discussion() bên
+        # dưới vẫn cần idxmax/idxmin/chia số học) - chỉ tạo BẢN HIỂN THỊ riêng có dấu phân cách hàng
+        # nghìn cho cột "Số lượng", tránh hiện "12850" khó đọc như trước.
+        display_distribution_df = distribution_df.copy()
+        display_distribution_df["Số lượng"] = display_distribution_df["Số lượng"].map(lambda v: f"{v:,}")
+        st.dataframe(display_distribution_df, use_container_width=True, hide_index=True, height=160)
         render_chart_discussion(build_ctgan_distribution_discussion(distribution_df, title))
 
     if dataset_df.empty:
@@ -1698,10 +1929,10 @@ def render_preprocessing_training_tab() -> None:
             else:
                 st.dataframe(cleaned_df.head(20), use_container_width=True, hide_index=True)
                 render_chart_discussion(
-                    f"Bảng trên là {len(cleaned_df):,} dòng SAU khi qua `preprocess_features()` trong "
-                    "`analyze_and_train.py`: ép kiểu số, điền giá trị thiếu bằng TRUNG VỊ của từng cột "
+                    f"Bảng trên là {len(cleaned_df):,} dòng sau khi qua `preprocess_features()` trong "
+                    "`analyze_and_train.py`: ép kiểu số, điền giá trị thiếu bằng trung vị của từng cột "
                     "(median - ít bị lệch bởi outlier hơn trung bình), và chỉ giữ lại các cột thật sự "
-                    "cần cho huấn luyện. LƯU Ý: nhãn `Nguy_cơ_ngập` ở bước này LẤY THẲNG từ dữ liệu gốc "
+                    "cần cho huấn luyện. Lưu ý: nhãn `Nguy_cơ_ngập` ở bước này lấy thẳng từ dữ liệu gốc "
                     "(không tạo lại theo rule-based) - việc gán nhãn rule-based chỉ áp dụng cho dữ liệu "
                     "tổng hợp CTGAN ở khối 'Cân bằng dữ liệu' bên dưới, không áp dụng ở bước làm sạch này."
                 )
@@ -1710,7 +1941,7 @@ def render_preprocessing_training_tab() -> None:
         with st.expander("Chia tập Train / Test (Data Splitting)", expanded=True):
             st.markdown(
                 "- **Tỷ lệ chia**: 80% Train / 20% Test.\n"
-                "- **Phương pháp**: chia theo MỐC THỜI GIAN (`shuffle=False`) - tập Test luôn nằm SAU "
+                "- **Phương pháp**: chia theo mốc thời gian (`shuffle=False`) - tập Test luôn nằm sau "
                 "tập Train, không chia ngẫu nhiên.\n"
             )
             # QUAN TRỌNG - GIẢI THÍCH KỸ THUẬT DÙNG CHO PHẦN BẢO VỆ LUẬN VĂN:
@@ -1731,7 +1962,7 @@ def render_preprocessing_training_tab() -> None:
                 language="python",
             )
             render_chart_discussion(
-                "TimeSeriesSplit khác K-Fold thông thường ở chỗ nó KHÔNG xáo trộn dữ liệu - đảm bảo mọi "
+                "TimeSeriesSplit khác K-Fold thông thường ở chỗ nó không xáo trộn dữ liệu - đảm bảo mọi "
                 "lần đánh giá đều mô phỏng đúng bối cảnh dự báo thực tế (chỉ dùng dữ liệu quá khứ để dự "
                 "báo tương lai), tránh đánh giá bị 'ảo' do rò rỉ thông tin tương lai."
             )
@@ -1747,7 +1978,7 @@ def render_preprocessing_training_tab() -> None:
 
     with st.expander("Log tinh chỉnh siêu tham số (Optuna / GridSearchCV)", expanded=True):
         st.caption(
-            "Random Forest tự tinh chỉnh bằng GridSearchCV, XGBoost bằng Optuna (TPE) - CHẠY THẬT "
+            "Random Forest tự tinh chỉnh bằng GridSearchCV, XGBoost bằng Optuna (TPE) - chạy thật "
             "trên dữ liệu train của lần huấn luyện gần nhất (`analyze_and_train.py`), không phải demo."
         )
         render_hyperparameter_tuning_section()
@@ -1757,6 +1988,65 @@ def render_preprocessing_training_tab() -> None:
 # ==================================================================================================
 # TAB 3 - ĐÁNH GIÁ MÔ HÌNH
 # ==================================================================================================
+def render_confusion_matrix_heatmap(confusion_matrix_json_path: Path) -> None:
+    """
+    Confusion Matrix dạng heatmap TƯƠNG TÁC (Plotly) - đọc dữ liệu số thô từ `confusion_matrix.json`
+    (do `build_confusion_matrix_from_labels()` trong `analyze_and_train.py` xuất kèm ảnh PNG), thay
+    cho ảnh tĩnh trước đây. Hover để xem chính xác số lượng từng ô, zoom được khi cần soi kỹ.
+    """
+    with confusion_matrix_json_path.open("r", encoding="utf-8") as file:
+        payload = json.load(file)
+
+    labels = payload.get("labels") or []
+    matrix = payload.get("matrix") or []
+    if not labels or not matrix:
+        st.info("File `confusion_matrix.json` rỗng hoặc thiếu dữ liệu.")
+        return
+
+    matrix_array = np.asarray(matrix, dtype=float)
+    max_value = matrix_array.max() if matrix_array.size else 0
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=matrix,
+            x=labels,
+            y=labels,
+            colorscale="Blues",
+            hovertemplate="Nhãn thật: %{y}<br>Nhãn dự đoán: %{x}<br>Số lượng: %{z}<extra></extra>",
+            colorbar=dict(title="Số lượng"),
+            showscale=True,
+        )
+    )
+    # Ghi số liệu trực tiếp lên từng ô bằng annotation (thay vì texttemplate chung 1 màu) - để tự
+    # chọn màu chữ TRẮNG trên ô nền đậm (số lớn) và màu chữ TỐI trên ô nền nhạt (số nhỏ), đảm bảo đọc
+    # được rõ ràng ở MỌI ô thay vì 1 màu cố định dễ bị chìm vào nền ở 1 đầu thang màu.
+    for row_index, row_label in enumerate(labels):
+        for col_index, col_label in enumerate(labels):
+            cell_value = matrix_array[row_index, col_index]
+            is_dark_cell = max_value > 0 and cell_value / max_value > 0.5
+            fig.add_annotation(
+                x=col_label,
+                y=row_label,
+                text=str(int(cell_value)),
+                showarrow=False,
+                font=dict(size=16, color="#f8fafc" if is_dark_cell else "#0f172a"),
+            )
+    fig.update_layout(
+        title=dict(text="Confusion Matrix - Best Model", font=dict(color="#f8fafc")),
+        # Nền TRONG SUỐT (khớp `plot_bgcolor`/`paper_bgcolor` đã dùng ở Feature Importance) - mặc định
+        # Plotly nền TRẮNG, đặt cạnh theme tối của app trông như 1 ảnh dán lì, không giống 1 thành phần
+        # tương tác thật của trang. Không set màu này thì colorbar/trục cũng bị lẫn vào nền trắng đó.
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(title="Nhãn dự đoán", side="bottom", color="#cbd5e1"),
+        yaxis=dict(title="Nhãn thật", autorange="reversed", color="#cbd5e1"),
+        height=420,
+        margin=dict(t=50, b=40, l=10, r=10),
+    )
+    fig.update_traces(colorbar=dict(title=dict(text="Số lượng", font=dict(color="#f8fafc")), tickfont=dict(color="#cbd5e1")))
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> None:
     """
     Biểu đồ THANH NGANG (horizontal bar, Plotly) cho Feature Importance - theo góp ý của GVHD (đổi từ
@@ -1765,10 +2055,10 @@ def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> N
     ảnh PNG) - KHÔNG tính lại importance ở đây, tránh chạy lại `permutation_importance` (tốn thời
     gian) mỗi lần Streamlit rerun.
 
-    Sắp xếp GIẢM DẦN theo Importance, mỗi thanh 1 màu theo thang màu liên tục (sequential, xanh nhạt
-    -> xanh đậm) phản ánh ĐÚNG độ lớn - không dùng màu phân loại (categorical) vì đây là so sánh ĐỘ
-    LỚN giữa các biến, không phải phân biệt danh tính. Ghi số liệu trực tiếp ở đầu mỗi thanh (không
-    cần hover mới thấy) để phù hợp khi trình bày/in báo cáo.
+    Sắp xếp GIẢM DẦN theo Importance, TẤT CẢ các thanh dùng CHUNG 1 MÀU (không tô gradient theo giá
+    trị) - vì các thanh đang biểu diễn CÙNG 1 đại lượng (mức độ quan trọng), độ dài thanh đã đủ thể
+    hiện sự khác biệt, tô nhiều màu khác nhau chỉ gây rối mắt không cần thiết. Ghi số liệu trực tiếp ở
+    đầu mỗi thanh (không cần hover mới thấy) để phù hợp khi trình bày/in báo cáo.
     """
     with feature_importance_json_path.open("r", encoding="utf-8") as file:
         importance_records = json.load(file)
@@ -1785,24 +2075,26 @@ def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> N
             x=importance_df["Importance"].tolist(),
             y=importance_df["Feature"].tolist(),
             orientation="h",
-            marker=dict(
-                color=importance_df["Importance"].tolist(),
-                colorscale="Blues",
-                line=dict(color="#1e3a5f", width=1),
-            ),
+            # 1 MÀU DUY NHẤT cho mọi thanh (không dùng thang màu gradient theo giá trị) - vì các thanh
+            # đang so sánh CÙNG 1 đại lượng (mức độ quan trọng), không phải nhiều đại lượng khác nhau
+            # cần phân biệt bằng màu; ĐỘ DÀI thanh đã đủ thể hiện độ lớn, tô màu khác nhau theo giá trị
+            # chỉ gây rối mắt không cần thiết.
+            marker=dict(color="#4C78A8", line=dict(color="#1e3a5f", width=1)),
             text=[f"{value:.3f}" for value in importance_df["Importance"]],
             textposition="outside",
-            textfont=dict(size=14, color="#f8fafc"),
+            textfont=dict(size=16, color="#f8fafc"),
             hovertemplate="%{y}: %{x:.4f}<extra></extra>",
         )
     )
     fig.update_layout(
-        margin=dict(t=20, b=20, l=10, r=40),
-        height=260,
+        # Cao hơn bản cũ (260 -> 420) để khớp chiều cao Confusion Matrix bên cạnh và đỡ bị bó hẹp khi
+        # có đủ 5 dòng (mỗi dòng cần khoảng không đủ rộng để không đè chữ lên nhau).
+        margin=dict(t=20, b=40, l=10, r=60),
+        height=420,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(title="Mức độ quan trọng", color="#cbd5e1", gridcolor="#334155", zeroline=False),
-        yaxis=dict(color="#f8fafc", tickfont=dict(size=13)),
+        xaxis=dict(title="Mức độ quan trọng", color="#cbd5e1", gridcolor="#334155", zeroline=False, title_font=dict(size=15), tickfont=dict(size=13)),
+        yaxis=dict(color="#f8fafc", tickfont=dict(size=15)),
         showlegend=False,
     )
     st.plotly_chart(fig, use_container_width=True)
@@ -1866,6 +2158,90 @@ def render_overfitting_check_section(metrics_df: pd.DataFrame) -> None:
             )
 
 
+# Ngưỡng xếp loại (1-Tốt / 2-Trung bình / 3-Yếu) cho bảng xếp loại độ đo.
+METRIC_RATING_THRESHOLDS: dict[str, tuple[float, float]] = {
+    "Accuracy": (0.75, 0.5),
+    "Precision (Macro)": (0.6, 0.4),
+    "Recall (Macro)": (0.6, 0.4),
+    "F1 (Macro)": (0.6, 0.4),
+    "ROC-AUC (OvR Macro)": (0.8, 0.7),
+}
+METRIC_RATING_STYLE: dict[str, tuple[str, str]] = {
+    "1 - Tốt": ("#166534", "#f0fdf4"),
+    "2 - Trung bình": ("#92400e", "#fffbeb"),
+    "3 - Yếu": ("#991b1b", "#fef2f2"),
+}
+
+
+def rate_metric_value(metric_name: str, value: float | None) -> str | None:
+    """Xếp loại 1 giá trị độ đo theo ngưỡng `METRIC_RATING_THRESHOLDS` - trả `None` nếu thiếu giá trị
+    hoặc độ đo đó chưa có ngưỡng khai báo (không đoán bừa)."""
+    if value is None or pd.isna(value):
+        return None
+    thresholds = METRIC_RATING_THRESHOLDS.get(metric_name)
+    if thresholds is None:
+        return None
+    good_cutoff, medium_cutoff = thresholds
+    if value >= good_cutoff:
+        return "1 - Tốt"
+    if value >= medium_cutoff:
+        return "2 - Trung bình"
+    return "3 - Yếu"
+
+
+def render_metric_rating_table(best_model_metric_values: dict, best_model_name: str) -> None:
+    """
+    Bảng 3 cột (Độ đo / Giá trị / Xếp loại) cho model TỐT NHẤT - khác với bảng leaderboard so sánh
+    NHIỀU model theo 1 độ đo (F1-Macro), bảng này soi NHIỀU độ đo của CÙNG 1 model, giúp đọc nhanh model
+    đang mạnh/yếu ở khía cạnh nào (ví dụ Recall tốt nhưng Precision yếu) mà không cần tự nhớ khoảng giá
+    trị hợp lệ [0, 1] của từng độ đo là tốt hay xấu.
+    """
+    if not best_model_metric_values:
+        return
+
+    candidate_metrics = {
+        "Accuracy": best_model_metric_values.get("accuracy"),
+        "Precision (Macro)": best_model_metric_values.get("precision_macro"),
+        "Recall (Macro)": best_model_metric_values.get("recall_macro"),
+        "F1 (Macro)": best_model_metric_values.get("f1_macro"),
+        "ROC-AUC (OvR Macro)": best_model_metric_values.get("roc_auc_ovr_macro"),
+    }
+    rating_rows = []
+    for metric_name, value in candidate_metrics.items():
+        if value is None or pd.isna(value):
+            continue
+        rating_rows.append(
+            {
+                "Độ đo": metric_name,
+                "Giá trị": float(value),
+                "Xếp loại": rate_metric_value(metric_name, value) or "Chưa có ngưỡng",
+            }
+        )
+    if not rating_rows:
+        return
+
+    rating_df = pd.DataFrame(rating_rows)
+
+    def highlight_rating_column(row: pd.Series) -> list[str]:
+        style = METRIC_RATING_STYLE.get(row["Xếp loại"])
+        if not style:
+            return [""] * len(row)
+        background, text_color = style
+        return [
+            f"background-color: {background}; color: {text_color}; font-weight: 700;"
+            if column == "Xếp loại"
+            else ""
+            for column in row.index
+        ]
+
+    st.markdown(f"### Bảng xếp loại độ đo - model tốt nhất ({best_model_name})")
+    rating_styler = (
+        build_contrast_styler(rating_df, numeric_formats={"Giá trị": "{:.4f}"})
+        .apply(highlight_rating_column, axis=1)
+    )
+    render_styled_table(rating_styler, height=min(90 + 38 * len(rating_df), 280))
+
+
 def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) -> None:
     """Hiển thị bảng số liệu, biểu đồ Plotly và ảnh artifact đánh giá mô hình (Model Comparison Metrics)."""
     if not evaluation_metrics:
@@ -1873,12 +2249,15 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
         return
 
     metrics_rows = []
+    metric_values_by_display_name: dict[str, dict] = {}
     for model_name, metric_values in evaluation_metrics.items():
         if not isinstance(metric_values, dict):
             continue
+        display_name = metric_values.get("model_name", model_name)
+        metric_values_by_display_name[display_name] = metric_values
         metrics_rows.append(
             {
-                "Model": metric_values.get("model_name", model_name),
+                "Model": display_name,
                 "Accuracy": metric_values.get("accuracy"),
                 "Precision (Macro)": metric_values.get("precision_macro"),
                 "Recall (Macro)": metric_values.get("recall_macro"),
@@ -1910,6 +2289,14 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
         ),
         height=420,
     )
+    st.caption(
+        "**Train F1 (Macro)**: điểm F1-Macro đo trên chính tập Train (dữ liệu model đã học), khác với "
+        "cột **F1 (Macro)** đo trên tập Test (dữ liệu model chưa từng thấy). **Chênh lệch Train-Test "
+        "(F1)** = Train F1 − Test F1 - chênh lệch càng lớn thì càng nghi ngờ model 'học vẹt' (thuộc "
+        "lòng dữ liệu train thay vì học được quy luật tổng quát, xem khối 'Kiểm tra học vẹt' bên dưới). "
+        "2 cột này hiện **'-' (None)** cho các model dạng chuỗi (GRU/LSTM/Hybrid) vì cách tính điểm "
+        "Train F1 hiện chỉ áp dụng cho model dạng bảng (sklearn_tabular) - không phải model đó bị lỗi."
+    )
     best_metrics_row = metrics_df.iloc[0]
     worst_metrics_row = metrics_df.iloc[-1]
     render_chart_discussion(
@@ -1918,6 +2305,10 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
         f"({worst_metrics_row['F1 (Macro)']:.4f}) trong số các mô hình đã huấn luyện. Chênh lệch F1 giữa hai mô hình "
         f"khoảng {(best_metrics_row['F1 (Macro)'] - worst_metrics_row['F1 (Macro)']):.4f} điểm, cho thấy việc lựa chọn "
         "đúng thuật toán có tác động đáng kể đến chất lượng cảnh báo ngập trước khi đưa vào vận hành thực tế."
+    )
+
+    render_metric_rating_table(
+        metric_values_by_display_name.get(best_metrics_row["Model"], {}), best_metrics_row["Model"]
     )
 
     render_overfitting_check_section(metrics_df)
@@ -1985,6 +2376,9 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
     st.markdown("### Artifact trực quan")
     image_col_1, image_col_2 = st.columns(2)
     confusion_matrix_path = Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR))) / "confusion_matrix.png"
+    confusion_matrix_json_path = (
+        Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR))) / "confusion_matrix.json"
+    )
     feature_importance_path = Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR))) / "feature_importance.png"
     feature_importance_json_path = (
         Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR))) / "feature_importance.json"
@@ -1992,10 +2386,18 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
 
     with image_col_1:
         st.markdown("**Confusion Matrix**")
-        if confusion_matrix_path.exists():
+        if confusion_matrix_json_path.exists():
+            render_confusion_matrix_heatmap(confusion_matrix_json_path)
+        elif confusion_matrix_path.exists():
+            # Fallback cho artifact từ lần train CŨ (trước khi có `confusion_matrix.json`) - chỉ có
+            # ảnh heatmap tĩnh, chưa có dữ liệu số thô để tự vẽ lại bản tương tác.
             render_full_width_image(str(confusion_matrix_path))
+            st.caption(
+                "Chưa có dữ liệu số cho heatmap tương tác (artifact từ lần train cũ) - hãy train lại "
+                "để có bản tương tác."
+            )
         else:
-            st.info("Chưa có ảnh `confusion_matrix.png` trong `models/latest/`.")
+            st.info("Chưa có `confusion_matrix.json`/`confusion_matrix.png` trong `models/latest/`.")
 
     with image_col_2:
         st.markdown("**Feature Importance**")
@@ -2008,6 +2410,17 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
             st.caption(
                 "Chưa có dữ liệu số cho biểu đồ tương tác (artifact từ lần train cũ) - hãy train lại "
                 "để có bản thanh màu tương tác."
+            )
+        elif deployment_config.get("model_type") in {"keras_sequence", "hybrid_lstm_xgboost", "hybrid_lstm_gru_xgboost"}:
+            # Model dạng sequence (LSTM/GRU/CNN/Hybrid) TÍNH ĐƯỢC Feature Importance qua Permutation
+            # Importance (xem `plot_sequence_feature_importance()` trong analyze_and_train.py - áp dụng
+            # cho MỌI loại model, không riêng model dạng bảng) - nếu tới đây vẫn không thấy file, nghĩa
+            # là bước tính đó gặp lỗi ở lần train gần nhất (xem log server để biết lý do cụ thể), KHÔNG
+            # phải giới hạn kỹ thuật không thể tính được như trước đây.
+            st.info(
+                f"Model tốt nhất hiện tại (`{deployment_config.get('model_name', '')}`) là dạng chuỗi/"
+                "sequence - Feature Importance (permutation) đáng lẽ tính được cho loại model này, "
+                "nhưng chưa thấy file kết quả. Hãy train lại và xem log server nếu vẫn không xuất hiện."
             )
         else:
             st.info(
@@ -2160,103 +2573,79 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
         )
 
 
-def build_managerial_insights_markdown(
-    evaluation_metrics: dict, deployment_config: dict, eda_df: pd.DataFrame
-) -> str:
+def render_managerial_insights_section(
+    evaluation_metrics: dict, deployment_config: dict, runtime_info: dict
+) -> None:
     """
-    Tự tính "Nhận định & kết luận quản trị" từ DỮ LIỆU THẬT - THAY THẾ template hướng dẫn điền tay
-    trước đây (chỉ gợi ý cấu trúc, không có số liệu thật). Kết hợp 2 nguồn:
-      1. Kết quả mô hình THẬT (`evaluation_metrics.json`/`deployment_config.json`) - model đang triển
-         khai, F1-macro, và Recall/Precision RIÊNG cho lớp `Heavy Flood` (an toàn quan trọng hơn số
-         tổng quát, vì bỏ sót 1 đợt ngập nặng nguy hiểm hơn nhiều so với 1 lần cảnh báo dư).
-      2. Dữ liệu lịch sử THẬT (`eda_df`, cùng nguồn Tab 1) - tự tính địa phương/tháng có tỷ lệ ngập
-         cao nhất, KHÔNG chỉ trỏ người đọc sang xem ảnh tĩnh `flood_share_by_location.png` như trước.
+    Nhận định & kết luận quản trị - TÍNH THẬT từ dữ liệu và kết quả huấn luyện hiện có (bản trước đây
+    chỉ là TEMPLATE placeholder tĩnh, không thật sự tính toán gì - đã phát hiện và sửa lại). Mỗi con
+    số dưới đây lấy TRỰC TIẾP từ artifact/dữ liệu thật, không hardcode:
+    - Tên model + F1-Macro: từ `deployment_config.json` (đúng model vừa được chọn triển khai).
+    - Địa phương/tháng ưu tiên: tính trực tiếp từ dữ liệu lịch sử thật (`load_eda_sample_dataframe()`).
+    - AUC lớp `Ngập nặng`: từ `roc_curve_data.json` (đúng kết quả đánh giá của model đang triển khai).
     """
     best_model_name = deployment_config.get("model_name", "N/A")
-    best_metrics = evaluation_metrics.get(best_model_name, {})
-    f1_macro = best_metrics.get("f1_macro")
-    classification_report = best_metrics.get("classification_report", {})
-    heavy_flood_stats = classification_report.get("Heavy Flood", {})
-    heavy_recall = heavy_flood_stats.get("recall")
-    heavy_precision = heavy_flood_stats.get("precision")
-    light_flood_stats = classification_report.get("Light Flood", {})
-    light_f1 = light_flood_stats.get("f1-score")
+    best_f1_macro = deployment_config.get("f1_macro", 0)
 
-    performance_lines = [f"1. **Hiệu năng mô hình đề xuất triển khai** — model đang triển khai: **{best_model_name}**"]
-    if f1_macro is not None:
-        performance_lines.append(f" (F1-Macro = {f1_macro:.4f}).")
-    if heavy_recall is not None and heavy_precision is not None:
-        performance_lines.append(
-            f" Với lớp `Ngập nặng` (nguy hiểm nhất) — Recall = {heavy_recall:.2%}, Precision = "
-            f"{heavy_precision:.2%}. "
-            + (
-                "Recall đang CAO HƠN Precision, đúng ưu tiên mong muốn cho bài toán cảnh báo thiên tai "
-                "(chấp nhận vài lần cảnh báo dư còn hơn bỏ sót 1 đợt ngập nặng thật)."
-                if heavy_recall >= heavy_precision
-                else "LƯU Ý: Precision đang cao hơn Recall ở lớp `Ngập nặng` - nghĩa là model đang có xu "
-                "hướng BỎ SÓT một số đợt ngập nặng thật hơn là cảnh báo dư, cần cân nhắc điều chỉnh "
-                "ngưỡng quyết định (decision threshold) hoặc trọng số lớp (class_weight) để ưu tiên Recall hơn."
+    eda_df = load_eda_sample_dataframe()
+    priority_location_text = "Chưa có đủ dữ liệu lịch sử để xác định."
+    priority_month_text = "Chưa có đủ dữ liệu lịch sử để xác định."
+    if not eda_df.empty and "Nguy_cơ_ngập" in eda_df.columns:
+        flood_df = eda_df[pd.to_numeric(eda_df["Nguy_cơ_ngập"], errors="coerce") > 0]
+        if not flood_df.empty and "Địa phương" in flood_df.columns:
+            location_counts = flood_df["Địa phương"].value_counts()
+            top_location = location_counts.index[0]
+            top_location_share = location_counts.iloc[0] / len(flood_df) * 100
+            priority_location_text = (
+                f"**{top_location}** ghi nhận {int(location_counts.iloc[0]):,} lượt ngập "
+                f"({top_location_share:.1f}% tổng số lượt ngập trong dữ liệu lịch sử) - địa phương có "
+                "tần suất ngập cao nhất, cần ưu tiên đầu tư trạm quan trắc/lực lượng ứng trực."
             )
-        )
-
-    # ---- Khu vực ưu tiên: tự tính tỷ lệ ngập (%) theo TỪNG địa phương từ chính eda_df (dữ liệu thật) ----
-    location_lines = ["2. **Khu vực ưu tiên**"]
-    if not eda_df.empty and "Địa phương" in eda_df.columns and "Nguy_cơ_ngập" in eda_df.columns:
-        flood_rate_by_location = (
-            eda_df.groupby("Địa phương")["Nguy_cơ_ngập"].apply(lambda s: (s > 0).mean() * 100).sort_values(ascending=False)
-        )
-        if not flood_rate_by_location.empty:
-            top_location = flood_rate_by_location.index[0]
-            top_location_rate = flood_rate_by_location.iloc[0]
-            location_lines.append(
-                f" — **{top_location}** có tỷ lệ giờ quan trắc ghi nhận ngập cao nhất "
-                f"({top_location_rate:.2f}% tổng số giờ trong 10 năm dữ liệu), nên được ưu tiên đầu tư "
-                "trạm quan trắc bổ sung / lực lượng ứng trực so với 4 địa phương còn lại."
+        if not flood_df.empty and "Thời_gian" in flood_df.columns:
+            month_counts = flood_df["Thời_gian"].dt.month.value_counts()
+            top_month = int(month_counts.index[0])
+            top_month_share = month_counts.iloc[0] / len(flood_df) * 100
+            priority_month_text = (
+                f"**Tháng {top_month}** ghi nhận {int(month_counts.iloc[0]):,} lượt ngập "
+                f"({top_month_share:.1f}% tổng số lượt ngập) - tháng cao điểm cần tăng cường giám sát "
+                "và chuẩn bị phương án sơ tán."
             )
-    else:
-        location_lines.append(" — chưa có đủ dữ liệu lịch sử để tính (xem Tab 1).")
 
-    # ---- Thời điểm ưu tiên: tự tính tỷ lệ ngập (%) theo TỪNG tháng từ chính eda_df ----
-    month_lines = ["3. **Thời điểm ưu tiên**"]
-    if not eda_df.empty and "Thời_gian" in eda_df.columns and "Nguy_cơ_ngập" in eda_df.columns:
-        month_series = pd.to_datetime(eda_df["Thời_gian"], errors="coerce").dt.month
-        flood_rate_by_month = (
-            eda_df.assign(_thang=month_series)
-            .groupby("_thang")["Nguy_cơ_ngập"]
-            .apply(lambda s: (s > 0).mean() * 100)
-            .sort_values(ascending=False)
-        )
-        if not flood_rate_by_month.empty:
-            top_month = int(flood_rate_by_month.index[0])
-            top_month_rate = flood_rate_by_month.iloc[0]
-            month_lines.append(
-                f" — **Tháng {top_month}** có tỷ lệ giờ quan trắc ghi nhận ngập cao nhất trong năm "
-                f"({top_month_rate:.2f}%), cần tăng cường giám sát và chuẩn bị phương án sơ tán trước "
-                "thời điểm này hàng năm."
-            )
-    else:
-        month_lines.append(" — chưa có đủ dữ liệu lịch sử để tính (xem Tab 1).")
+    residual_risk_text = "Chưa có dữ liệu ROC-AUC để đánh giá rủi ro còn tồn đọng."
+    roc_path = Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR))) / "roc_curve_data.json"
+    if roc_path.exists():
+        try:
+            with roc_path.open("r", encoding="utf-8") as file:
+                roc_payload = json.load(file)
+            heavy_flood_auc = (roc_payload.get("curves", {}).get("2") or {}).get("auc")
+            if heavy_flood_auc is not None:
+                if heavy_flood_auc < 0.85:
+                    residual_risk_text = (
+                        f"AUC lớp `Ngập nặng` hiện ở mức **{heavy_flood_auc:.4f}** - tương đối thấp so "
+                        "với 2 lớp còn lại, phản ánh đúng thực tế lớp này CHỈ CHIẾM PHẦN NHỎ trong dữ "
+                        "liệu (mất cân bằng nặng). Hướng khắc phục: thu thập thêm dữ liệu ngập nặng "
+                        "thật, cải thiện chất lượng CTGAN, hoặc tinh chỉnh ngưỡng cảnh báo qua "
+                        "`hyperparameter_tuning.py`."
+                    )
+                else:
+                    residual_risk_text = (
+                        f"AUC lớp `Ngập nặng` hiện ở mức **{heavy_flood_auc:.4f}** - khá tốt, model phân "
+                        "biệt được lớp nguy hiểm nhất này tương đối rõ ràng. Vẫn nên tiếp tục theo dõi "
+                        "khi có thêm dữ liệu thực tế mới để xác nhận độ ổn định."
+                    )
+        except Exception:
+            pass
 
-    # ---- Rủi ro còn tồn đọng: nêu điểm yếu THẬT của model đang triển khai (không phải giả định chung chung) ----
-    risk_lines = ["4. **Rủi ro còn tồn đọng**"]
-    if light_f1 is not None and heavy_recall is not None:
-        risk_lines.append(
-            f" — F1-Score lớp `Ngập nhẹ` hiện chỉ đạt {light_f1:.2%} (thường là lớp YẾU NHẤT trong 3 "
-            "lớp do ranh giới giữa 'An toàn' và 'Ngập nhẹ' mờ hơn ranh giới 'Ngập nhẹ'/'Ngập nặng'), và "
-            f"Recall lớp `Ngập nặng` đạt {heavy_recall:.2%} — "
-            + (
-                "còn dưới 90%, nên xem lại việc thu thập thêm dữ liệu quan trắc thật cho các đợt ngập "
-                "nặng (hiện đang là lớp hiếm nhất) hoặc tinh chỉnh sâu hơn bằng `hyperparameter_tuning.py`."
-                if heavy_recall < 0.90
-                else "đã ở mức khá cao, nhưng vẫn nên tiếp tục thu thập thêm dữ liệu thật (không chỉ dựa "
-                "vào mẫu tổng hợp CTGAN/SMOTE) để cải thiện độ tin cậy dài hạn."
-            )
-        )
-    else:
-        risk_lines.append(" — chưa có đủ chỉ số phân lớp chi tiết để đánh giá (hãy huấn luyện lại).")
-
-    return "\n\n".join(
-        ["".join(performance_lines), "".join(location_lines), "".join(month_lines), "".join(risk_lines)]
+    st.markdown(
+        f"""
+1. **Hiệu năng mô hình đề xuất triển khai**: model tốt nhất hiện tại là **`{best_model_name}`** với
+   F1-Macro = **{best_f1_macro:.4f}**. Đây là model có điểm cân bằng tốt nhất giữa Precision và Recall
+   trên cả 3 lớp, đặc biệt quan trọng với lớp `Ngập nặng` vì bỏ sót 1 trường hợp ngập thật gây hậu quả
+   nghiêm trọng hơn nhiều so với 1 lần cảnh báo dư thừa.
+2. **Khu vực ưu tiên**: {priority_location_text}
+3. **Thời điểm ưu tiên**: {priority_month_text}
+4. **Rủi ro còn tồn đọng**: {residual_risk_text}
+        """
     )
 
 
@@ -2282,12 +2671,7 @@ def render_evaluation_tab() -> None:
         render_model_metrics(evaluation_metrics, deployment_config, runtime_info)
 
     with st.expander("Nhận định & kết luận quản trị (Managerial Insights)", expanded=True):
-        # Tự tính TOÀN BỘ nhận định từ dữ liệu THẬT (kết quả model + eda_df) - xem docstring
-        # `build_managerial_insights_markdown()`. Trước đây đây chỉ là template hướng dẫn điền tay,
-        # không có số liệu thật - phần quan trọng nhất khi bảo vệ luận văn vì nối kết quả kỹ thuật với
-        # hành động quản trị thực tế, nên KHÔNG được để dạng placeholder.
-        eda_df_for_insights = load_eda_sample_dataframe()
-        st.markdown(build_managerial_insights_markdown(evaluation_metrics, deployment_config, eda_df_for_insights))
+        render_managerial_insights_section(evaluation_metrics, deployment_config, runtime_info)
 
 
 # ==================================================================================================
@@ -2796,14 +3180,21 @@ def _fetch_daily_weather_and_tide(
     return daily_weather, all_dates, tide_heights
 
 
-def _build_forecast_row(day_label: str, forecast_date: pd.Timestamp, rain_mm: float, predicted_class: int) -> dict:
-    """Đóng gói 1 dòng kết quả dự báo (['Ngày', 'Dự báo Lượng mưa (mm)', 'Dự đoán Ngập']) - DÙNG CHUNG
-    cho `predict_4_days_forecast()` và `predict_days_ahead_forecast_sequence()` để đảm bảo định dạng
-    ngày/nhãn nhất quán giữa 2 hàm (trước đây mỗi hàm tự viết riêng 1 bản)."""
+def _build_forecast_row(
+    day_label: str, forecast_date: pd.Timestamp, rain_mm: float, predicted_class: int, temperature_c: float
+) -> dict:
+    """Đóng gói 1 dòng kết quả dự báo (['Ngày', 'Dự báo Lượng mưa (mm)', 'Dự đoán Ngập', 'Nhiệt độ dự
+    báo (°C)']) - DÙNG CHUNG cho `predict_4_days_forecast()` và `predict_days_ahead_forecast_sequence()`
+    để đảm bảo định dạng ngày/nhãn nhất quán giữa 2 hàm (trước đây mỗi hàm tự viết riêng 1 bản).
+
+    `temperature_c` được thêm sau (ban đầu chỉ có mưa/nhãn ngập) - phục vụ Tab "Biểu đồ dự báo" cần cả
+    nhiệt độ lẫn lượng mưa theo ngày (dữ liệu này đã có sẵn trong `daily_features_df` ở cả 2 hàm gọi,
+    chỉ là trước đây bị bỏ qua khi đóng gói dòng kết quả)."""
     return {
         "Ngày": f"{forecast_date.strftime('%d/%m/%Y')} ({day_label})",
         "Dự báo Lượng mưa (mm)": round(float(rain_mm), 1),
         "Dự đoán Ngập": "An toàn" if int(predicted_class) == 0 else "Nguy cơ ngập",
+        "Nhiệt độ dự báo (°C)": round(float(temperature_c), 1),
     }
 
 
@@ -2868,11 +3259,17 @@ def predict_4_days_forecast(lat: float, lon: float, model, scaler) -> pd.DataFra
     # BƯỚC D - OUTPUT: xem docstring `_build_forecast_row()`.
     result_rows = [
         _build_forecast_row(
-            DAY_LABELS[offset], forecast_dates[offset], daily_features_df["Lượng_mưa_mm"].iloc[offset], predicted_classes[offset]
+            DAY_LABELS[offset],
+            forecast_dates[offset],
+            daily_features_df["Lượng_mưa_mm"].iloc[offset],
+            predicted_classes[offset],
+            daily_features_df["Nhiệt_độ_C"].iloc[offset],
         )
         for offset in range(FORECAST_DAYS_AHEAD)
     ]
-    return pd.DataFrame(result_rows, columns=["Ngày", "Dự báo Lượng mưa (mm)", "Dự đoán Ngập"])
+    return pd.DataFrame(
+        result_rows, columns=["Ngày", "Dự báo Lượng mưa (mm)", "Dự đoán Ngập", "Nhiệt độ dự báo (°C)"]
+    )
 
 
 def predict_days_ahead_forecast_sequence(
@@ -2938,14 +3335,20 @@ def predict_days_ahead_forecast_sequence(
             predicted_class = predict_class_from_sequence_window(deployed_model, window_input)
             result_rows.append(
                 _build_forecast_row(
-                    DAY_LABELS[offset], all_dates[end_idx], daily_features_df["Lượng_mưa_mm"].iloc[end_idx], predicted_class
+                    DAY_LABELS[offset],
+                    all_dates[end_idx],
+                    daily_features_df["Lượng_mưa_mm"].iloc[end_idx],
+                    predicted_class,
+                    daily_features_df["Nhiệt_độ_C"].iloc[end_idx],
                 )
             )
     except Exception as exc:
         print(f"[predict_days_ahead_forecast_sequence] Lỗi khi suy luận bằng model: {exc}")
         return None
 
-    return pd.DataFrame(result_rows, columns=["Ngày", "Dự báo Lượng mưa (mm)", "Dự đoán Ngập"])
+    return pd.DataFrame(
+        result_rows, columns=["Ngày", "Dự báo Lượng mưa (mm)", "Dự đoán Ngập", "Nhiệt độ dự báo (°C)"]
+    )
 
 
 @st.cache_data(persist="disk", show_spinner="Đang gọi Open-Meteo và suy luận dự báo cho 5 địa phương...")
@@ -3203,8 +3606,8 @@ def render_weather_comparison_section() -> None:
             return
 
         st.caption(
-            "Bảng so sánh **LƯỢNG MƯA hôm nay (mm)** - biến liên quan trực tiếp đến nguy cơ ngập, KHÔNG "
-            "phải nhiệt độ/độ ẩm. Ô hiện **\"—\"** nghĩa là lần gọi đó THẤT BẠI (key sai/hết hạn/hết "
+            "Bảng so sánh **lượng mưa hôm nay (mm)** - biến liên quan trực tiếp đến nguy cơ ngập, không "
+            "phải nhiệt độ/độ ẩm. Ô hiện **\"—\"** nghĩa là lần gọi đó thất bại (key sai/hết hạn/hết "
             f"quota) chứ không phải trời không mưa - kiểm tra lại key ở khung Admin nếu thấy \"—\" kéo "
             f"dài. Dữ liệu tự làm mới mỗi khi có người mở lại tab và cache đã quá "
             f"{WEATHER_COMPARISON_CACHE_TTL_SECONDS // 3600} tiếng (không có tiến trình chạy nền)."
@@ -3301,7 +3704,7 @@ def render_forecast_tab() -> None:
     """
     st.subheader("Dự báo ngập lụt 14 ngày tới")
     st.caption(
-        "Kết quả dự báo THẬT từ model đã huấn luyện, cho toàn bộ 5 địa phương giám sát (Ngày T = hôm "
+        "Kết quả dự báo thật từ model đã huấn luyện, cho toàn bộ 5 địa phương giám sát (Ngày T = hôm "
         "nay, đến T+13), dựa trên dữ liệu thời tiết dự báo mới nhất từ Open-Meteo Forecast API. Trang "
         f"này tự động kiểm tra và làm mới mỗi {LIVE_TAB_AUTO_REFRESH_INTERVAL} khi đang mở."
     )
@@ -3368,7 +3771,10 @@ def render_forecast_tab() -> None:
         )
 
     render_styled_table(
-        build_contrast_styler(combined_forecast_df, numeric_formats={"Dự báo Lượng mưa (mm)": "{:.1f}"}),
+        build_contrast_styler(
+            combined_forecast_df,
+            numeric_formats={"Dự báo Lượng mưa (mm)": "{:.1f}", "Nhiệt độ dự báo (°C)": "{:.1f}"},
+        ),
         height=min(120 + 38 * len(combined_forecast_df), 640),
     )
 
@@ -3394,6 +3800,100 @@ def render_forecast_tab() -> None:
     )
 
     render_weather_comparison_section()
+
+
+def render_location_forecast_combo_chart(location_name: str, location_forecast_df: pd.DataFrame) -> None:
+    """
+    Biểu đồ cột (lượng mưa, mm) + đường (nhiệt độ, °C) theo NGÀY cho 1 địa phương - dùng ĐÚNG dữ liệu
+    dự báo thật đã có sẵn từ `_compute_forecast_4day_result()` (không gọi thêm API/model nào mới),
+    theo mẫu biểu đồ người dùng cung cấp (cột mưa + đường nhiệt độ trên cùng 1 biểu đồ, trục y phụ).
+    """
+    if location_forecast_df.empty:
+        st.info(f"Chưa có dữ liệu dự báo cho {location_name}.")
+        return
+
+    if "Nhiệt độ dự báo (°C)" not in location_forecast_df.columns:
+        # Cột này mới thêm sau (bản trước chỉ có mưa/nhãn ngập) - nếu thiếu, nghĩa là đang đọc phải
+        # CACHE ĐĨA CŨ của `_compute_forecast_4day_result()` (Streamlit cache_data KHÔNG tự phát hiện
+        # được khi hàm CON bên trong như `_build_forecast_row()` thay đổi, chỉ hàm được decorate trực
+        # tiếp) - báo rõ cho người dùng thay vì crash KeyError, và tự hướng dẫn cách xoá cache đúng.
+        st.warning(
+            f"Chưa có dữ liệu nhiệt độ cho {location_name} - có thể do cache cũ trước khi tính năng "
+            "này được thêm vào. Bấm nút 'Làm mới toàn bộ cache' ở sidebar rồi tải lại trang."
+        )
+        return
+
+    # Rút gọn nhãn trục X: "12/09/2026 (Hôm nay)" -> "12/09" - đủ để phân biệt các ngày, không chiếm
+    # quá nhiều chỗ ngang khi hiển thị đủ 14 cột trên 1 biểu đồ.
+    short_day_labels = location_forecast_df["Ngày"].str.extract(r"^(\d{2}/\d{2})")[0]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=short_day_labels,
+            y=location_forecast_df["Dự báo Lượng mưa (mm)"],
+            name="Lượng mưa (mm)",
+            marker=dict(color="#3b82f6"),
+            text=[f"{v:.1f}" for v in location_forecast_df["Dự báo Lượng mưa (mm)"]],
+            textposition="outside",
+            yaxis="y1",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=short_day_labels,
+            y=location_forecast_df["Nhiệt độ dự báo (°C)"],
+            name="Nhiệt độ (°C)",
+            mode="lines+markers+text",
+            line=dict(color="#f97316", width=3),
+            marker=dict(size=7),
+            text=[f"{v:.0f}°" for v in location_forecast_df["Nhiệt độ dự báo (°C)"]],
+            textposition="top center",
+            textfont=dict(color="#f97316"),
+            yaxis="y2",
+        )
+    )
+    fig.update_layout(
+        title=dict(text=f"Nhiệt độ và lượng mưa dự báo - {location_name}"),
+        xaxis=dict(title="Ngày"),
+        yaxis=dict(title="Lượng mưa (mm)"),
+        yaxis2=dict(title="Nhiệt độ (°C)", overlaying="y", side="right"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.08, xanchor="center", x=0.5),
+        hovermode="x unified",
+        bargap=0.3,
+    )
+    apply_dark_plotly_theme(fig, height=380)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+@st.fragment(run_every=LIVE_TAB_AUTO_REFRESH_INTERVAL)
+def render_forecast_chart_tab() -> None:
+    """
+    Tab "Biểu đồ dự báo" - biểu đồ cột+đường (nhiệt độ/lượng mưa) cho cả 5 địa phương giám sát, dùng
+    ĐÚNG kết quả dự báo thật từ model tốt nhất (tái sử dụng `_compute_forecast_4day_result()` - cùng
+    cache với Tab "Dự báo 14 ngày tới", KHÔNG gọi thêm request Open-Meteo/model nào mới).
+
+    Tự làm mới mỗi `LIVE_TAB_AUTO_REFRESH_INTERVAL` giống hệt Tab 1 (xem giải thích cơ chế/giới hạn
+    của `@st.fragment(run_every=...)` trong docstring `render_forecast_tab()`).
+    """
+    st.subheader("Biểu đồ dự báo nhiệt độ & lượng mưa")
+    st.caption(
+        f"Biểu đồ trực quan cho dữ liệu dự báo thật ở Tab 'Dự báo 14 ngày tới' - cùng model, cùng "
+        f"cache, tự làm mới mỗi {LIVE_TAB_AUTO_REFRESH_INTERVAL} khi đang mở."
+    )
+
+    try:
+        cached_result = _compute_forecast_4day_result()
+    except Exception as exc:
+        st.warning(f"Chưa có dữ liệu dự báo để vẽ biểu đồ: {exc}")
+        return
+
+    combined_forecast_df = cached_result["combined_df"]
+    st.caption(f"Cập nhật lần cuối: {cached_result['generated_at'].strftime('%H:%M:%S %d/%m/%Y')}")
+
+    for location_name in REAL_MONITORED_LOCATIONS:
+        location_forecast_df = combined_forecast_df[combined_forecast_df["Địa phương"] == location_name]
+        render_location_forecast_combo_chart(location_name, location_forecast_df)
 
 
 @st.cache_data(show_spinner=False)
@@ -3537,7 +4037,7 @@ def build_smart_routing_map(
             risk_status = risk_rows.iloc[0] if not risk_rows.empty else "Không xác định"
             fill_color = RISK_FILL_COLOR_MAP.get(risk_status, "#9CA3AF")
             tooltip_label = RISK_TOOLTIP_LABEL_MAP.get(
-                risk_status, "KHÔNG XÁC ĐỊNH được (lỗi model/dữ liệu - cần kiểm tra thủ công)"
+                risk_status, "Không xác định được (lỗi model/dữ liệu - cần kiểm tra thủ công)"
             )
             location_forecast_df = (
                 forecast_by_location.get(location_name) if forecast_by_location is not None else None
@@ -3585,7 +4085,7 @@ def build_smart_routing_map(
             else:
                 folium.Marker(
                     location=coordinates,
-                    tooltip=f"{location_name}: KHÔNG XÁC ĐỊNH được (lỗi model/dữ liệu - cần kiểm tra thủ công)",
+                    tooltip=f"{location_name}: không xác định được (lỗi model/dữ liệu - cần kiểm tra thủ công)",
                     popup=popup,
                     icon=folium.Icon(color="gray", icon="question", prefix="fa"),
                 ).add_to(routing_map)
@@ -3666,9 +4166,9 @@ def render_smart_routing_tab() -> None:
     """
     st.subheader("Bản đồ tránh ngập")
     st.caption(
-        "Bước 4/4 của pipeline: giám sát 5 địa phương THỰC TẾ tại Thừa Thiên Huế bằng kết quả dự báo "
-        "của model AI. Click trực tiếp lên bản đồ để đặt điểm xuất phát/điểm đến ở BẤT KỲ vị trí nào - "
-        "khi có địa phương đang ngập, hệ thống TỰ ĐỘNG tính lại tuyến né vùng ngập, không cần bấm nút."
+        "Bước 4/4 của pipeline: giám sát 5 địa phương thực tế tại Thừa Thiên Huế bằng kết quả dự báo "
+        "của model AI. Click trực tiếp lên bản đồ để đặt điểm xuất phát/điểm đến ở bất kỳ vị trí nào - "
+        "khi có địa phương đang ngập, hệ thống tự động tính lại tuyến né vùng ngập, không cần bấm nút."
     )
 
     # ==============================================================================================
@@ -3713,7 +4213,7 @@ def render_smart_routing_tab() -> None:
         # vực này vì không có đủ dữ liệu để dựng vùng ngập, nên cần con người kiểm tra thủ công.
         st.warning(
             f"Không xác định được nguy cơ ngập cho: {', '.join(unknown_location_names)} "
-            "(model/dữ liệu lỗi - xem log server). Các địa phương này KHÔNG được tự động né khi định "
+            "(model/dữ liệu lỗi - xem log server). Các địa phương này không được tự động né khi định "
             "tuyến - vui lòng kiểm tra thủ công trước khi di chuyển qua khu vực này."
         )
 
@@ -3920,9 +4420,10 @@ def main():
     # Huấn luyện -> Đánh giá) để người xem hiểu được PHƯƠNG PHÁP đứng sau kết quả dự báo đó, và tab
     # cuối là sản phẩm ứng dụng (bản đồ chỉ đường tránh ngập).
     # ------------------------------------------------------------------------------------------
-    tab_forecast, tab_eda, tab_train, tab_eval, tab_map = st.tabs(
+    tab_forecast, tab_forecast_chart, tab_eda, tab_train, tab_eval, tab_map = st.tabs(
         [
             "Dự báo 14 ngày tới",
+            "Biểu đồ dự báo",
             "Khám phá dữ liệu (EDA)",
             "Tiền xử lý & huấn luyện",
             "Đánh giá mô hình",
@@ -3932,6 +4433,9 @@ def main():
 
     with tab_forecast:
         render_forecast_tab()
+
+    with tab_forecast_chart:
+        render_forecast_chart_tab()
 
     with tab_eda:
         render_eda_tab()
