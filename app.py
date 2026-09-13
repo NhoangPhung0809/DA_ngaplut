@@ -2023,17 +2023,30 @@ def render_training_controls_panel() -> None:
 def load_cleaned_training_dataframe() -> pd.DataFrame:
     """
     Nạp dữ liệu THẬT qua ĐÚNG pipeline tiền xử lý dùng lúc huấn luyện: `load_and_concatenate_csvs()`
-    (gộp toàn bộ `data/historical/*.csv`) rồi `preprocess_features()` (ép kiểu số, điền giá trị thiếu
-    bằng TRUNG VỊ từng cột, giữ đúng các cột cần cho model) trong `analyze_and_train.py` - gọi lại
-    ĐÚNG 2 hàm đó thay vì viết lại logic làm sạch riêng ở `app.py`, để tránh tình trạng 2 nơi xử lý
-    lệch nhau (app hiển thị 1 kiểu, lúc train thật lại ra kết quả khác).
+    (gộp toàn bộ `data/historical/*.csv`) -> `build_daily_feature_dataset()` (gộp theo ngày + tính 3
+    cột lag/tích luỹ mưa) -> `preprocess_features()` (ép kiểu số, điền giá trị thiếu bằng TRUNG VỊ từng
+    cột, giữ đúng các cột cần cho model) trong `analyze_and_train.py` - gọi lại ĐÚNG các hàm đó thay vì
+    viết lại logic làm sạch riêng ở `app.py`, để tránh tình trạng 2 nơi xử lý lệch nhau (app hiển thị 1
+    kiểu, lúc train thật lại ra kết quả khác).
 
-    Cache bằng `st.cache_data` vì gộp + làm sạch ~440 nghìn dòng khá tốn, không cần chạy lại mỗi khi
-    Streamlit rerun (ví dụ khi người dùng tương tác widget ở tab khác).
+    TRƯỚC ĐÂY gọi thẳng `preprocess_features(raw_df)` trên dữ liệu THEO GIỜ (bỏ qua bước gộp ngày) - từ
+    khi `preprocess_features()` cần đủ `FEATURE_COLS` (đã có thêm 3 cột lag mưa, chỉ được TÍNH ra trong
+    `build_daily_feature_dataset()`), gọi thiếu bước này gây lỗi "not in index". Thêm bước gộp ngày vào
+    đây - bảng xem trước giờ hiển thị dữ liệu THEO NGÀY (khớp đúng với dữ liệu model thật sự huấn luyện)
+    thay vì theo giờ như trước.
+
+    Cache bằng `st.cache_data` vì gộp + làm sạch ~440 nghìn dòng theo giờ khá tốn, không cần chạy lại
+    mỗi khi Streamlit rerun (ví dụ khi người dùng tương tác widget ở tab khác).
     """
     train_module = get_train_module()
     raw_df = train_module.load_and_concatenate_csvs()
-    return train_module.preprocess_features(raw_df)
+    daily_feature_df = train_module.build_daily_feature_dataset(raw_df)
+    # `build_daily_feature_dataset()` KHÔNG giữ cột nhãn (aggregation_map của nó chỉ liệt kê các cột
+    # đặc trưng) - phải gọi `create_multiclass_flood_label()` trước để tạo lại nhãn theo đúng luật rule-
+    # based, giống hệt thứ tự thật trong `run_training_pipeline()`, nếu không `preprocess_features()`
+    # bên dưới sẽ crash vì thiếu cột `Nguy_cơ_ngập`.
+    labeled_daily_df = train_module.create_multiclass_flood_label(daily_feature_df)
+    return train_module.preprocess_features(labeled_daily_df)
 
 
 def render_preprocessing_training_tab() -> None:
@@ -2059,12 +2072,15 @@ def render_preprocessing_training_tab() -> None:
             else:
                 st.dataframe(cleaned_df.head(20), use_container_width=True, hide_index=True)
                 render_chart_discussion(
-                    f"Bảng trên là {len(cleaned_df):,} dòng sau khi qua `preprocess_features()` trong "
-                    "`analyze_and_train.py`: ép kiểu số, điền giá trị thiếu bằng trung vị của từng cột "
-                    "(median - ít bị lệch bởi outlier hơn trung bình), và chỉ giữ lại các cột thật sự "
-                    "cần cho huấn luyện. Lưu ý: nhãn `Nguy_cơ_ngập` ở bước này lấy thẳng từ dữ liệu gốc "
-                    "(không tạo lại theo rule-based) - việc gán nhãn rule-based chỉ áp dụng cho dữ liệu "
-                    "tổng hợp CTGAN ở khối 'Cân bằng dữ liệu' bên dưới, không áp dụng ở bước làm sạch này."
+                    f"Bảng trên là {len(cleaned_df):,} dòng - dữ liệu THEO NGÀY (đã gộp từ dữ liệu theo "
+                    "giờ gốc, đúng granularity model thật sự huấn luyện) sau khi qua "
+                    "`build_daily_feature_dataset()` (gộp ngày + tính 3 cột lag/tích luỹ mưa) -> "
+                    "`create_multiclass_flood_label()` (gán lại nhãn theo luật rule-based, dựa trên "
+                    "mưa/độ ẩm đất/triều cường của CHÍNH ngày đó) -> `preprocess_features()` (ép kiểu số, "
+                    "điền giá trị thiếu bằng trung vị của từng cột - median ít bị lệch bởi outlier hơn "
+                    "trung bình) trong `analyze_and_train.py` - đúng 3 bước đầu tiên của "
+                    "`run_training_pipeline()` thật, không phải logic làm sạch viết riêng cho bảng xem "
+                    "trước này."
                 )
 
     with col_split:
@@ -2077,22 +2093,25 @@ def render_preprocessing_training_tab() -> None:
             # QUAN TRỌNG - GIẢI THÍCH KỸ THUẬT DÙNG CHO PHẦN BẢO VỆ LUẬN VĂN:
             # Với dữ liệu chuỗi thời gian, TUYỆT ĐỐI không dùng train_test_split(shuffle=True) hay K-Fold
             # thông thường, vì sẽ để lọt thông tin TƯƠNG LAI vào tập huấn luyện (data leakage), khiến độ
-            # chính xác đánh giá bị "ảo" (cao hơn thực tế khi triển khai thật). Thay vào đó nên dùng
-            # `sklearn.model_selection.TimeSeriesSplit` - một dạng cross-validation walk-forward: mỗi fold
-            # sau luôn dùng NHIỀU dữ liệu quá khứ hơn để dự báo một đoạn TƯƠNG LAI kế tiếp, đảm bảo mọi lần
-            # đánh giá đều mô phỏng đúng bối cảnh "chỉ biết quá khứ, dự báo tương lai" như khi vận hành thực tế.
-            st.code(
-                "from sklearn.model_selection import TimeSeriesSplit\n\n"
-                "# TimeSeriesSplit đảm bảo không rò rỉ dữ liệu tương lai (data leakage) vào tập huấn luyện\n"
-                "splitter = TimeSeriesSplit(n_splits=5)\n"
-                "for train_idx, test_idx in splitter.split(X):\n"
-                "    X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]\n"
-                "    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]\n"
-                "    # TODO: fit/evaluate mô hình cho từng fold tại đây",
-                language="python",
+            # chính xác đánh giá bị "ảo" (cao hơn thực tế khi triển khai thật).
+            #
+            # TRƯỚC ĐÂY khối này chỉ là đoạn code MINH HOẠ Ý TƯỞNG (`sklearn.TimeSeriesSplit`, kèm
+            # `# TODO: fit/evaluate mô hình cho từng fold tại đây`) - KHÔNG hề chạy thật, chỉ để giải
+            # thích khái niệm. GVPB đề cương đã góp ý đúng điểm này ("nên thiết kế kiểm định chéo theo
+            # chuỗi thời gian") - đã triển khai THẬT (không còn là TODO nữa) ở `analyze_and_train.py::
+            # generate_chronological_cv_folds()`/`run_time_series_cv_pipeline()`, dùng logic walk-forward
+            # tương đương TimeSeriesSplit nhưng tách RIÊNG từng địa phương trước khi gộp fold (tránh 1
+            # fold lẫn dữ liệu tương lai của địa phương này với quá khứ của địa phương khác). Chạy thật
+            # và xem kết quả ở khối "Kiểm định chéo theo chuỗi thời gian (Time Series CV)" bên dưới,
+            # không còn là code minh hoạ suông nữa.
+            st.info(
+                "Kiểm định chéo theo chuỗi thời gian (Time Series CV, kiểu walk-forward) **đã được triển "
+                "khai thật** - không còn là code minh hoạ nữa. Mở khối **'Kiểm định chéo theo chuỗi thời "
+                "gian (Time Series CV)'** bên dưới để chọn model và chạy thật, xem F1 trung bình ± độ "
+                "lệch chuẩn qua nhiều giai đoạn thời gian."
             )
             render_chart_discussion(
-                "TimeSeriesSplit khác K-Fold thông thường ở chỗ nó không xáo trộn dữ liệu - đảm bảo mọi "
+                "Time Series CV khác K-Fold thông thường ở chỗ nó không xáo trộn dữ liệu - đảm bảo mọi "
                 "lần đánh giá đều mô phỏng đúng bối cảnh dự báo thực tế (chỉ dùng dữ liệu quá khứ để dự "
                 "báo tương lai), tránh đánh giá bị 'ảo' do rò rỉ thông tin tương lai."
             )
