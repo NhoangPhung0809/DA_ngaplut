@@ -3756,7 +3756,14 @@ def render_weather_comparison_section() -> None:
             )
 
 
-@st.fragment(run_every=LIVE_TAB_AUTO_REFRESH_INTERVAL)
+# TẠM TẮT `@st.fragment(run_every=LIVE_TAB_AUTO_REFRESH_INTERVAL)` ĐỂ TEST (chưa xoá hẳn - xem lại
+# ngày comment ra nếu quyết định giữ tắt luôn): nghi ngờ cơ chế tự làm mới định kỳ này là nguyên nhân
+# khiến WebSocket qua Cloudflare Tunnel bị ngắt/reconnect liên tục khi trang đang mở im lặng (đã quan
+# sát: bị ngắt trong <1.5 phút dù không train, trong khi TRƯỚC KHI có tính năng này 1 buổi họp Meet
+# chiếu màn hình 45 phút liên tục lại không hề bị). Nếu tắt dòng dưới mà hết bị ngắt nhanh -> xác nhận
+# đúng nguyên nhân, cân nhắc bỏ hẳn `run_every` hoặc đổi cơ chế khác (nút "Dự báo lại" thủ công đã có
+# sẵn vẫn hoạt động bình thường dù không có dòng này).
+# @st.fragment(run_every=LIVE_TAB_AUTO_REFRESH_INTERVAL)
 def render_forecast_tab() -> None:
     """
     Nội dung TRANG ĐẦU TIÊN của app - bảng dự báo nguy cơ ngập 14 ngày tới (T đến T+13) cho toàn bộ
