@@ -1,0 +1,12 @@
+# Cấu hình Streamlit cho production - KHÔNG chứa secret (secrets.toml riêng, đã bị .gitignore).
+#
+# fileWatcherType = "none": TẮT cơ chế tự động theo dõi thay đổi file (mặc định Streamlit theo dõi
+# toàn bộ thư mục project để tự rerun/hiện banner "Source file changed"). Lý do tắt: pipeline huấn
+# luyện (`training_worker.py`/`analyze_and_train.py`) liên tục GHI FILE MỚI trong lúc chạy nền
+# (models/run_*/, plots/*.png, data/*.json, __pycache__/*.pyc) - nếu Streamlit coi các ghi file này là
+# "code thay đổi", nó có thể tự rerun/reload trang giữa chừng, gây hiện tượng trang "tự load lại" vài
+# phút/lần khi đang huấn luyện (đã quan sát thấy thật trên production). Trên production, code CHỈ đổi
+# khi deploy lại (redeploy toàn container), không bao giờ đổi khi app đang chạy sống cho người dùng -
+# nên việc theo dõi file lúc runtime là không cần thiết, chỉ có hại.
+[server]
+fileWatcherType = "none"

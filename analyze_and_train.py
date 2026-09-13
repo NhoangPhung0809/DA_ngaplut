@@ -1587,6 +1587,9 @@ def incremental_train(new_data_df: pd.DataFrame) -> dict:
         full_labeled = create_multiclass_flood_label(full_daily_features)
         full_processed = preprocess_features(full_labeled)
         full_daily_df = build_daily_modeling_dataset(full_processed)
+        # Cùng fix rò rỉ dữ liệu như `run_training_pipeline()` (xem comment ở đó) - nếu không shift ở
+        # đây, fine-tune incremental sẽ lại dạy LSTM học "tra bảng" nhãn cùng ngày thay vì dự báo T+1.
+        full_daily_df = apply_time_lag_target_shift(full_daily_df)
 
         new_norm = normalize_input_new_data(new_data_df)
         new_daily_features = build_daily_feature_dataset(new_norm)
@@ -1699,7 +1702,7 @@ def train_lstm_sequence_model(
         y_pred=predictions,
         category="Deep Learning",
         deployment_compatible=False,
-        evaluation_scope="daily_sequence",
+        evaluation_scope="daily_sequence_t_plus_1",
     )
     metrics["roc_auc_ovr_macro"] = safe_compute_roc_auc_ovr_macro(y_test_seq, probabilities)
     # Kiểm tra "học vẹt" - xem docstring `attach_train_test_gap()`. Suy luận lại trên CHÍNH tập train
@@ -1754,7 +1757,7 @@ def train_sequence_deep_model(
             # riêng, không thể joblib.load() như sklearn) - KHÔNG còn dùng để LOẠI TRỪ model này khỏi
             # việc được chọn làm best model nữa (xem `select_best_model_overall` bên dưới).
             deployment_compatible=False,
-            evaluation_scope="daily_sequence",
+            evaluation_scope="daily_sequence_t_plus_1",
         )
         metrics["roc_auc_ovr_macro"] = safe_compute_roc_auc_ovr_macro(y_test_seq, probabilities)
         # Kiểm tra "học vẹt" - xem docstring `attach_train_test_gap()`. Suy luận lại trên CHÍNH tập
@@ -1827,7 +1830,7 @@ def train_lstm_xgboost_hybrid_model(
             y_pred=hybrid_predictions,
             category="Hybrid",
             deployment_compatible=False,
-            evaluation_scope="daily_sequence",
+            evaluation_scope="daily_sequence_t_plus_1",
         )
         try:
             hybrid_proba = hybrid_classifier.predict_proba(test_embeddings)
@@ -1936,7 +1939,7 @@ def train_lstm_gru_xgboost_hybrid_model(
             y_pred=hybrid_predictions,
             category="Hybrid",
             deployment_compatible=False,
-            evaluation_scope="daily_sequence",
+            evaluation_scope="daily_sequence_t_plus_1",
         )
         try:
             hybrid_proba = hybrid_classifier.predict_proba(test_combined_embeddings)
@@ -2176,8 +2179,24 @@ def train_and_evaluate_models(
     y_test: pd.Series,
     daily_df: pd.DataFrame,
     balancing_method_used: str,
+    X_train_raw: pd.DataFrame,
+    y_train_raw: pd.Series,
 ):
-    """Huấn luyện và đánh giá mô hình theo từng nhóm phương pháp."""
+    """
+    Huấn luyện và đánh giá mô hình theo từng nhóm phương pháp.
+
+    `X_train_raw`/`y_train_raw` (THÊM MỚI): tập train THẬT, CHƯA qua CTGAN/SMOTE (khác với
+    `X_train_balanced`/`y_train_balanced` - đã cân bằng) - dùng riêng cho bước TINH CHỈNH SIÊU THAM SỐ
+    (GridSearchCV/Optuna bên dưới). LÝ DO: trước đây GridSearchCV/Optuna tune trực tiếp trên dữ liệu
+    ĐÃ CTGAN/SMOTE cân bằng - các fold CV (GridSearchCV) và tập validation tách riêng (Optuna) khi đó
+    chứa nhiều mẫu TỔNG HỢP (CTGAN) hoặc NỘI SUY (SMOTE) cho lớp thiểu số, dễ khiến điểm CV/validation
+    bị THỔI PHỒNG một cách giả tạo (mẫu tổng hợp ở fold train và fold validation có thể rất giống nhau
+    do cùng sinh ra từ 1 phân phối học được) - ĐÚNG NGUYÊN TẮC rò rỉ dữ liệu: tập dùng để CHỌN mô hình/
+    tham số không được "thấy" thông tin phái sinh từ chính nó theo cách không xảy ra khi triển khai
+    thật. Nguyên tắc bắt buộc: tách train/validation (hay CV fold) LUÔN PHẢI XẢY RA TRƯỚC CTGAN/SMOTE,
+    không phải sau. Model CUỐI CÙNG (sau khi chọn được tham số tốt nhất) vẫn được `.fit()` trên
+    `X_train_balanced`/`y_train_balanced` như cũ (không đổi) - chỉ có BƯỚC TUNING là đổi nguồn dữ liệu.
+    """
     trained_models = {}
     evaluation_results = {}
     roc_cache: dict[str, dict[str, np.ndarray]] = {}
@@ -2203,8 +2222,11 @@ def train_and_evaluate_models(
             # `hyperparameter_tuning.py` import lỗi (thiếu optuna/torch) thì rơi về tham số cố định cũ
             # như trước - KHÔNG làm crash toàn bộ pipeline chỉ vì thiếu 1 dependency tuỳ chọn.
             if model_name == "Random Forest" and tune_random_forest_gridsearch is not None:
-                print("  -> Tinh chỉnh Random Forest bằng GridSearchCV (48 tổ hợp, cv=3)...")
-                grid_result = tune_random_forest_gridsearch(X_train_balanced, y_train_balanced, cv=3)
+                print("  -> Tinh chỉnh Random Forest bằng GridSearchCV (48 tổ hợp, cv=3, trên dữ liệu THẬT chưa CTGAN/SMOTE)...")
+                # Dùng X_train_raw/y_train_raw (CHƯA cân bằng) - xem docstring hàm này. `base_model`
+                # trong `tune_random_forest_gridsearch()` đã tự set `class_weight="balanced_subsample"`
+                # nên vẫn xử lý được mất cân bằng lớp NGAY TRONG CV, không cần dữ liệu tổng hợp.
+                grid_result = tune_random_forest_gridsearch(X_train_raw, y_train_raw, cv=3)
                 model = RandomForestClassifier(
                     **grid_result["best_params"], random_state=42, n_jobs=-1,
                     class_weight="balanced_subsample",
@@ -2224,12 +2246,16 @@ def train_and_evaluate_models(
                 export_hyperparameter_tuning_results(tuning_results)
                 print(f"     Best params: {grid_result['best_params']} | CV F1-Macro={grid_result['best_cv_f1_macro']:.4f}")
             elif model_name == "XGBoost" and tune_xgboost_optuna is not None:
-                print("  -> Tinh chỉnh XGBoost bằng Optuna (30 trial, TPE)...")
-                # Tách riêng 15% làm tập validation CHỈ để chọn siêu tham số - model CUỐI CÙNG vẫn được
-                # huấn luyện lại trên TOÀN BỘ X_train_balanced (xem `model.fit()` bên dưới, dùng chung
-                # với mọi model tabular khác), không chỉ trên 85% đã tune.
+                print("  -> Tinh chỉnh XGBoost bằng Optuna (30 trial, TPE, trên dữ liệu THẬT chưa CTGAN/SMOTE)...")
+                # Tách riêng 15% làm tập validation CHỈ để chọn siêu tham số - LẤY TỪ X_train_raw/
+                # y_train_raw (CHƯA cân bằng, xem docstring hàm này) để tách train/validation LUÔN xảy
+                # ra TRƯỚC CTGAN/SMOTE, không phải sau - tránh mẫu tổng hợp bị chia vào cả 2 phía gây
+                # điểm validation ảo cao. Model CUỐI CÙNG vẫn được huấn luyện lại trên TOÀN BỘ
+                # X_train_balanced (xem `model.fit()` bên dưới, dùng chung với mọi model tabular khác).
+                # F1-macro (mục tiêu tối ưu của Optuna, xem `tune_xgboost_optuna()`) đã tự ưu tiên lớp
+                # thiểu số nên vẫn tune tốt dù validation set giờ mất cân bằng THẬT như lúc triển khai.
                 X_tune_train, X_tune_valid, y_tune_train, y_tune_valid = train_test_split(
-                    X_train_balanced, y_train_balanced, test_size=0.15, random_state=42, shuffle=True,
+                    X_train_raw, y_train_raw, test_size=0.15, random_state=42, shuffle=True,
                 )
                 optuna_result = tune_xgboost_optuna(
                     X_tune_train, y_tune_train, X_tune_valid, y_tune_valid, n_trials=30,
@@ -3001,6 +3027,17 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
     labeled_daily_df = create_multiclass_flood_label(daily_feature_df)
     modeling_df = preprocess_features(labeled_daily_df)
     daily_df = build_daily_modeling_dataset(modeling_df)
+    # SỬA RÒ RỈ DỮ LIỆU (data leakage) THẬT ở model dạng chuỗi (LSTM/GRU/Hybrid) - đã phát hiện khi rà
+    # lại vì F1 các model này (0.92-0.98) cao bất thường so với model dạng bảng (0.47-0.53) trên CÙNG
+    # dữ liệu. Nguyên nhân: `daily_df` trước đây giữ nhãn CÙNG NGÀY T (từ `create_multiclass_flood_
+    # label()`, tính trực tiếp từ Lượng_mưa_mm/Độ_ẩm_đất/Chiều_cao_triều_m của CHÍNH ngày T), trong khi
+    # cửa sổ 7 ngày đưa vào model KẾT THÚC TẠI ngày T - tức dòng CUỐI của input chứa ĐÚNG 3 con số dùng
+    # để tính ra nhãn cần dự đoán, model chỉ cần học lại công thức ngưỡng có sẵn thay vì dự báo thật.
+    # Áp dụng ĐÚNG shift T->T+1 ở đây (giống hệt `chronological_train_test_split()` đã làm cho model
+    # dạng bảng qua `apply_time_lag_target_shift()`) để cửa sổ kết thúc tại T dự báo nhãn T+1 - công
+    # bằng, nhất quán phương pháp giữa 2 nhóm model, và là bài toán dự báo THẬT (không có đáp án lộ sẵn
+    # trong chính input).
+    daily_df = apply_time_lag_target_shift(daily_df)
 
     X_train, X_test, y_train, y_test = chronological_train_test_split(
         modeling_df,
@@ -3022,6 +3059,8 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
         y_test,
         daily_df,
         balancing_method_used,
+        X_train_scaled,
+        y_train,
     )
     save_incremental_candidate_artifacts(trained_models, run_dir=run_dir)
 

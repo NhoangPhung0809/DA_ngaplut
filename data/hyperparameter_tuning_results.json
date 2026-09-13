@@ -1,0 +1,167 @@
+{
+  "generated_at": "2026-09-13T09:26:53",
+  "results": {
+    "Random Forest": {
+      "method": "GridSearchCV",
+      "best_params": {
+        "max_depth": 16,
+        "min_samples_split": 10,
+        "n_estimators": 300
+      },
+      "best_score": 0.6103180525025778,
+      "score_label": "CV F1-Macro (trung bình 3-fold)",
+      "trials": [
+        {
+          "params": {
+            "max_depth": 16,
+            "min_samples_split": 10,
+            "n_estimators": 300
+          },
+          "mean_test_score": 0.6103180525025778,
+          "std_test_score": 0.027129538625640253,
+          "rank_test_score": 1
+        },
+        {
+          "params": {
+            "max_depth": 16,
+            "min_samples_split": 10,
+            "n_estimators": 400
+          },
+          "mean_test_score": 0.6084170281240473,
+          "std_test_score": 0.025185306296570415,
+          "rank_test_score": 2
+        },
+        {
+          "params": {
+            "max_depth": 16,
+            "min_samples_split": 10,
+            "n_estimators": 200
+          },
+          "mean_test_score": 0.6079720921900362,
+          "std_test_score": 0.029160157227619374,
+          "rank_test_score": 3
+        },
+        {
+          "params": {
+            "max_depth": null,
+            "min_samples_split": 10,
+            "n_estimators": 400
+          },
+          "mean_test_score": 0.6070633589326788,
+          "std_test_score": 0.02684099137168938,
+          "rank_test_score": 4
+        },
+        {
+          "params": {
+            "max_depth": 16,
+            "min_samples_split": 5,
+            "n_estimators": 200
+          },
+          "mean_test_score": 0.6061716253073803,
+          "std_test_score": 0.03125991766804195,
+          "rank_test_score": 5
+        },
+        {
+          "params": {
+            "max_depth": null,
+            "min_samples_split": 10,
+            "n_estimators": 300
+          },
+          "mean_test_score": 0.6055834125991129,
+          "std_test_score": 0.02445456472243805,
+          "rank_test_score": 6
+        },
+        {
+          "params": {
+            "max_depth": null,
+            "min_samples_split": 10,
+            "n_estimators": 200
+          },
+          "mean_test_score": 0.6035640481033501,
+          "std_test_score": 0.028780997599216,
+          "rank_test_score": 7
+        },
+        {
+          "params": {
+            "max_depth": 16,
+            "min_samples_split": 10,
+            "n_estimators": 100
+          },
+          "mean_test_score": 0.6035116262156855,
+          "std_test_score": 0.022817550167968218,
+          "rank_test_score": 8
+        },
+        {
+          "params": {
+            "max_depth": 16,
+            "min_samples_split": 5,
+            "n_estimators": 400
+          },
+          "mean_test_score": 0.6029935544503081,
+          "std_test_score": 0.030771542492709823,
+          "rank_test_score": 9
+        },
+        {
+          "params": {
+            "max_depth": 16,
+            "min_samples_split": 5,
+            "n_estimators": 300
+          },
+          "mean_test_score": 0.6026455873656418,
+          "std_test_score": 0.03349844671458858,
+          "rank_test_score": 10
+        },
+        {
+          "params": {
+            "max_depth": 12,
+            "min_samples_split": 2,
+            "n_estimators": 400
+          },
+          "mean_test_score": 0.6025061053087702,
+          "std_test_score": 0.021441885443729714,
+          "rank_test_score": 11
+        },
+        {
+          "params": {
+            "max_depth": 16,
+            "min_samples_split": 5,
+            "n_estimators": 100
+          },
+          "mean_test_score": 0.6011712750991732,
+          "std_test_score": 0.02566501568127811,
+          "rank_test_score": 12
+        },
+        {
+          "params": {
+            "max_depth": 12,
+            "min_samples_split": 5,
+            "n_estimators": 400
+          },
+          "mean_test_score": 0.6010796406823927,
+          "std_test_score": 0.023782184929793487,
+          "rank_test_score": 13
+        },
+        {
+          "params": {
+            "max_depth": null,
+            "min_samples_split": 10,
+            "n_estimators": 100
+          },
+          "mean_test_score": 0.6007426722907708,
+          "std_test_score": 0.028048115588156737,
+          "rank_test_score": 14
+        },
+        {
+          "params": {
+            "max_depth": 12,
+            "min_samples_split": 5,
+            "n_estimators": 300
+          },
+          "mean_test_score": 0.6001889692327801,
+          "std_test_score": 0.02295530580386307,
+          "rank_test_score": 15
+        }
+      ]
+    }
+  }
+}
