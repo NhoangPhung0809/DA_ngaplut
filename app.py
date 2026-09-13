@@ -913,9 +913,9 @@ def render_full_width_image(image_path: str) -> None:
 # 3 - tạo cảm giác "giảm dần theo thứ hạng" trực quan hơn thay vì 3 màu độ sáng ngang nhau khó phân
 # biệt nhanh bằng mắt. Vẫn giữ viền trái đậm màu huy chương làm dấu hiệu phân biệt hạng rõ ràng.
 RANK_MEDAL_COLORS: dict[int, tuple[str, str, str]] = {
-    0: ("#5c4a12", "#fffbeb", "#facc15"),  # Hạng 1 - nền vàng ấm hơn, viền vàng sáng rõ hơn.
-    1: ("#2f3742", "#f1f5f9", "#cbd5e1"),  # Hạng 2 - nền bạc-xanh, viền bạc sáng hơn.
-    2: ("#3a2412", "#fff7ed", "#c2760a"),  # Hạng 3 - nền đồng ấm hơn, viền đồng rực hơn.
+    0: ("#facc15", "#422006", "#a16207"),  # Hạng 1 - nền VÀNG RỰC, chữ nâu đậm để tương phản.
+    1: ("#cbd5e1", "#1e293b", "#475569"),  # Hạng 2 - nền BẠC SÁNG, chữ xanh than đậm.
+    2: ("#fb923c", "#431407", "#c2410c"),  # Hạng 3 - nền ĐỒNG CAM RỰC, chữ nâu đậm.
 }
 
 
