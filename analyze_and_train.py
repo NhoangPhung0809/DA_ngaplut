@@ -119,6 +119,7 @@ CTGAN_AFTER_PATH = BASE_DIR / "data" / "data_after_ctgan.csv"
 CTGAN_DISTRIBUTION_PATH = BASE_DIR / "data" / "ctgan_class_distribution.json"
 HYPERPARAMETER_TUNING_RESULTS_PATH = BASE_DIR / "data" / "hyperparameter_tuning_results.json"
 HYPERPARAMETER_TUNING_TOP_N_ROWS = 15  # chỉ lưu top N tổ hợp/trial tốt nhất ra JSON, tránh file phình to
+TIME_SERIES_CV_RESULTS_PATH = BASE_DIR / "data" / "time_series_cv_results.json"
 INCREMENTAL_CACHE_DIR = BASE_DIR / "cache"
 INCREMENTAL_CURSOR_PATH = INCREMENTAL_CACHE_DIR / "incremental_cursor.json"
 BEST_XGBOOST_PATH = LATEST_MODELS_DIR / "best_xgboost.json"
@@ -2181,9 +2182,18 @@ def train_and_evaluate_models(
     balancing_method_used: str,
     X_train_raw: pd.DataFrame,
     y_train_raw: pd.Series,
+    tune_hyperparameters: bool = True,
 ):
     """
     Huấn luyện và đánh giá mô hình theo từng nhóm phương pháp.
+
+    `tune_hyperparameters` (THÊM MỚI, mặc định `True` để KHÔNG đổi hành vi cũ cho pipeline huấn luyện
+    chính `run_training_pipeline()`): đặt `False` để BỎ QUA GridSearchCV/Optuna, dùng thẳng tham số cố
+    định (đã regularize) trong `build_model_registry()`. Dùng cho `run_time_series_cv_pipeline()` bên
+    dưới - nếu vẫn chạy tuning đầy đủ ở MỖI fold (48 tổ hợp x 3-fold GridSearchCV + 30 trial Optuna),
+    tổng thời gian sẽ nhân thêm `n_splits` lần, không khả thi. Việc CV chính vẫn đánh giá đúng khả năng
+    tổng quát hoá của model qua nhiều giai đoạn thời gian - chỉ riêng bước CHỌN siêu tham số tối ưu là
+    làm 1 lần ở pipeline chính, không lặp lại ở từng fold.
 
     `X_train_raw`/`y_train_raw` (THÊM MỚI): tập train THẬT, CHƯA qua CTGAN/SMOTE (khác với
     `X_train_balanced`/`y_train_balanced` - đã cân bằng) - dùng riêng cho bước TINH CHỈNH SIÊU THAM SỐ
@@ -2221,7 +2231,7 @@ def train_and_evaluate_models(
             # nên vét cạn được, còn XGBoost lớn/liên tục nên cần Bayesian Optimization. Nếu
             # `hyperparameter_tuning.py` import lỗi (thiếu optuna/torch) thì rơi về tham số cố định cũ
             # như trước - KHÔNG làm crash toàn bộ pipeline chỉ vì thiếu 1 dependency tuỳ chọn.
-            if model_name == "Random Forest" and tune_random_forest_gridsearch is not None:
+            if tune_hyperparameters and model_name == "Random Forest" and tune_random_forest_gridsearch is not None:
                 print("  -> Tinh chỉnh Random Forest bằng GridSearchCV (48 tổ hợp, cv=3, trên dữ liệu THẬT chưa CTGAN/SMOTE)...")
                 # Dùng X_train_raw/y_train_raw (CHƯA cân bằng) - xem docstring hàm này. `base_model`
                 # trong `tune_random_forest_gridsearch()` đã tự set `class_weight="balanced_subsample"`
@@ -2245,7 +2255,7 @@ def train_and_evaluate_models(
                 }
                 export_hyperparameter_tuning_results(tuning_results)
                 print(f"     Best params: {grid_result['best_params']} | CV F1-Macro={grid_result['best_cv_f1_macro']:.4f}")
-            elif model_name == "XGBoost" and tune_xgboost_optuna is not None:
+            elif tune_hyperparameters and model_name == "XGBoost" and tune_xgboost_optuna is not None:
                 print("  -> Tinh chỉnh XGBoost bằng Optuna (30 trial, TPE, trên dữ liệu THẬT chưa CTGAN/SMOTE)...")
                 # Tách riêng 15% làm tập validation CHỈ để chọn siêu tham số - LẤY TỪ X_train_raw/
                 # y_train_raw (CHƯA cân bằng, xem docstring hàm này) để tách train/validation LUÔN xảy
@@ -3240,6 +3250,209 @@ def run_training_pipeline(selected_models_list: list[str], balancing_method: str
         "leaderboard": leaderboard_df.to_dict(orient="records"),
         "best_overall_model_name": best_model_name,
     }
+
+
+# ==================================================================================================
+# TIME SERIES CROSS-VALIDATION (walk-forward / rolling window)
+# ==================================================================================================
+# GÓP Ý CỦA GVPB (giảng viên phản biện đề cương): "Việc so sánh 16 mô hình là tương đối rộng; nên tập
+# trung vào một số mô hình phù hợp và thiết kế kiểm định chéo theo chuỗi thời gian." Pipeline chính
+# (`run_training_pipeline()`) chỉ tách train/test ĐÚNG 1 LẦN (80% đầu/20% cuối theo thời gian) - kết
+# quả F1 phụ thuộc hoàn toàn vào đúng giai đoạn 20% cuối đó rơi vào mùa mưa hay mùa khô, năm nhiều hay
+# ít ngập - không biết model có ổn định qua NHIỀU giai đoạn khác nhau hay chỉ "may" trúng 1 khúc dễ.
+#
+# Time Series CV giải quyết bằng cách tách NHIỀU LẦN theo kiểu "cửa sổ mở rộng dần" (expanding window,
+# giống `sklearn.model_selection.TimeSeriesSplit`), fold sau LUÔN có train dài hơn fold trước và test
+# LUÔN nằm ở tương lai so với train của chính fold đó - không bao giờ dùng tương lai để dự đoán quá khứ
+# (giữ đúng nguyên tắc chronological đã áp dụng cho pipeline chính).
+#
+# PHẠM VI: chỉ áp dụng cho model DẠNG BẢNG (tabular_classifier) ở bản đầu này - model dạng chuỗi (LSTM/
+# GRU/Hybrid) đã có tính "ổn định thời gian" một phần nhờ cửa sổ trượt 7 ngày, và việc dựng lại sequence
+# dataset đúng ranh giới từng fold + train lại Keras nhiều lần sẽ tốn thời gian rất lớn - để dành cho
+# 1 việc riêng nếu cần sau này. Khi gọi hàm bên dưới với model dạng chuỗi trong danh sách, hàm sẽ tự bỏ
+# qua (skip) và báo rõ trong log thay vì âm thầm chạy sai hoặc crash.
+# ==================================================================================================
+def generate_chronological_cv_folds(df: pd.DataFrame, n_splits: int = 4):
+    """
+    Sinh `n_splits` cặp (train_df, test_df) kiểu "cửa sổ mở rộng dần" (expanding window) cho Time Series
+    Cross-Validation, tách RIÊNG cho TỪNG địa phương rồi mới gộp lại theo đúng fold - tránh việc 1 fold
+    vô tình lấy dữ liệu tương lai của địa phương A làm quá khứ chung với địa phương B (2 địa phương có
+    độ dài lịch sử dữ liệu khác nhau).
+
+    Cách chia: dữ liệu mỗi địa phương (đã sắp xếp theo thời gian) được cắt thành `n_splits + 1` đoạn
+    bằng nhau (đoạn cuối nhận phần dư nếu chia không chẵn). Fold thứ k (0-indexed) dùng (k+1) đoạn ĐẦU
+    làm train, đoạn thứ (k+2) làm test - giống hệt `sklearn.model_selection.TimeSeriesSplit`:
+
+        Fold 0: Train [đoạn 0]           -> Test [đoạn 1]
+        Fold 1: Train [đoạn 0, 1]        -> Test [đoạn 2]
+        Fold 2: Train [đoạn 0, 1, 2]     -> Test [đoạn 3]
+        ...
+
+    Địa phương nào không đủ dữ liệu cho `n_splits` (tối thiểu `2 * (n_splits + 1)` dòng) bị bỏ qua hẳn
+    (in cảnh báo ra log), không tham gia bất kỳ fold nào - tránh 1 địa phương ít dữ liệu làm hỏng toàn
+    bộ fold đó bằng cách chỉ đóng góp 1-2 dòng không đại diện.
+    """
+    per_location_segments: list[list[pd.DataFrame]] = []
+    for location_name, location_df in df.groupby(LOCATION_COL):
+        location_df = location_df.sort_values(TIME_COL).reset_index(drop=True)
+        min_rows_needed = 2 * (n_splits + 1)
+        if len(location_df) < min_rows_needed:
+            print(
+                f"[Time Series CV] Bỏ qua địa phương {location_name}: chỉ có {len(location_df)} dòng, "
+                f"cần tối thiểu {min_rows_needed} cho {n_splits} fold."
+            )
+            continue
+        segment_size = len(location_df) // (n_splits + 1)
+        segments = [
+            location_df.iloc[i * segment_size : (i + 1) * segment_size] for i in range(n_splits)
+        ]
+        segments.append(location_df.iloc[n_splits * segment_size :])  # đoạn cuối nhận phần dư
+        per_location_segments.append(segments)
+
+    if not per_location_segments:
+        raise ValueError(
+            f"Không có địa phương nào đủ dữ liệu cho {n_splits} fold Time Series CV."
+        )
+
+    for fold_index in range(n_splits):
+        train_parts = [
+            pd.concat(segments[: fold_index + 1], ignore_index=True) for segments in per_location_segments
+        ]
+        test_parts = [segments[fold_index + 1] for segments in per_location_segments]
+        train_df = pd.concat(train_parts, ignore_index=True)
+        test_df = pd.concat(test_parts, ignore_index=True)
+        yield fold_index, train_df, test_df
+
+
+def export_time_series_cv_results(cv_summary: dict, fold_metadata: list[dict]) -> None:
+    """Lưu kết quả Time Series CV ra JSON để `app.py` đọc và hiển thị bảng F1 trung bình ± độ lệch
+    chuẩn qua các fold - xem `render_time_series_cv_section()` trong `app.py`."""
+    TIME_SERIES_CV_RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "fold_metadata": fold_metadata,
+        "results": cv_summary,
+    }
+    with TIME_SERIES_CV_RESULTS_PATH.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2)
+
+
+def run_time_series_cv_pipeline(
+    selected_models_list: list[str],
+    n_splits: int = 4,
+    balancing_method: str = "auto",
+) -> dict:
+    """
+    Chạy Time Series Cross-Validation (walk-forward) cho các model DẠNG BẢNG trong `selected_models_
+    list` - xem giải thích đầy đủ ở khối comment phía trên. Model dạng chuỗi (LSTM/GRU/Hybrid/ARIMA/
+    SARIMA) trong danh sách sẽ bị BỎ QUA (không hỗ trợ ở bản này) - in rõ trong log, không crash.
+
+    KHÔNG chạy GridSearchCV/Optuna ở từng fold (`tune_hyperparameters=False` khi gọi
+    `train_and_evaluate_models()`) - dùng tham số cố định đã regularize sẵn trong `build_model_
+    registry()` cho MỌI fold, để tổng thời gian chạy không bị nhân thêm `n_splits` lần. Việc tinh
+    chỉnh siêu tham số THẬT vẫn chỉ chạy 1 lần duy nhất ở `run_training_pipeline()` chính.
+
+    Trả về `cv_summary`: `{model_name: {"f1_macro_mean", "f1_macro_std", "n_folds", "fold_scores"}}`.
+    """
+    model_registry = build_model_registry()
+    selected_models_all = filter_selected_models(model_registry, selected_models_list)
+
+    tabular_models = {
+        name: config for name, config in selected_models_all.items() if config["kind"] == "tabular_classifier"
+    }
+    skipped_models = [name for name in selected_models_all if name not in tabular_models]
+    if skipped_models:
+        print(
+            f"[Time Series CV] Bỏ qua {len(skipped_models)} model không phải dạng bảng (chưa hỗ trợ ở "
+            f"bản này): {skipped_models}"
+        )
+    if not tabular_models:
+        raise ValueError(
+            "Không có model dạng bảng nào trong danh sách đã chọn - Time Series CV cần ít nhất 1 model "
+            "dạng bảng (Linear/Polynomial/Random Forest/KNN/SVC/AdaBoost/XGBoost/LightGBM/CatBoost)."
+        )
+
+    raw_df = load_and_concatenate_csvs()
+    daily_feature_df = build_daily_feature_dataset(raw_df)
+    labeled_daily_df = create_multiclass_flood_label(daily_feature_df)
+    modeling_df = preprocess_features(labeled_daily_df)
+
+    fold_f1_scores: dict[str, list[float]] = {name: [] for name in tabular_models}
+    fold_metadata: list[dict] = []
+
+    print(f"\n=== TIME SERIES CROSS-VALIDATION ({n_splits} fold, walk-forward) ===")
+    for fold_index, train_raw, test_raw in generate_chronological_cv_folds(modeling_df, n_splits=n_splits):
+        train_df = apply_time_lag_target_shift(train_raw)
+        test_df = apply_time_lag_target_shift(test_raw)
+        if train_df.empty or test_df.empty:
+            print(f"[Time Series CV] Fold {fold_index + 1}/{n_splits}: rỗng sau khi shift T+1, bỏ qua.")
+            continue
+
+        print(
+            f"\n--- Fold {fold_index + 1}/{n_splits} | Train: {len(train_df)} dòng "
+            f"({train_df[TIME_COL].min().date()} -> {train_df[TIME_COL].max().date()}) | "
+            f"Test: {len(test_df)} dòng ({test_df[TIME_COL].min().date()} -> {test_df[TIME_COL].max().date()}) ---"
+        )
+
+        X_train = build_feature_frame(train_df)
+        y_train = train_df[TARGET_COL].astype(int)
+        X_test = build_feature_frame(test_df)
+        y_test = test_df[TARGET_COL].astype(int)
+
+        X_train_scaled, X_test_scaled, _scaler = scale_features(X_train, X_test)
+        balancing_method_used = resolve_balancing_method(balancing_method)
+        X_train_balanced, y_train_balanced = balance_training_data(
+            X_train_scaled, y_train, balancing_method=balancing_method_used
+        )
+
+        _trained_models, evaluation_results, _roc_cache = train_and_evaluate_models(
+            tabular_models,
+            X_train_balanced,
+            y_train_balanced,
+            X_test_scaled,
+            y_test,
+            pd.DataFrame(),  # daily_df: không cần vì tabular_models không chứa model dạng chuỗi
+            balancing_method_used,
+            X_train_scaled,
+            y_train,
+            tune_hyperparameters=False,
+        )
+
+        fold_metadata.append(
+            {
+                "fold": fold_index + 1,
+                "train_rows": len(X_train),
+                "test_rows": len(X_test),
+                "train_end": str(train_df[TIME_COL].max().date()),
+                "test_end": str(test_df[TIME_COL].max().date()),
+            }
+        )
+        for model_name, metrics in evaluation_results.items():
+            f1_value = metrics.get("f1_macro")
+            if f1_value is not None:
+                fold_f1_scores[model_name].append(float(f1_value))
+            print(f"     {model_name}: F1-Macro = {f1_value}")
+
+    cv_summary: dict[str, dict] = {}
+    for model_name, f1_scores in fold_f1_scores.items():
+        if not f1_scores:
+            continue
+        scores_array = np.array(f1_scores)
+        cv_summary[model_name] = {
+            "f1_macro_mean": float(scores_array.mean()),
+            "f1_macro_std": float(scores_array.std()),
+            "n_folds": len(f1_scores),
+            "fold_scores": f1_scores,
+        }
+
+    export_time_series_cv_results(cv_summary, fold_metadata)
+    print("\n=== TIME SERIES CV HOÀN TẤT ===")
+    for model_name, summary in sorted(cv_summary.items(), key=lambda item: item[1]["f1_macro_mean"], reverse=True):
+        print(
+            f"  {model_name}: F1-Macro = {summary['f1_macro_mean']:.4f} ± {summary['f1_macro_std']:.4f} "
+            f"(qua {summary['n_folds']} fold)"
+        )
+    return cv_summary
 
 
 def main() -> None:

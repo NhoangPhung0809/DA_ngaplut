@@ -74,6 +74,7 @@ CTGAN_BEFORE_PATH = BASE_DIR / "data" / "data_before_ctgan.csv"
 CTGAN_AFTER_PATH = BASE_DIR / "data" / "data_after_ctgan.csv"
 CTGAN_DISTRIBUTION_PATH = BASE_DIR / "data" / "ctgan_class_distribution.json"
 HYPERPARAMETER_TUNING_RESULTS_PATH = BASE_DIR / "data" / "hyperparameter_tuning_results.json"
+TIME_SERIES_CV_RESULTS_PATH = BASE_DIR / "data" / "time_series_cv_results.json"
 CACHE_DIR = BASE_DIR / "cache"
 TRAINING_WORKER_PATH = BASE_DIR / "training_worker.py"
 TRAINING_STATUS_PATH = CACHE_DIR / "training_status.json"
@@ -1827,6 +1828,128 @@ def render_hyperparameter_tuning_section() -> None:
         st.markdown("---")
 
 
+@st.cache_data(show_spinner=False)
+def _load_time_series_cv_results_cached(results_file_mtime: float) -> dict:
+    """Đọc `data/time_series_cv_results.json` - xem `_load_hyperparameter_tuning_results_cached()` để
+    biết lý do dùng mtime làm cache key (tự làm mới khi file đổi)."""
+    with TIME_SERIES_CV_RESULTS_PATH.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def load_time_series_cv_results() -> dict | None:
+    if not TIME_SERIES_CV_RESULTS_PATH.exists():
+        return None
+    return _load_time_series_cv_results_cached(TIME_SERIES_CV_RESULTS_PATH.stat().st_mtime)
+
+
+def render_time_series_cv_section() -> None:
+    """
+    Khối "Kiểm định chéo theo chuỗi thời gian (Time Series CV)" - GÓP Ý CỦA GVPB đề cương: "so sánh 16
+    mô hình là tương đối rộng; nên tập trung vào một số mô hình phù hợp và thiết kế kiểm định chéo theo
+    chuỗi thời gian" - thay vì tách train/test ĐÚNG 1 LẦN (80/20 theo thời gian) như pipeline huấn
+    luyện chính, tách NHIỀU LẦN kiểu "cửa sổ mở rộng dần" (walk-forward, xem `generate_chronological_
+    cv_folds()` trong `analyze_and_train.py`) để biết model có ổn định qua nhiều giai đoạn thời gian
+    khác nhau hay chỉ "may" trúng 1 khúc test dễ.
+
+    CHỈ hỗ trợ model DẠNG BẢNG (tabular) - xem lý do trong docstring `run_time_series_cv_pipeline()`.
+    Chạy TRỰC TIẾP (blocking, có `st.spinner`) thay vì qua background worker như huấn luyện chính - vì
+    mặc định KHÔNG chạy GridSearchCV/Optuna ở từng fold (đã tắt để tránh nhân thời gian lên gấp
+    `n_splits` lần) nên thường đủ nhanh để chờ trực tiếp trên UI.
+    """
+    st.caption(
+        "Đánh giá model qua NHIỀU giai đoạn thời gian (walk-forward), không chỉ 1 lần chia train/test "
+        "duy nhất - trả lời đúng góp ý của GVPB đề cương. Chỉ áp dụng cho model dạng bảng."
+    )
+
+    train_module = get_train_module()
+    tabular_model_names = [
+        name
+        for name in get_all_model_names()
+        if getattr(train_module, "build_model_registry", None) is None
+        or train_module.build_model_registry().get(name, {}).get("kind") == "tabular_classifier"
+    ]
+
+    with st.form("time_series_cv_form"):
+        selected_models = st.multiselect(
+            "Chọn model để kiểm định chéo (nên chọn ít, vài model phù hợp thay vì cả 16 - đúng góp ý GVPB)",
+            options=tabular_model_names,
+            default=tabular_model_names[:3] if len(tabular_model_names) >= 3 else tabular_model_names,
+            key="time_series_cv_model_select",
+        )
+        n_splits_col, balancing_col = st.columns(2)
+        with n_splits_col:
+            n_splits = st.number_input(
+                "Số fold (n_splits)", min_value=2, max_value=8, value=4, step=1, key="time_series_cv_n_splits"
+            )
+        with balancing_col:
+            balancing_method = st.selectbox(
+                "Phương pháp cân bằng dữ liệu",
+                options=["auto", "smote", "gan"],
+                index=0,
+                key="time_series_cv_balancing_method",
+                help="'smote' chạy nhanh hơn nhiều so với 'gan' (CTGAN) - khuyến nghị dùng 'smote' khi "
+                "thử nhiều fold, vì CTGAN sẽ chạy lại từ đầu ở MỖI fold.",
+            )
+        submitted = st.form_submit_button("Chạy Time Series CV", use_container_width=True)
+
+    if submitted:
+        if not selected_models:
+            st.warning("Vui lòng chọn ít nhất 1 model dạng bảng.")
+        else:
+            try:
+                with st.spinner(f"Đang chạy Time Series CV ({n_splits} fold) cho {len(selected_models)} model..."):
+                    train_module.run_time_series_cv_pipeline(
+                        selected_models, n_splits=int(n_splits), balancing_method=balancing_method
+                    )
+                st.cache_data.clear()
+                st.success("Đã chạy xong Time Series CV - kết quả hiển thị bên dưới.")
+            except Exception as exc:
+                st.error(f"Lỗi khi chạy Time Series CV: {exc}")
+
+    payload = load_time_series_cv_results()
+    if payload is None:
+        st.info("Chưa có kết quả Time Series CV nào - chọn model rồi bấm 'Chạy Time Series CV' ở trên.")
+        return
+
+    results = payload.get("results", {})
+    if not results:
+        st.info("File kết quả tồn tại nhưng chưa có model nào được đánh giá.")
+        return
+
+    st.caption(f"Kết quả gần nhất: {payload.get('generated_at', 'không rõ thời điểm')}.")
+
+    summary_rows = [
+        {
+            "Model": model_name,
+            "F1-Macro (trung bình)": summary["f1_macro_mean"],
+            "Độ lệch chuẩn": summary["f1_macro_std"],
+            "Số fold": summary["n_folds"],
+        }
+        for model_name, summary in results.items()
+    ]
+    summary_df = pd.DataFrame(summary_rows).sort_values("F1-Macro (trung bình)", ascending=False).reset_index(drop=True)
+    summary_df.insert(0, "Xếp hạng", range(1, len(summary_df) + 1))
+    render_styled_table(
+        build_contrast_styler(
+            summary_df,
+            numeric_formats={"F1-Macro (trung bình)": "{:.4f}", "Độ lệch chuẩn": "{:.4f}"},
+            rank_highlight=True,
+        ),
+        height=min(120 + 38 * len(summary_df), 400),
+    )
+
+    fold_metadata = payload.get("fold_metadata", [])
+    if fold_metadata:
+        with st.expander("Chi tiết từng fold (phạm vi thời gian train/test)", expanded=False):
+            st.dataframe(pd.DataFrame(fold_metadata), use_container_width=True, hide_index=True)
+
+    render_chart_discussion(
+        "Độ lệch chuẩn (std) thấp giữa các fold nghĩa là model ổn định qua nhiều giai đoạn thời gian "
+        "khác nhau (không phải 'may mắn' trúng 1 khúc test dễ) - đáng tin cậy hơn 1 con số F1 đơn lẻ "
+        "từ cách chia train/test 1 lần duy nhất."
+    )
+
+
 def render_training_controls_panel() -> None:
     """
     Cụm điều khiển MLOps: chọn mô hình, chạy huấn luyện/tinh chỉnh NỀN (background) và xem log.
@@ -1990,6 +2113,9 @@ def render_preprocessing_training_tab() -> None:
         )
         render_hyperparameter_tuning_section()
         render_training_controls_panel()
+
+    with st.expander("Kiểm định chéo theo chuỗi thời gian (Time Series CV)", expanded=False):
+        render_time_series_cv_section()
 
 
 # ==================================================================================================
@@ -3756,14 +3882,12 @@ def render_weather_comparison_section() -> None:
             )
 
 
-# TẠM TẮT `@st.fragment(run_every=LIVE_TAB_AUTO_REFRESH_INTERVAL)` ĐỂ TEST (chưa xoá hẳn - xem lại
-# ngày comment ra nếu quyết định giữ tắt luôn): nghi ngờ cơ chế tự làm mới định kỳ này là nguyên nhân
-# khiến WebSocket qua Cloudflare Tunnel bị ngắt/reconnect liên tục khi trang đang mở im lặng (đã quan
-# sát: bị ngắt trong <1.5 phút dù không train, trong khi TRƯỚC KHI có tính năng này 1 buổi họp Meet
-# chiếu màn hình 45 phút liên tục lại không hề bị). Nếu tắt dòng dưới mà hết bị ngắt nhanh -> xác nhận
-# đúng nguyên nhân, cân nhắc bỏ hẳn `run_every` hoặc đổi cơ chế khác (nút "Dự báo lại" thủ công đã có
-# sẵn vẫn hoạt động bình thường dù không có dòng này).
-# @st.fragment(run_every=LIVE_TAB_AUTO_REFRESH_INTERVAL)
+# ĐÃ TEST TẠM TẮT `run_every` để xác định nguyên nhân trang tự "Connecting..." khi im lặng - kết quả:
+# tắt fragment này KHÔNG hết bị ngắt (DevTools vẫn thấy nhiều kết nối WebSocket "stream" tách biệt sau
+# ~1-2 phút idle) => KHÔNG PHẢI do fragment này gây ra, mà do tầng Cloudflare Tunnel tự ngắt WebSocket
+# im lặng (khắc phục ở phía hạ tầng: cấu hình `originRequest.keepAliveTimeout` trong config.yml của
+# `cloudflared`, không phải sửa ở đây) - khôi phục lại `run_every` như cũ.
+@st.fragment(run_every=LIVE_TAB_AUTO_REFRESH_INTERVAL)
 def render_forecast_tab() -> None:
     """
     Nội dung TRANG ĐẦU TIÊN của app - bảng dự báo nguy cơ ngập 14 ngày tới (T đến T+13) cho toàn bộ
