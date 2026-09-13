@@ -350,7 +350,26 @@ def compute_train_only_medians(
 
 
 def create_multiclass_flood_label(df: pd.DataFrame) -> pd.DataFrame:
-    """Tạo nhãn 3 lớp dựa trên luật chuyên gia."""
+    """
+    Tạo nhãn 3 lớp dựa trên luật chuyên gia.
+
+    NGƯỠNG MƯA (rain>25/50mm) dựa theo phân cấp mưa 24h CHÍNH THỨC của khí tượng Việt Nam/WMO: "mưa
+    vừa" 16-50mm, "mưa to" 51-100mm, "mưa rất to" >100mm - ngưỡng ở đây thấp hơn "mưa to" chính thức vì
+    đây là NGUY CƠ NGẬP CỤC BỘ (phụ thuộc thêm địa hình trũng/triều cường của Huế), không phải phân cấp
+    cường độ mưa thuần tuý toàn quốc.
+
+    THÊM MỚI - `rain_3day` (MƯA TÍCH LUỹ 3 NGÀY, cột `RAIN_ROLLING_3D_COL`): TRƯỚC ĐÂY nhãn chỉ nhìn
+    ĐÚNG 1 NGÀY, bỏ sót trường hợp mưa dồn dập nhiều ngày liên tiếp (mỗi ngày riêng lẻ không cực đoan)
+    vẫn đủ làm đất bão hoà nước gây ngập - GÓP Ý THẬT đã nhận được. Dùng ngưỡng 50mm/100mm cho 3 ngày
+    cộng dồn, LẤY THEO ĐÚNG mốc "mưa vừa"/"mưa rất to" 24h chính thức ở trên (áp cho tổng 3 ngày thay
+    vì 1 ngày) - có căn cứ, không tự đặt tuỳ tiện.
+
+    KHÔNG PHẢI RÒ RỈ DỮ LIỆU: nhãn ngày T+1 dùng `rain_3day` của T+1 (tổng mưa ngày T-1, T, T+1) - lúc
+    suy luận, model (đặc trưng ngày T) chỉ "biết trước" 2/3 phần cửa sổ đó (T-1, T qua các cột lag/tích
+    luỹ của CHÍNH ngày T) - KHÔNG biết phần mưa thật của ngày T+1 (phần cần dự đoán) - giống hệt nguyên
+    tắc dùng xu hướng/quán tính thời tiết trong dự báo thật, khác bản chất với lỗi rò rỉ đã sửa trước
+    đó (khi đó model thấy TRỌN VẸN 100% giá trị dùng để tính nhãn, không phải chỉ 2/3).
+    """
     labeled_df = df.copy()
 
     # Dùng median TÍNH RIÊNG trên phần dữ liệu sẽ thuộc tập TRAIN để điền NaN - xem docstring
@@ -363,17 +382,20 @@ def create_multiclass_flood_label(df: pd.DataFrame) -> pd.DataFrame:
         labeled_df[column] = labeled_df[column].fillna(train_only_medians[column])
 
     rain = labeled_df["Lượng_mưa_mm"].fillna(0)
+    rain_3day = labeled_df[RAIN_ROLLING_3D_COL].fillna(0)
     soil = labeled_df["Độ_ẩm_đất"].fillna(0)
     tide = labeled_df["Chiều_cao_triều_m"].fillna(0)
 
     heavy_flood_mask = (
         (rain > 50)
+        | (rain_3day > 100)
         | ((rain > 30) & (soil > 0.45))
         | ((rain > 20) & (soil > 0.40) & (tide > 1.50))
         | (tide > 2.50)
     )
     light_flood_mask = (
         (rain > 25)
+        | (rain_3day > 50)
         | ((rain > 15) & (soil > 0.30))
         | ((rain > 10) & (tide > 1.20))
     )

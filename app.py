@@ -2030,7 +2030,11 @@ def render_preprocessing_training_tab() -> None:
             except Exception as exc:
                 st.error(f"Không nạp/làm sạch được dữ liệu: {exc}")
             else:
-                st.dataframe(cleaned_df.head(20), use_container_width=True, hide_index=True)
+                # `.head(20)` trước đây chỉ hiện đúng 1 địa phương (dữ liệu sort theo [Địa phương,
+                # Thời_gian] nên 1 địa phương chiếm liền hàng nghìn dòng đầu) - lấy 4 dòng ĐẦU của MỖI
+                # địa phương (5 địa phương x 4 = 20 dòng) để bảng xem trước thấy xen kẽ đủ cả 5.
+                preview_df = cleaned_df.groupby("Địa phương", sort=False).head(4)
+                st.dataframe(preview_df, use_container_width=True, hide_index=True)
                 render_chart_discussion(
                     f"Bảng trên là {len(cleaned_df):,} dòng - dữ liệu THEO NGÀY (đã gộp từ dữ liệu theo "
                     "giờ gốc, đúng granularity model thật sự huấn luyện) sau khi qua "
