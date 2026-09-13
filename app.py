@@ -1862,8 +1862,7 @@ def render_time_series_cv_section() -> None:
     """
     st.caption(
         "Đánh giá model qua NHIỀU giai đoạn thời gian (walk-forward), không chỉ 1 lần chia train/test "
-        "duy nhất - trả lời đúng góp ý của GVPB đề cương. Tự chạy cùng lúc bấm 'Bắt đầu Huấn luyện Nền' "
-        "bên dưới cho các model dạng bảng trong danh sách đã chọn, không cần thao tác gì thêm ở đây."
+        "duy nhất."
     )
 
     payload = load_time_series_cv_results()
