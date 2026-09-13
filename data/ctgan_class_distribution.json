@@ -1,0 +1,30 @@
+{
+  "method_used": "CTGAN",
+  "status": "before_exported",
+  "error_detail": null,
+  "target_column": "Nguy_cơ_ngập",
+  "feature_columns": [
+    "Nhiệt_độ_C",
+    "Độ_ẩm_%",
+    "Lượng_mưa_mm",
+    "Độ_ẩm_đất",
+    "Chiều_cao_triều_m",
+    "Lượng_mưa_mm_lag1",
+    "Lượng_mưa_mm_lag2",
+    "Lượng_mưa_tích_luỹ_3_ngày"
+  ],
+  "before": {
+    "total_rows": 14865,
+    "sample_rows": 1000,
+    "class_distribution": {
+      "0": 12850,
+      "1": 1133,
+      "2": 882
+    }
+  },
+  "after": {
+    "total_rows": null,
+    "sample_rows": null,
+    "class_distribution": {}
+  }
+}

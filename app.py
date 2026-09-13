@@ -33,6 +33,7 @@ from dotenv import load_dotenv
 from streamlit_folium import st_folium
 
 from shared_constants import FEATURE_COLS as _SHARED_FEATURE_COLS
+from shared_constants import RAIN_LAG1_COL, RAIN_LAG2_COL, RAIN_ROLLING_3D_COL
 
 # Tải biến môi trường từ file .env nếu có (ví dụ TOMTOM_API_KEY).
 load_dotenv()
@@ -384,6 +385,12 @@ LIVE_TAB_AUTO_REFRESH_INTERVAL = "10m"
 # Forecast API hỗ trợ tối đa 16 ngày (forecast_days<=16) nên 14 ngày vẫn nằm trong giới hạn miễn phí.
 FORECAST_DAYS_AHEAD = 14
 DAY_LABELS = ["T (Hôm nay)"] + [f"T+{offset}" for offset in range(1, FORECAST_DAYS_AHEAD)]
+
+# Số ngày QUÁ KHỨ THẬT cần lấy thêm để tính các cột lag mưa (RAIN_LAG1_COL/RAIN_LAG2_COL/
+# RAIN_ROLLING_3D_COL, xem shared_constants.py) khi suy luận - PHẢI khớp đúng độ trễ tối đa mà các cột
+# lag đó cần (lag2 = 2 ngày trước) để KHÔNG có dòng nào bị NaN sau khi tính lag, kể cả ngày dự báo ĐẦU
+# TIÊN (Ngày T/hôm nay).
+RAIN_LAG_FETCH_DAYS = 2
 
 # Khóa (lock) BẢO VỆ lệnh gọi `.predict()` của model Keras (`keras_sequence`/`hybrid_lstm_xgboost`)
 # khi dự báo 5 địa phương chạy SONG SONG bằng ThreadPoolExecutor (xem `_compute_forecast_4day_result()`
@@ -2913,9 +2920,20 @@ def predict_flood_class(deployed_model: dict, location_df: pd.DataFrame, feature
     Suy luận nhãn nguy cơ ngập (0 = An toàn, 1 = Ngập nhẹ, 2 = Ngập nặng) mới nhất bằng model THẬT
     đã triển khai, tự động chọn đúng luồng xử lý theo `model_type` (xem `load_deployment_model()`
     để biết chi tiết 3 loại model: sklearn_tabular / keras_sequence / hybrid_lstm_xgboost).
+
+    `location_df` ở đây là DÒNG THÔ (theo GIỜ) đọc thẳng từ `data/historical/*.csv` qua
+    `read_csv_tail()` - vốn dùng dòng giờ GẦN NHẤT làm xấp xỉ cho "đặc trưng hôm nay" (đơn giản hoá đã
+    có TỪ TRƯỚC, không phải điểm mới ở đây). `feature_columns` giờ có thể chứa 3 cột lag mưa
+    (RAIN_LAG1_COL/RAIN_LAG2_COL/RAIN_ROLLING_3D_COL) mà CSV thô KHÔNG có sẵn - dùng
+    `add_rain_lag_features_inference()` để tính (lag theo ĐƠN VỊ DÒNG có sẵn trong `location_df`, không
+    ép về đúng "ngày" như lúc huấn luyện - xấp xỉ chấp nhận được, nhất quán với việc cả hàm này vốn đã
+    dùng 1 dòng giờ thay cho 1 dòng ngày; quan trọng là KHÔNG CRASH vì thiếu cột thay vì chính xác tuyệt
+    đối, người vận hành vẫn cần thấy trạng thái thay vì lỗi "Không xác định").
     """
     model_type = deployed_model["model_type"]
     scaler = deployed_model["scaler"]
+    if any(lag_col in feature_columns for lag_col in (RAIN_LAG1_COL, RAIN_LAG2_COL, RAIN_ROLLING_3D_COL)):
+        location_df = add_rain_lag_features_inference(location_df.sort_values("Thời_gian"))
 
     if model_type == "sklearn_tabular":
         latest_features = location_df[feature_columns].iloc[[-1]]
@@ -3180,6 +3198,29 @@ def _fetch_daily_weather_and_tide(
     return daily_weather, all_dates, tide_heights
 
 
+def add_rain_lag_features_inference(daily_features_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tính 3 cột lag/tích luỹ mưa (`RAIN_LAG1_COL`/`RAIN_LAG2_COL`/`RAIN_ROLLING_3D_COL`) trên
+    `daily_features_df` lúc SUY LUẬN - bản sinh đôi của phần tính lag trong
+    `analyze_and_train.py::build_daily_feature_dataset()` lúc HUẤN LUYỆN, PHẢI cho ra cùng công thức
+    (`.shift(1)`/`.shift(2)`/`.rolling(3, min_periods=1).sum()`) để scaler/model không suy luận sai vì
+    lệch cách tính giữa 2 giai đoạn.
+
+    Khác với lúc huấn luyện (nhiều địa phương, cần `groupby`), ở đây `daily_features_df` CHỈ có 1 địa
+    phương/1 lần gọi (đã lọc theo `lat, lon` từ `_fetch_daily_weather_and_tide()`) và các dòng đã sẵn
+    THEO ĐÚNG THỨ TỰ THỜI GIAN (Open-Meteo trả về `daily.time` tăng dần) nên không cần `groupby`.
+
+    Bên gọi PHẢI đảm bảo `daily_features_df` có đủ `RAIN_LAG_FETCH_DAYS` dòng QUÁ KHỨ THẬT ở ĐẦU
+    DataFrame (trước ngày dự báo đầu tiên) - xem `RAIN_LAG_FETCH_DAYS` - để 2 cột lag KHÔNG bị NaN ở
+    ngay ngày dự báo đầu tiên (Ngày T/hôm nay).
+    """
+    result_df = daily_features_df.copy()
+    result_df[RAIN_LAG1_COL] = result_df["Lượng_mưa_mm"].shift(1)
+    result_df[RAIN_LAG2_COL] = result_df["Lượng_mưa_mm"].shift(2)
+    result_df[RAIN_ROLLING_3D_COL] = result_df["Lượng_mưa_mm"].rolling(window=3, min_periods=1).sum()
+    return result_df
+
+
 def _build_forecast_row(
     day_label: str, forecast_date: pd.Timestamp, rain_mm: float, predicted_class: int, temperature_c: float
 ) -> dict:
@@ -3187,8 +3228,9 @@ def _build_forecast_row(
     báo (°C)']) - DÙNG CHUNG cho `predict_4_days_forecast()` và `predict_days_ahead_forecast_sequence()`
     để đảm bảo định dạng ngày/nhãn nhất quán giữa 2 hàm (trước đây mỗi hàm tự viết riêng 1 bản).
 
-    `temperature_c` được thêm sau (ban đầu chỉ có mưa/nhãn ngập) - phục vụ Tab "Biểu đồ dự báo" cần cả
-    nhiệt độ lẫn lượng mưa theo ngày (dữ liệu này đã có sẵn trong `daily_features_df` ở cả 2 hàm gọi,
+    `temperature_c` được thêm sau (ban đầu chỉ có mưa/nhãn ngập) - phục vụ biểu đồ nhiệt độ/lượng mưa
+    trong Tab "Dự báo 14 ngày tới" cần cả nhiệt độ lẫn lượng mưa theo ngày (dữ liệu này đã có sẵn trong
+    `daily_features_df` ở cả 2 hàm gọi,
     chỉ là trước đây bị bỏ qua khi đóng gói dòng kết quả)."""
     return {
         "Ngày": f"{forecast_date.strftime('%d/%m/%Y')} ({day_label})",
@@ -3208,11 +3250,16 @@ def predict_4_days_forecast(lat: float, lon: float, model, scaler) -> pd.DataFra
     gọi API/model lỗi (đã được xử lý gracefully bằng try-except, không raise exception ra ngoài).
     """
     # BƯỚC A - FETCH DATA: xem docstring `_fetch_daily_weather_and_tide()` (giải thích đầy đủ cách xử
-    # lý cửa sổ thời gian datetime, đúng chuẩn báo cáo luận văn).
-    fetch_result = _fetch_daily_weather_and_tide(lat, lon, forecast_days=FORECAST_DAYS_AHEAD, past_days=0)
+    # lý cửa sổ thời gian datetime, đúng chuẩn báo cáo luận văn). `past_days=RAIN_LAG_FETCH_DAYS` (thay
+    # vì 0 như trước) - cần thêm 2 ngày QUÁ KHỨ THẬT trước Ngày T để tính cột lag mưa cho CHÍNH Ngày T
+    # (xem `add_rain_lag_features_inference()`), nếu không cột lag của Ngày T sẽ bị NaN.
+    fetch_result = _fetch_daily_weather_and_tide(
+        lat, lon, forecast_days=FORECAST_DAYS_AHEAD, past_days=RAIN_LAG_FETCH_DAYS
+    )
     if fetch_result is None:
         return None
-    daily_weather, forecast_dates, tide_heights = fetch_result
+    daily_weather, all_dates, tide_heights = fetch_result
+    total_days_fetched = RAIN_LAG_FETCH_DAYS + FORECAST_DAYS_AHEAD
 
     # ==============================================================================================
     # BƯỚC B - PREPROCESSING: gộp toàn bộ đặc trưng vào 1 DataFrame theo ĐÚNG THỨ TỰ CỘT mà `scaler`
@@ -3221,15 +3268,23 @@ def predict_4_days_forecast(lat: float, lon: float, model, scaler) -> pd.DataFra
     # Bỏ qua bước này sẽ khiến model suy luận sai nghiêm trọng dù code chạy không lỗi.
     # ==============================================================================================
     try:
+        # Dựng trên TOÀN BỘ `total_days_fetched` ngày (gồm cả RAIN_LAG_FETCH_DAYS ngày quá khứ) để
+        # `add_rain_lag_features_inference()` có đủ dữ liệu tính lag cho ngày dự báo ĐẦU TIÊN, rồi mới
+        # CẮT về đúng FORECAST_DAYS_AHEAD dòng (bỏ các dòng quá khứ chỉ dùng để tính lag, không phải
+        # kết quả dự báo cần hiển thị) - cùng cách làm với `predict_days_ahead_forecast_sequence()`.
         daily_features_df = pd.DataFrame(
             {
-                "Nhiệt_độ_C": daily_weather["temperature_2m_mean"][:FORECAST_DAYS_AHEAD],
-                "Độ_ẩm_%": daily_weather["relative_humidity_2m_mean"][:FORECAST_DAYS_AHEAD],
-                "Lượng_mưa_mm": daily_weather["rain_sum"][:FORECAST_DAYS_AHEAD],
-                "Độ_ẩm_đất": daily_weather["soil_moisture_0_to_7cm_mean"][:FORECAST_DAYS_AHEAD],
-                "Chiều_cao_triều_m": tide_heights,
+                "Nhiệt_độ_C": daily_weather["temperature_2m_mean"][:total_days_fetched],
+                "Độ_ẩm_%": daily_weather["relative_humidity_2m_mean"][:total_days_fetched],
+                "Lượng_mưa_mm": daily_weather["rain_sum"][:total_days_fetched],
+                "Độ_ẩm_đất": daily_weather["soil_moisture_0_to_7cm_mean"][:total_days_fetched],
+                "Chiều_cao_triều_m": tide_heights[:total_days_fetched],
             }
         )
+        daily_features_df = add_rain_lag_features_inference(daily_features_df)
+        daily_features_df = daily_features_df.iloc[RAIN_LAG_FETCH_DAYS:].reset_index(drop=True)
+        forecast_dates = all_dates[RAIN_LAG_FETCH_DAYS:total_days_fetched]
+
         feature_columns = list(getattr(scaler, "feature_names_in_", FEATURE_COLS_FOR_INFERENCE))
         # Giữ lại DataFrame (có tên cột) thay vì để `scaler.transform()` trả về ndarray thô - tránh
         # warning "X does not have valid feature names" khi model.predict() nhận vào numpy array,
@@ -3292,15 +3347,23 @@ def predict_days_ahead_forecast_sequence(
     T/T+1/T+2/T+3 - với các cửa sổ của T+1/T+2/T+3, một phần cửa sổ sẽ dùng chính dữ liệu DỰ BÁO
     (chưa xảy ra) của các ngày trước đó trong cùng đợt dự báo, đây là cách làm hợp lý duy nhất vì
     tại thời điểm dự đoán, dữ liệu THẬT của những ngày đó chưa tồn tại.
+
+    LẤY THÊM `RAIN_LAG_FETCH_DAYS` NGÀY QUÁ KHỨ (ngoài `window_size - 1`): cột lag mưa
+    (`add_rain_lag_features_inference()`) cần dữ liệu 1-2 ngày TRƯỚC MỖI ngày trong cửa sổ, kể cả ngày
+    CŨ NHẤT của cửa sổ đầu tiên (dùng để dự đoán Ngày T) - nếu chỉ fetch đúng `window_size - 1` ngày
+    như trước, ngày cũ nhất trong cửa sổ đó sẽ có cột lag bị NaN vì không có dữ liệu trước nó.
     """
     scaler = deployed_model["scaler"]
     window_size = deployed_model.get("window_size") or DEFAULT_SEQUENCE_WINDOW_SIZE
     past_days_needed = window_size - 1
-    total_days_needed = past_days_needed + FORECAST_DAYS_AHEAD
+    # Số ngày quá khứ THẬT cần fetch = đủ cho cửa sổ (`past_days_needed`) CỘNG THÊM đủ cho lag của
+    # chính ngày cũ nhất trong cửa sổ đó (`RAIN_LAG_FETCH_DAYS`).
+    total_past_days_fetch = past_days_needed + RAIN_LAG_FETCH_DAYS
+    total_days_needed = total_past_days_fetch + FORECAST_DAYS_AHEAD
 
     # BƯỚC A - FETCH DATA: xem docstring `_fetch_daily_weather_and_tide()`.
     fetch_result = _fetch_daily_weather_and_tide(
-        lat, lon, forecast_days=FORECAST_DAYS_AHEAD, past_days=past_days_needed
+        lat, lon, forecast_days=FORECAST_DAYS_AHEAD, past_days=total_past_days_fetch
     )
     if fetch_result is None:
         return None
@@ -3316,6 +3379,7 @@ def predict_days_ahead_forecast_sequence(
                 "Chiều_cao_triều_m": tide_heights[:total_days_needed],
             }
         )
+        daily_features_df = add_rain_lag_features_inference(daily_features_df)
         # Giữ tên cột (DataFrame) khi transform - tránh warning "X does not have valid feature names".
         scaled_all_days = pd.DataFrame(
             scaler.transform(daily_features_df[feature_columns]), columns=feature_columns
@@ -3327,7 +3391,9 @@ def predict_days_ahead_forecast_sequence(
     result_rows = []
     try:
         for offset in range(FORECAST_DAYS_AHEAD):
-            end_idx = past_days_needed + offset  # Vị trí ngày T/T+1/T+2/T+3 trong chuỗi đã ghép.
+            # Vị trí ngày T/T+1/.../T+13 trong chuỗi đã ghép - dịch thêm `RAIN_LAG_FETCH_DAYS` so với
+            # trước đây vì mảng giờ có thêm phần đầu chỉ để tính lag (xem giải thích ở docstring).
+            end_idx = total_past_days_fetch + offset
             start_idx = end_idx - window_size + 1
             window_input = scaled_all_days[start_idx : end_idx + 1].reshape(1, window_size, len(feature_columns))
             # Dispatch model_type dùng CHUNG với `predict_flood_class()` - xem
@@ -3815,6 +3881,15 @@ def render_forecast_tab() -> None:
         f"(F1-Macro={cached_result['f1_macro']:.4f})"
     )
 
+    # Biểu đồ nhiệt độ/lượng mưa từng địa phương - GỘP thẳng vào đây (trước đây là 1 tab riêng "Biểu đồ
+    # dự báo") vì đây CHỈ là dữ liệu ĐẦU VÀO thời tiết, không phải kết quả dự đoán ngập của ML/DL - tách
+    # thành tab riêng dễ khiến người xem lầm tưởng đây là 1 tính năng dự báo độc lập, trong khi thực ra
+    # nó minh hoạ TRỰC TIẾP cho đúng bảng "Dự đoán Ngập" ở trên (dùng chung 1 cache, không gọi lại API).
+    with st.expander("Biểu đồ nhiệt độ & lượng mưa dự báo theo từng địa phương", expanded=False):
+        for location_name in REAL_MONITORED_LOCATIONS:
+            location_forecast_df = combined_forecast_df[combined_forecast_df["Địa phương"] == location_name]
+            render_location_forecast_combo_chart(location_name, location_forecast_df)
+
     render_weather_comparison_section()
 
 
@@ -3880,36 +3955,6 @@ def render_location_forecast_combo_chart(location_name: str, location_forecast_d
     )
     apply_dark_plotly_theme(fig, height=380)
     st.plotly_chart(fig, use_container_width=True)
-
-
-@st.fragment(run_every=LIVE_TAB_AUTO_REFRESH_INTERVAL)
-def render_forecast_chart_tab() -> None:
-    """
-    Tab "Biểu đồ dự báo" - biểu đồ cột+đường (nhiệt độ/lượng mưa) cho cả 5 địa phương giám sát, dùng
-    ĐÚNG kết quả dự báo thật từ model tốt nhất (tái sử dụng `_compute_forecast_4day_result()` - cùng
-    cache với Tab "Dự báo 14 ngày tới", KHÔNG gọi thêm request Open-Meteo/model nào mới).
-
-    Tự làm mới mỗi `LIVE_TAB_AUTO_REFRESH_INTERVAL` giống hệt Tab 1 (xem giải thích cơ chế/giới hạn
-    của `@st.fragment(run_every=...)` trong docstring `render_forecast_tab()`).
-    """
-    st.subheader("Biểu đồ dự báo nhiệt độ & lượng mưa")
-    st.caption(
-        f"Biểu đồ trực quan cho dữ liệu dự báo thật ở Tab 'Dự báo 14 ngày tới' - cùng model, cùng "
-        f"cache, tự làm mới mỗi {LIVE_TAB_AUTO_REFRESH_INTERVAL} khi đang mở."
-    )
-
-    try:
-        cached_result = _compute_forecast_4day_result()
-    except Exception as exc:
-        st.warning(f"Chưa có dữ liệu dự báo để vẽ biểu đồ: {exc}")
-        return
-
-    combined_forecast_df = cached_result["combined_df"]
-    st.caption(f"Cập nhật lần cuối: {cached_result['generated_at'].strftime('%H:%M:%S %d/%m/%Y')}")
-
-    for location_name in REAL_MONITORED_LOCATIONS:
-        location_forecast_df = combined_forecast_df[combined_forecast_df["Địa phương"] == location_name]
-        render_location_forecast_combo_chart(location_name, location_forecast_df)
 
 
 @st.cache_data(show_spinner=False)
@@ -4554,10 +4599,9 @@ def main():
     # Huấn luyện -> Đánh giá) để người xem hiểu được PHƯƠNG PHÁP đứng sau kết quả dự báo đó, và tab
     # cuối là sản phẩm ứng dụng (bản đồ chỉ đường tránh ngập).
     # ------------------------------------------------------------------------------------------
-    tab_forecast, tab_forecast_chart, tab_eda, tab_train, tab_eval, tab_map = st.tabs(
+    tab_forecast, tab_eda, tab_train, tab_eval, tab_map = st.tabs(
         [
             "Dự báo 14 ngày tới",
-            "Biểu đồ dự báo",
             "Khám phá dữ liệu (EDA)",
             "Tiền xử lý & huấn luyện",
             "Đánh giá mô hình",
@@ -4567,9 +4611,6 @@ def main():
 
     with tab_forecast:
         render_forecast_tab()
-
-    with tab_forecast_chart:
-        render_forecast_chart_tab()
 
     with tab_eda:
         render_eda_tab()

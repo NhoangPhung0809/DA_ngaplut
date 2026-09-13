@@ -46,7 +46,7 @@ from sklearn.svm import SVC
 from sklearn.preprocessing import label_binarize
 from xgboost import XGBClassifier
 
-from shared_constants import FEATURE_COLS
+from shared_constants import FEATURE_COLS, RAIN_LAG1_COL, RAIN_LAG2_COL, RAIN_ROLLING_3D_COL
 
 try:
     from imblearn.over_sampling import RandomOverSampler, SMOTE
@@ -265,7 +265,22 @@ def load_and_concatenate_csvs(data_dir: Path = DATA_DIR) -> pd.DataFrame:
 
 
 def build_daily_feature_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    """Tổng hợp dữ liệu theo ngày để dùng feature ngày T dự báo nhãn ngày T+1."""
+    """
+    Tổng hợp dữ liệu theo ngày để dùng feature ngày T dự báo nhãn ngày T+1.
+
+    THÊM CỘT LAG/TÍCH LUỸ MƯA (`RAIN_LAG1_COL`/`RAIN_LAG2_COL`/`RAIN_ROLLING_3D_COL`, xem
+    `shared_constants.py`): TRƯỚC ĐÂY model chỉ thấy lượng mưa của ĐÚNG ngày T, bỏ sót hiệu ứng "đất đã
+    bão hoà nước" do mưa dồn dập nhiều ngày liên tiếp - một nguyên nhân gây ngập THẬT ở Huế dù riêng
+    ngày T mưa không lớn (xem lại phân tích: 199 dòng ngập thật có triều THẤP nhưng đi kèm mưa cao, tức
+    ngập do mưa dồn chứ không do triều). Tính bằng `.shift(1)`/`.shift(2)`/`.rolling(3).sum()` NGAY SAU
+    khi gộp theo ngày - làm ở ĐÂY (thay vì tách hàm riêng gọi thêm ở từng nơi) để CẢ 4 nơi gọi hàm này
+    (`run_training_pipeline`, `build_incremental_tabular_dataset`, `incremental_train` 2 lần) tự động
+    nhất quán, tránh nguy cơ quên gọi ở 1 chỗ gây lệch schema cột giữa train/inference.
+
+    3 dòng ĐẦU TIÊN của mỗi địa phương không đủ 1-2 ngày trước đó nên các cột lag sẽ là NaN - CỐ Ý
+    không tự điền ở đây, để `preprocess_features()` điền bằng median tính riêng trên tập train (xem
+    `compute_train_only_medians()`), nhất quán với cách xử lý NaN của mọi cột khác trong FEATURE_COLS.
+    """
     daily_df = df.copy()
     daily_df[DATE_COL] = daily_df[TIME_COL].dt.floor("D")
 
@@ -283,6 +298,13 @@ def build_daily_feature_dataset(df: pd.DataFrame) -> pd.DataFrame:
         .rename(columns={DATE_COL: TIME_COL})
         .sort_values([LOCATION_COL, TIME_COL])
         .reset_index(drop=True)
+    )
+
+    grouped_rain = daily_df.groupby(LOCATION_COL)["Lượng_mưa_mm"]
+    daily_df[RAIN_LAG1_COL] = grouped_rain.shift(1)
+    daily_df[RAIN_LAG2_COL] = grouped_rain.shift(2)
+    daily_df[RAIN_ROLLING_3D_COL] = grouped_rain.transform(
+        lambda location_rain: location_rain.rolling(window=3, min_periods=1).sum()
     )
 
     print("\nConverted hourly data to daily feature dataset:")
@@ -830,7 +852,17 @@ def balance_training_data(
 
 
 def build_daily_modeling_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    """Gom dữ liệu theo ngày để phục vụ time-series, LSTM và mô hình hybrid."""
+    """
+    Gom dữ liệu theo ngày để phục vụ time-series, LSTM và mô hình hybrid.
+
+    `df` truyền vào ĐÃ ở dạng 1-dòng-1-ngày (xuất phát từ `build_daily_feature_dataset()` qua
+    `preprocess_features()`), nên bước gộp lại theo ngày ở đây thực chất là "no-op" (mỗi nhóm chỉ có
+    đúng 1 dòng, "mean" của 1 giá trị = chính nó) - vẫn giữ nguyên logic gộp cũ, chỉ BỔ SUNG 3 cột
+    lag/tích luỹ mưa (`RAIN_LAG1_COL`/`RAIN_LAG2_COL`/`RAIN_ROLLING_3D_COL`) vào `aggregation_map` -
+    trước đây bảng này liệt kê cột CỨNG nên khi `build_daily_feature_dataset()` thêm 3 cột lag, chúng
+    bị ÂM THẦM LOẠI BỎ ở đây (không lỗi gì cả, chỉ là dữ liệu cho LSTM/Hybrid thiếu mất 3 cột so với
+    dữ liệu cho model dạng bảng) - bug thật đã phát hiện khi rà lại toàn bộ nơi dùng FEATURE_COLS.
+    """
     daily_df = df.copy()
     daily_df[DATE_COL] = daily_df[TIME_COL].dt.floor("D")
     daily_df = (
@@ -842,6 +874,9 @@ def build_daily_modeling_dataset(df: pd.DataFrame) -> pd.DataFrame:
                 "Lượng_mưa_mm": "sum",
                 "Độ_ẩm_đất": "mean",
                 "Chiều_cao_triều_m": "mean",
+                RAIN_LAG1_COL: "mean",
+                RAIN_LAG2_COL: "mean",
+                RAIN_ROLLING_3D_COL: "mean",
                 TARGET_COL: "max",
             }
         )
