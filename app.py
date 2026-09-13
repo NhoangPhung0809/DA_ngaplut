@@ -1851,64 +1851,24 @@ def render_time_series_cv_section() -> None:
     cv_folds()` trong `analyze_and_train.py`) để biết model có ổn định qua nhiều giai đoạn thời gian
     khác nhau hay chỉ "may" trúng 1 khúc test dễ.
 
-    CHỈ hỗ trợ model DẠNG BẢNG (tabular) - xem lý do trong docstring `run_time_series_cv_pipeline()`.
-    Chạy TRỰC TIẾP (blocking, có `st.spinner`) thay vì qua background worker như huấn luyện chính - vì
-    mặc định KHÔNG chạy GridSearchCV/Optuna ở từng fold (đã tắt để tránh nhân thời gian lên gấp
-    `n_splits` lần) nên thường đủ nhanh để chờ trực tiếp trên UI.
+    TỰ ĐỘNG chạy ngay sau khi bấm "Bắt đầu Huấn luyện Nền" (xem `training_worker.py`) - dùng CHUNG danh
+    sách model đã chọn, KHÔNG có nút/form riêng ở đây nữa (bản trước có form chọn model/fold/cân bằng
+    riêng, người dùng phản hồi là quá nhiều khối/nút trong Tab 2 gây rối). Chỉ hiển thị kết quả gần
+    nhất tại đây. CHỈ hỗ trợ model DẠNG BẢNG (tabular) trong danh sách đã chọn - model dạng chuỗi (LSTM/
+    GRU/Hybrid/ARIMA/SARIMA) tự bị bỏ qua, xem lý do trong docstring `run_time_series_cv_pipeline()`.
     """
     st.caption(
         "Đánh giá model qua NHIỀU giai đoạn thời gian (walk-forward), không chỉ 1 lần chia train/test "
-        "duy nhất - trả lời đúng góp ý của GVPB đề cương. Chỉ áp dụng cho model dạng bảng."
+        "duy nhất - trả lời đúng góp ý của GVPB đề cương. Tự chạy cùng lúc bấm 'Bắt đầu Huấn luyện Nền' "
+        "bên dưới cho các model dạng bảng trong danh sách đã chọn, không cần thao tác gì thêm ở đây."
     )
-
-    train_module = get_train_module()
-    tabular_model_names = [
-        name
-        for name in get_all_model_names()
-        if getattr(train_module, "build_model_registry", None) is None
-        or train_module.build_model_registry().get(name, {}).get("kind") == "tabular_classifier"
-    ]
-
-    with st.form("time_series_cv_form"):
-        selected_models = st.multiselect(
-            "Chọn model để kiểm định chéo (nên chọn ít, vài model phù hợp thay vì cả 16 - đúng góp ý GVPB)",
-            options=tabular_model_names,
-            default=tabular_model_names[:3] if len(tabular_model_names) >= 3 else tabular_model_names,
-            key="time_series_cv_model_select",
-        )
-        n_splits_col, balancing_col = st.columns(2)
-        with n_splits_col:
-            n_splits = st.number_input(
-                "Số fold (n_splits)", min_value=2, max_value=8, value=4, step=1, key="time_series_cv_n_splits"
-            )
-        with balancing_col:
-            balancing_method = st.selectbox(
-                "Phương pháp cân bằng dữ liệu",
-                options=["auto", "smote", "gan"],
-                index=0,
-                key="time_series_cv_balancing_method",
-                help="'smote' chạy nhanh hơn nhiều so với 'gan' (CTGAN) - khuyến nghị dùng 'smote' khi "
-                "thử nhiều fold, vì CTGAN sẽ chạy lại từ đầu ở MỖI fold.",
-            )
-        submitted = st.form_submit_button("Chạy Time Series CV", use_container_width=True)
-
-    if submitted:
-        if not selected_models:
-            st.warning("Vui lòng chọn ít nhất 1 model dạng bảng.")
-        else:
-            try:
-                with st.spinner(f"Đang chạy Time Series CV ({n_splits} fold) cho {len(selected_models)} model..."):
-                    train_module.run_time_series_cv_pipeline(
-                        selected_models, n_splits=int(n_splits), balancing_method=balancing_method
-                    )
-                st.cache_data.clear()
-                st.success("Đã chạy xong Time Series CV - kết quả hiển thị bên dưới.")
-            except Exception as exc:
-                st.error(f"Lỗi khi chạy Time Series CV: {exc}")
 
     payload = load_time_series_cv_results()
     if payload is None:
-        st.info("Chưa có kết quả Time Series CV nào - chọn model rồi bấm 'Chạy Time Series CV' ở trên.")
+        st.info(
+            "Chưa có kết quả Time Series CV nào - chọn model dạng bảng (Random Forest, XGBoost...) rồi "
+            "bấm 'Bắt đầu Huấn luyện Nền' bên dưới, kết quả sẽ tự hiện ở đây sau khi chạy xong."
+        )
         return
 
     results = payload.get("results", {})
