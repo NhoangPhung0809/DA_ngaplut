@@ -972,9 +972,12 @@ def build_contrast_styler(
         return [f"background-color: {background}; color: #f8fafc;" for _ in row]
 
     styled_df = styled_df.apply(zebra_rows, axis=1)
+    # KHÔNG đặt "color" ở đây nữa - `zebra_rows` (chạy TRƯỚC, .apply()) đã tự set màu chữ cho MỌI
+    # dòng (kể cả dòng thường lẫn dòng huy chương). Trước đây "color: #f8fafc" (trắng) ở set_properties
+    # này chạy SAU nên GHI ĐÈ mất màu chữ tối của 3 dòng huy chương (nền sáng + chữ trắng = khó đọc) -
+    # bug thật đã thấy khi đổi màu huy chương sang nền sáng.
     styled_df = styled_df.set_properties(
         **{
-            "color": "#f8fafc",
             "border": "1px solid #334155",
             "font-size": "17px",
             "padding": "10px 12px",
