@@ -6,7 +6,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from analyze_and_train import incremental_train, run_training_pipeline
+from analyze_and_train import incremental_train, run_time_series_cv_pipeline, run_training_pipeline
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -77,6 +77,22 @@ def main() -> int:
             }
         else:
             result = run_training_pipeline(selected_models, balancing_method=args.balancing_method)
+
+            # Time Series CV (walk-forward) TỰ ĐỘNG chạy tiếp ngay sau pipeline chính, dùng CHUNG danh
+            # sách model đã chọn - KHÔNG cần nút/form riêng trên UI nữa (trước đây tách riêng, người
+            # dùng thấy rối vì quá nhiều khối/nút trong Tab 2). Hàm `run_time_series_cv_pipeline()` tự
+            # bỏ qua các model không phải dạng bảng (LSTM/GRU/Hybrid/ARIMA/SARIMA) và tự bỏ qua
+            # GridSearchCV/Optuna (đã tune 1 lần ở `run_training_pipeline()` trên rồi) nên không tốn
+            # quá nhiều thời gian thêm. Bọc try/except RIÊNG - lỗi ở bước CV (ví dụ không có model dạng
+            # bảng nào trong danh sách đã chọn) KHÔNG được làm hỏng kết quả huấn luyện chính đã thành
+            # công ở trên.
+            try:
+                run_time_series_cv_pipeline(
+                    selected_models, n_splits=3, balancing_method=args.balancing_method
+                )
+            except Exception as cv_exc:
+                print(f"[Time Series CV] Bỏ qua do lỗi (không ảnh hưởng kết quả huấn luyện chính): {cv_exc}")
+
             completed_state = {
                 **running_state,
                 "status": "completed",
