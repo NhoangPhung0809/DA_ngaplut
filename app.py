@@ -919,17 +919,35 @@ RANK_MEDAL_COLORS: dict[int, tuple[str, str, str]] = {
 }
 
 
+def _interpolate_hex_color(low_hex: str, high_hex: str, fraction: float) -> str:
+    """Nội suy tuyến tính giữa 2 màu hex theo `fraction` (0.0-1.0) - dùng cho thang màu liên tục."""
+    fraction = max(0.0, min(1.0, fraction))
+    low_rgb = tuple(int(low_hex[i : i + 2], 16) for i in (1, 3, 5))
+    high_rgb = tuple(int(high_hex[i : i + 2], 16) for i in (1, 3, 5))
+    mixed_rgb = tuple(round(low_c + (high_c - low_c) * fraction) for low_c, high_c in zip(low_rgb, high_rgb))
+    return "#{:02x}{:02x}{:02x}".format(*mixed_rgb)
+
+
 def build_contrast_styler(
     df: pd.DataFrame,
     numeric_formats: dict | None = None,
     rank_highlight: bool = False,
+    gradient_column: str | None = None,
 ):
     """
     Tạo Styler có độ tương phản cao (nền tối, chữ sáng, sọc ngựa vằn) để bảng web dễ đọc hơn.
 
-    `rank_highlight=True`: tô nổi 3 DÒNG ĐẦU (sau khi `df` đã được sắp xếp theo tiêu chí xếp hạng
-    TRƯỚC KHI truyền vào đây) bằng màu huy chương vàng/bạc/đồng (`RANK_MEDAL_COLORS`) - ĐÈ LÊN màu sọc
-    ngựa vằn mặc định cho đúng 3 dòng đó, dùng cho các bảng xếp hạng model theo điểm số.
+    `gradient_column` (THANG MÀU LIÊN TỤC - GÓP Ý CỦA GVHD, thay cho `rank_highlight` cũ): tô nền CẢ
+    HÀNG theo THANG MÀU dựa trên giá trị của CỘT chỉ định (thường là cột dùng để xếp hạng, vd
+    "F1 (Macro)") - hàng có giá trị CÀNG CAO thì nền CÀNG RỰC (xanh dương sáng), giá trị càng thấp thì
+    nền càng chìm vào màu nền tối mặc định. Khác `rank_highlight` cũ (chỉ tô 3 dòng ĐẦU bằng màu huy
+    chương rời rạc, các dòng còn lại không có tín hiệu gì) - thang màu liên tục cho biết mức độ chênh
+    lệch giữa MỌI dòng, không chỉ phân biệt "trong top 3 hay không". Giá trị min/max để chuẩn hoá tính
+    TRÊN CHÍNH `df` truyền vào (không phải cố định), nên hoạt động đúng với mọi bảng có số dòng khác
+    nhau.
+
+    `rank_highlight=True` (CŨ, vẫn giữ để tương thích ngược): tô nổi 3 DÒNG ĐẦU bằng màu huy chương
+    vàng/bạc/đồng (`RANK_MEDAL_COLORS`) - chỉ dùng khi KHÔNG truyền `gradient_column`.
 
     ----------------------------------------------------------------------------------------------
     ĐÃ SỬA LỖI CRASH THẬT (TypeError: unsupported format string passed to NoneType.__format__) VÀ LỖI
@@ -948,6 +966,19 @@ def build_contrast_styler(
     `Styler.format()` hay không nữa, cùng nguyên tắc đã dùng cho bảng CTGAN/case study trước đó.
     """
     df = df.copy()
+
+    # Tính thang màu TRƯỚC khi `numeric_formats` biến cột đó thành CHUỖI đã định dạng (vd "0.6452") -
+    # nếu tính SAU sẽ không còn giá trị số để chuẩn hoá min-max.
+    row_gradient_colors: dict[int, str] | None = None
+    if gradient_column and gradient_column in df.columns:
+        numeric_gradient_series = pd.to_numeric(df[gradient_column], errors="coerce")
+        value_min, value_max = numeric_gradient_series.min(), numeric_gradient_series.max()
+        value_range = value_max - value_min
+        row_gradient_colors = {}
+        for row_index, value in numeric_gradient_series.items():
+            fraction = 0.5 if pd.isna(value) or value_range == 0 else (value - value_min) / value_range
+            row_gradient_colors[row_index] = _interpolate_hex_color("#0f172a", "#3b82f6", fraction)
+
     if numeric_formats:
         for column, format_spec in numeric_formats.items():
             if column not in df.columns:
@@ -960,6 +991,9 @@ def build_contrast_styler(
     styled_df = df.style
 
     def zebra_rows(row):
+        if row_gradient_colors is not None:
+            background = row_gradient_colors.get(row.name, "#0f172a")
+            return [f"background-color: {background}; color: #f8fafc; font-weight: 700;" for _ in row]
         medal = RANK_MEDAL_COLORS.get(row.name) if rank_highlight else None
         if medal:
             background, text_color, accent_color = medal
@@ -1358,8 +1392,15 @@ def render_class_distribution_interactive(eda_df: pd.DataFrame) -> None:
 
 
 def render_flood_share_by_location_interactive(eda_df: pd.DataFrame) -> None:
-    """Tỷ lệ ngập theo địa phương (Plotly pie chart tương tác) - thay cho
-    `flood_share_by_location.png` tĩnh."""
+    """
+    Tỷ lệ ngập theo địa phương (Plotly BIỂU ĐỒ CỘT NGANG tương tác) - thay cho
+    `flood_share_by_location.png` tĩnh.
+
+    TRƯỚC ĐÂY dùng biểu đồ TRÒN (Pie) - GÓP Ý CỦA GVHD: đổi sang biểu đồ CỘT vì mắt người so sánh
+    ĐỘ DÀI (cột) chính xác hơn nhiều so với so sánh GÓC/DIỆN TÍCH (miếng bánh tròn) - đặc biệt khi các
+    phần tỷ lệ gần bằng nhau (như 5 địa phương ở đây) rất khó phân biệt bằng mắt trên biểu đồ tròn,
+    trong khi cột ngang xếp theo thứ tự giảm dần giúp nhìn ra ngay địa phương nào nhiều/ít hơn.
+    """
     if eda_df.empty or "Nguy_cơ_ngập" not in eda_df.columns or "Địa phương" not in eda_df.columns:
         st.info("Chưa có dữ liệu để tính tỷ lệ ngập theo địa phương.")
         return
@@ -1370,16 +1411,34 @@ def render_flood_share_by_location_interactive(eda_df: pd.DataFrame) -> None:
         return
 
     location_counts = flood_df["Địa phương"].value_counts()
+    total_count = int(location_counts.sum())
+    # Sắp TĂNG DẦN vì Plotly vẽ cột ngang từ DƯỚI LÊN - địa phương nhiều ngập nhất cần nằm TRÊN CÙNG.
+    location_counts_sorted = location_counts.sort_values(ascending=True)
+    percentages = location_counts_sorted / total_count * 100
+
     fig = go.Figure(
-        data=go.Pie(
-            labels=location_counts.index.tolist(),
-            values=location_counts.values.tolist(),
-            hovertemplate="%{label}: %{value:,} (%{percent})<extra></extra>",
-            textinfo="label+percent",
-            marker=dict(line=dict(color="#0b1220", width=2)),
+        data=go.Bar(
+            x=location_counts_sorted.values.tolist(),
+            y=location_counts_sorted.index.tolist(),
+            orientation="h",
+            marker=dict(color="#4C78A8", line=dict(color="#1e3a5f", width=1)),
+            text=[f"{value:,} ({pct:.1f}%)" for value, pct in zip(location_counts_sorted.values, percentages)],
+            textposition="outside",
+            textfont=dict(size=14, color="#f8fafc"),
+            hovertemplate="%{y}: %{x:,} (%{customdata:.1f}%)<extra></extra>",
+            customdata=percentages.values,
         )
     )
+    # Gọi apply_dark_plotly_theme() TRƯỚC rồi mới update_layout() riêng đè lên sau - ngược thứ tự sẽ bị
+    # apply_dark_plotly_theme() ghi đè mất margin phải (r=60, cần thiết để không cắt chữ nhãn số liệu
+    # đặt ngoài cột) về lại mặc định r=10 - bug thật đã gặp khi làm theo thứ tự cũ.
     apply_dark_plotly_theme(fig)
+    fig.update_layout(
+        margin=dict(t=20, b=40, l=10, r=60),
+        xaxis=dict(title="Số bản ghi có ngập", color="#cbd5e1", gridcolor="#334155"),
+        yaxis=dict(color="#f8fafc", tickfont=dict(size=14)),
+        showlegend=False,
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -1862,8 +1921,7 @@ def render_time_series_cv_section() -> None:
     """
     st.caption(
         "Đánh giá model qua NHIỀU giai đoạn thời gian (walk-forward), không chỉ 1 lần chia train/test "
-        "duy nhất - trả lời đúng góp ý của GVPB đề cương. Tự chạy cùng lúc bấm 'Bắt đầu Huấn luyện Nền' "
-        "bên dưới cho các model dạng bảng trong danh sách đã chọn, không cần thao tác gì thêm ở đây."
+        "duy nhất."
     )
 
     payload = load_time_series_cv_results()
@@ -1896,7 +1954,7 @@ def render_time_series_cv_section() -> None:
         build_contrast_styler(
             summary_df,
             numeric_formats={"F1-Macro (trung bình)": "{:.4f}", "Độ lệch chuẩn": "{:.4f}"},
-            rank_highlight=True,
+            gradient_column="F1-Macro (trung bình)",
         ),
         height=min(120 + 38 * len(summary_df), 400),
     )
@@ -2404,7 +2462,7 @@ def render_model_metrics(evaluation_metrics, deployment_config, runtime_info) ->
                 "Train F1 (Macro)": "{:.4f}",
                 "Chênh lệch Train-Test (F1)": "{:+.4f}",
             },
-            rank_highlight=True,
+            gradient_column="F1 (Macro)",
         ),
         height=420,
     )
