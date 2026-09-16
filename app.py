@@ -2879,6 +2879,80 @@ def build_evaluation_report_html(evaluation_metrics: dict, deployment_config: di
     else:
         metrics_table_html = "<p>Không có dữ liệu metrics.</p>"
 
+    # Recall THEO TỪNG LỚP cho MỌI model, đọc từ `classification_report` (sklearn, output_dict=True) -
+    # bảng này quan trọng hơn F1-Macro tổng thể khi xét mất cân bằng nặng: 1 model có thể đạt F1-Macro
+    # cao chỉ nhờ đoán tốt lớp đa số ("Safe"), trong khi gần như bỏ sót toàn bộ lớp thiểu số ("Heavy
+    # Flood") - đúng lớp quan trọng nhất với cảnh báo ngập. Xem riêng Recall từng lớp mới phát hiện được
+    # điều này, KHÔNG thấy được nếu chỉ nhìn Accuracy/F1-Macro như bảng trên.
+    per_class_recall_rows = []
+    for model_name, metric_values in evaluation_metrics.items():
+        if not isinstance(metric_values, dict):
+            continue
+        class_report = metric_values.get("classification_report") or {}
+        per_class_recall_rows.append(
+            {
+                "Model": metric_values.get("model_name", model_name),
+                "Balancing method": metric_values.get("balancing_method", "unknown"),
+                "Recall (Safe)": class_report.get("Safe", {}).get("recall"),
+                "Recall (Light Flood)": class_report.get("Light Flood", {}).get("recall"),
+                "Recall (Heavy Flood)": class_report.get("Heavy Flood", {}).get("recall"),
+            }
+        )
+    per_class_recall_df = pd.DataFrame(per_class_recall_rows)
+    if not per_class_recall_df.empty:
+        per_class_recall_df = per_class_recall_df.sort_values(by="Recall (Heavy Flood)", ascending=False).reset_index(drop=True)
+        per_class_recall_table_html = per_class_recall_df.to_html(
+            index=False,
+            float_format=lambda value: f"{value:.4f}" if pd.notna(value) else "-",
+        )
+    else:
+        per_class_recall_table_html = "<p>Không có dữ liệu classification_report.</p>"
+
+    # Bảng chi tiết Precision/Recall/F1/Support theo từng lớp - CHỈ model tốt nhất, để soi kỹ model sẽ
+    # thực sự được triển khai (không phải toàn bộ danh sách như bảng Recall so sánh ở trên).
+    best_class_report = best_model_metrics.get("classification_report") or {} if isinstance(best_model_metrics, dict) else {}
+    best_class_report_rows = [
+        {
+            "Lớp": class_name,
+            "Precision": values.get("precision"),
+            "Recall": values.get("recall"),
+            "F1-score": values.get("f1-score"),
+            "Support": values.get("support"),
+        }
+        for class_name, values in best_class_report.items()
+        if class_name in {"Safe", "Light Flood", "Heavy Flood"} and isinstance(values, dict)
+    ]
+    best_class_report_df = pd.DataFrame(best_class_report_rows)
+    best_class_report_table_html = (
+        best_class_report_df.to_html(
+            index=False,
+            float_format=lambda value: f"{value:.4f}" if pd.notna(value) else "-",
+        )
+        if not best_class_report_df.empty
+        else "<p>Không có classification_report cho model tốt nhất.</p>"
+    )
+
+    # ROC-AUC theo từng lớp (One-vs-Rest) cho model tốt nhất - đọc từ `roc_curve_data.json` nếu có.
+    roc_curve_json_path = LATEST_MODELS_DIR / "roc_curve_data.json"
+    roc_auc_table_html = "<p>Không có dữ liệu ROC-AUC (`roc_curve_data.json`).</p>"
+    if roc_curve_json_path.exists():
+        try:
+            with roc_curve_json_path.open("r", encoding="utf-8") as roc_file:
+                roc_payload = json.load(roc_file)
+            roc_curves = roc_payload.get("curves") or {}
+            roc_auc_rows = [
+                {"Lớp": CLASS_LABEL_VI.get(class_key, class_key), "ROC-AUC (OvR)": curve.get("auc")}
+                for class_key, curve in roc_curves.items()
+            ]
+            roc_auc_df = pd.DataFrame(roc_auc_rows)
+            if not roc_auc_df.empty:
+                roc_auc_table_html = roc_auc_df.to_html(
+                    index=False,
+                    float_format=lambda value: f"{value:.4f}" if pd.notna(value) else "-",
+                )
+        except Exception:
+            pass
+
     latest_dir = Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR)))
     confusion_json_path = latest_dir / "confusion_matrix.json"
     importance_json_path = latest_dir / "feature_importance.json"
@@ -2920,6 +2994,14 @@ h1, h2 {{ color:#f8fafc; }}
 </div>
 <h2>Bảng so sánh chỉ số các mô hình</h2>
 {metrics_table_html}
+<h2>Recall theo từng lớp - so sánh tất cả model</h2>
+<p>Quan trọng hơn Accuracy/F1-Macro khi dữ liệu mất cân bằng nặng - Recall thấp ở cột "Heavy Flood" nghĩa
+là model đang BỎ SÓT phần lớn các trường hợp ngập nặng thật, dù điểm tổng thể có thể vẫn cao.</p>
+{per_class_recall_table_html}
+<h2>Chi tiết Precision/Recall/F1/Support theo lớp - model tốt nhất ({_escape_html_text(best_model_name)})</h2>
+{best_class_report_table_html}
+<h2>ROC-AUC theo từng lớp (One-vs-Rest) - model tốt nhất</h2>
+{roc_auc_table_html}
 <h2>Confusion Matrix</h2>
 {confusion_html}
 <h2>Feature Importance</h2>
