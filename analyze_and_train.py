@@ -218,11 +218,25 @@ def list_available_models() -> list[str]:
     return list(build_model_registry().keys())
 
 
+# Tra CHÍNH XÁC theo stem file CSV -> tên địa phương hiện hành (khớp `LOCATION_HISTORICAL_FILE` trong
+# `app.py`). Không tự suy tên bằng cách thay "_" thành " " - cách đó biến "TP_Hue_10years" thành
+# "TP Hue" (không dấu, tên hành chính CŨ đã bỏ theo đợt sáp nhập 2025), trong khi app.py/GeoJSON đã
+# đổi đúng thành "Thuận Hóa" - lệch nhãn sẽ khiến việc groupby địa phương trong log/artifact không
+# khớp với tên hiển thị trên map/UI.
+LOCATION_STEM_TO_NAME: dict[str, str] = {
+    "TP_Hue_10years": "Thuận Hóa",
+    "Huong_Thuy_10years": "Hương Thủy",
+    "Huong_Tra_10years": "Hương Trà",
+    "Phu_Vang_10years": "Phú Vang",
+    "Quang_Dien_10years": "Quảng Điền",
+}
+
+
 def normalize_location_name(file_path: str) -> str:
-    """Chuẩn hóa tên địa phương từ tên file CSV."""
+    """Chuẩn hóa tên địa phương từ tên file CSV - ưu tiên tra `LOCATION_STEM_TO_NAME`, chỉ fallback
+    suy diễn từ filename nếu gặp file lạ ngoài 5 địa phương đã khai báo."""
     stem = Path(file_path).stem
-    stem = stem.replace("_10years", "").replace("_", " ").strip()
-    return stem
+    return LOCATION_STEM_TO_NAME.get(stem, stem.replace("_10years", "").replace("_", " ").strip())
 
 
 def load_and_concatenate_csvs(data_dir: Path = DATA_DIR) -> pd.DataFrame:

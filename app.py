@@ -357,6 +357,13 @@ LOCATION_HISTORICAL_FILE: dict[str, str] = {
     "Quảng Điền": "Quang_Dien_10years.csv",
 }
 
+# Chiều NGƯỢC LẠI của `LOCATION_HISTORICAL_FILE` (filename -> tên địa phương) - dùng ở
+# `load_eda_sample_dataframe()` để tra ĐÚNG tên hiển thị hiện hành, tránh tự suy tên từ filename (từng
+# sinh nhãn "TP Hue" không dấu, lệch với "Thuận Hóa" dùng ở mọi nơi khác trong app).
+HISTORICAL_FILE_TO_LOCATION_NAME: dict[str, str] = {
+    filename: location_name for location_name, filename in LOCATION_HISTORICAL_FILE.items()
+}
+
 # Danh sách đặc trưng đầu vào của model - import từ `shared_constants.py` (dùng CHUNG với
 # analyze_and_train.py, train_model.py, eda_analysis.py, hyperparameter_tuning.py) thay vì tự định
 # nghĩa lại, để không còn nguy cơ lệch nhau giữa các file khi bộ đặc trưng của model thay đổi. Giữ
@@ -1098,7 +1105,15 @@ def load_eda_sample_dataframe() -> pd.DataFrame:
             df = pd.read_csv(csv_file, on_bad_lines="skip", engine="python")
         except Exception:
             continue
-        df["Địa phương"] = csv_file.stem.replace("_10years", "").replace("_", " ").strip()
+        # Tra CHÍNH XÁC theo `LOCATION_HISTORICAL_FILE` (khớp key với REAL_MONITORED_LOCATIONS) thay vì
+        # tự suy tên từ filename (`csv_file.stem.replace("_10years", "").replace("_", " ")`) - cách cũ
+        # từng sinh ra "TP Hue" (KHÔNG dấu, từ file `TP_Hue_10years.csv`) hiển thị lẫn trong biểu đồ EDA
+        # trong khi mọi nơi khác trong app đã đổi đúng thành "Thuận Hóa" - 2 nhãn khác nhau cho CÙNG 1
+        # địa phương gây hiểu lầm là 2 vùng riêng biệt. Fallback về cách cũ CHỈ khi file không nằm trong
+        # danh sách 5 địa phương đã khai báo (an toàn hơn là để trống).
+        df["Địa phương"] = HISTORICAL_FILE_TO_LOCATION_NAME.get(
+            csv_file.name, csv_file.stem.replace("_10years", "").replace("_", " ").strip()
+        )
         frames.append(df)
 
     if not frames:
@@ -1664,20 +1679,18 @@ def build_ctgan_distribution_discussion(distribution_df: pd.DataFrame, title: st
     )
 
 
-def render_ctgan_before_after_chart(before_distribution_df: pd.DataFrame, after_distribution_df: pd.DataFrame) -> None:
+def build_ctgan_before_after_figure(before_distribution_df: pd.DataFrame, after_distribution_df: pd.DataFrame) -> "go.Figure | None":
     """
-    Biểu đồ CỘT NHÓM (grouped bar) so sánh trực quan phân phối 3 lớp nguy cơ ngập TRƯỚC và SAU khi xử
-    lý mất cân bằng (CTGAN, fallback SMOTE, hoặc "none" - không xử lý gì) - bổ sung cho 2 bảng số liệu
-    ở `render_ctgan_dataset_panel()` vốn đặt cạnh nhau ở 2 CỘT RIÊNG BIỆT nên khó so sánh trực tiếp
-    bằng mắt.
+    Dựng Figure CỘT NHÓM (grouped bar) so sánh trực quan phân phối 3 lớp nguy cơ ngập TRƯỚC và SAU khi
+    xử lý mất cân bằng (CTGAN, fallback SMOTE, hoặc "none" - không xử lý gì) - tách riêng khỏi
+    `render_ctgan_before_after_chart()` để tái sử dụng khi xuất báo cáo (`build_evaluation_report_html()`).
 
     BỐ CỤC: 2 CỤM trên trục X ("Trước xử lý" / "Sau xử lý"), MỖI CỤM có 3 cột - 1 cột/lớp, TÔ MÀU
     THEO LỚP (không phải theo giai đoạn như bản trước) - cùng 1 màu cho 1 lớp ở CẢ 2 cụm, giúp dễ dò
     theo mắt xem RIÊNG lớp nào tăng/giảm bao nhiêu giữa 2 giai đoạn, thay vì so 2 màu theo giai đoạn.
     """
     if before_distribution_df.empty and after_distribution_df.empty:
-        st.info("Chưa có đủ dữ liệu phân phối lớp để vẽ biểu đồ so sánh.")
-        return
+        return None
 
     def _prepare(distribution_df: pd.DataFrame, stage_label: str) -> pd.DataFrame:
         prepared_df = distribution_df.copy()
@@ -1721,6 +1734,16 @@ def render_ctgan_before_after_chart(before_distribution_df: pd.DataFrame, after_
         yaxis=dict(title="Số lượng quan sát", color="#cbd5e1", gridcolor="#334155"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(color="#f8fafc", size=13)),
     )
+    return fig
+
+
+def render_ctgan_before_after_chart(before_distribution_df: pd.DataFrame, after_distribution_df: pd.DataFrame) -> None:
+    """Hiển thị biểu đồ so sánh phân phối lớp trước/sau xử lý mất cân bằng lên UI - việc dựng Figure
+    nằm ở `build_ctgan_before_after_figure()`."""
+    fig = build_ctgan_before_after_figure(before_distribution_df, after_distribution_df)
+    if fig is None:
+        st.info("Chưa có đủ dữ liệu phân phối lớp để vẽ biểu đồ so sánh.")
+        return
     st.plotly_chart(fig, use_container_width=True)
     render_chart_discussion(
         "Biểu đồ trên đặt cạnh nhau 2 giai đoạn để thấy ngay hiệu quả xử lý mất cân bằng: cột xám "
@@ -2953,6 +2976,35 @@ def build_evaluation_report_html(evaluation_metrics: dict, deployment_config: di
         except Exception:
             pass
 
+    # Biểu đồ so sánh phân phối lớp trước/sau xử lý mất cân bằng (CTGAN/SMOTE/none) - cùng dữ liệu với
+    # khối "Cân bằng dữ liệu (CTGAN Before/After)" ở Tab 2, đưa vào đây để báo cáo có đủ ngữ cảnh: kết
+    # quả model ở trên là VỚI/KHÔNG VỚI cân bằng dữ liệu như thế nào.
+    ctgan_note_html = ""
+    ctgan_chart_html = "<p>Chưa có file export CTGAN (`data_before_ctgan.csv`/`data_after_ctgan.csv`).</p>"
+    ctgan_artifacts = load_ctgan_comparison_artifacts()
+    if ctgan_artifacts is not None:
+        ctgan_summary = ctgan_artifacts["summary"]
+        ctgan_method_used = ctgan_summary.get("method_used", "Unknown")
+        ctgan_status = ctgan_summary.get("status", "unknown")
+        ctgan_error_detail = ctgan_summary.get("error_detail")
+        if ctgan_method_used != "CTGAN":
+            ctgan_note_html = (
+                f"<p><b>Lưu ý:</b> lần export gần nhất KHÔNG hoàn tất bằng CTGAN thuần. Method dùng thực "
+                f"tế: <code>{_escape_html_text(ctgan_method_used)}</code> | trạng thái: "
+                f"<code>{_escape_html_text(ctgan_status)}</code>"
+                + (
+                    f" | lý do: {_escape_html_text(ctgan_error_detail)}</p>"
+                    if ctgan_error_detail
+                    else ".</p>"
+                )
+            )
+        ctgan_fig = build_ctgan_before_after_figure(
+            build_ctgan_distribution_dataframe(ctgan_summary.get("before")),
+            build_ctgan_distribution_dataframe(ctgan_summary.get("after")),
+        )
+        if ctgan_fig is not None:
+            ctgan_chart_html = ctgan_fig.to_html(full_html=False, include_plotlyjs=False)
+
     latest_dir = Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR)))
     confusion_json_path = latest_dir / "confusion_matrix.json"
     importance_json_path = latest_dir / "feature_importance.json"
@@ -2960,7 +3012,7 @@ def build_evaluation_report_html(evaluation_metrics: dict, deployment_config: di
     importance_fig = build_feature_importance_figure(importance_json_path) if importance_json_path.exists() else None
 
     confusion_html = (
-        confusion_fig.to_html(full_html=False, include_plotlyjs="cdn")
+        confusion_fig.to_html(full_html=False, include_plotlyjs=False)
         if confusion_fig is not None
         else "<p>Chưa có dữ liệu Confusion Matrix (`confusion_matrix.json`).</p>"
     )
@@ -2975,6 +3027,7 @@ def build_evaluation_report_html(evaluation_metrics: dict, deployment_config: di
 <head>
 <meta charset="utf-8">
 <title>Bao cao danh gia mo hinh - {_escape_html_text(best_model_name)}</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
 body {{ font-family: 'Segoe UI', Arial, sans-serif; background:#0b1220; color:#e5eefc; padding:24px; }}
 table {{ border-collapse: collapse; width:100%; margin-bottom: 24px; }}
@@ -3002,6 +3055,9 @@ là model đang BỎ SÓT phần lớn các trường hợp ngập nặng thật
 {best_class_report_table_html}
 <h2>ROC-AUC theo từng lớp (One-vs-Rest) - model tốt nhất</h2>
 {roc_auc_table_html}
+<h2>Biểu đồ so sánh phân phối lớp trước/sau xử lý mất cân bằng</h2>
+{ctgan_note_html}
+{ctgan_chart_html}
 <h2>Confusion Matrix</h2>
 {confusion_html}
 <h2>Feature Importance</h2>

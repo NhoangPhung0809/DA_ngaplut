@@ -367,9 +367,24 @@ Bảng thống kê mô tả:
 """.strip()
 
 
+# Tra CHÍNH XÁC theo stem file CSV nguồn -> tên địa phương hiện hành (khớp `LOCATION_HISTORICAL_FILE`
+# trong `app.py`). Không tự suy tên bằng cách thay "_" thành " " như trước - cách đó biến
+# "TP_Hue_10years" thành "TP Hue" (không dấu, tên hành chính CŨ đã bỏ), trong khi app.py và GeoJSON đã
+# đổi đúng thành "Thuận Hóa" từ đợt sáp nhập hành chính 2025 - gây lệch nhãn giữa báo cáo EDA và app.
+STEM_TO_LOCATION_NAME: dict[str, str] = {
+    "TP_Hue_10years": "Thuận Hóa",
+    "Huong_Thuy_10years": "Hương Thủy",
+    "Huong_Tra_10years": "Hương Trà",
+    "Phu_Vang_10years": "Phú Vang",
+    "Quang_Dien_10years": "Quảng Điền",
+}
+
+
 def derive_location_name(source_stem: str) -> str:
-    """Suy ra tên địa phương dễ đọc từ tên file CSV nguồn (ví dụ TP_Hue_10years -> TP Hue)."""
-    return source_stem.replace("_10years", "").replace("_", " ").strip()
+    """Suy ra tên địa phương hiển thị từ tên file CSV nguồn - ưu tiên tra `STEM_TO_LOCATION_NAME`
+    (tên hành chính hiện hành), chỉ fallback về suy diễn từ filename nếu gặp file lạ ngoài 5 địa
+    phương đã khai báo."""
+    return STEM_TO_LOCATION_NAME.get(source_stem, source_stem.replace("_10years", "").replace("_", " ").strip())
 
 
 def save_monthly_trend_plot(df: pd.DataFrame) -> tuple[Path, pd.DataFrame]:
