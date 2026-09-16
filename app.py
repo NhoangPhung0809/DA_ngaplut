@@ -338,7 +338,7 @@ def render_admin_api_key_panel() -> None:
 # phương) - thay thế hoàn toàn cho dữ liệu giả lập (dummy) trước đây. Đây là DUY NHẤT nguồn tọa độ
 # dùng cho cả bản đồ giám sát lẫn 2 ô chọn điểm đi/điểm đến của tính năng định tuyến bên dưới.
 REAL_MONITORED_LOCATIONS: dict[str, tuple[float, float]] = {
-    "TP Huế": (16.4637, 107.5909),
+    "Thuận Hóa": (16.4637, 107.5909),
     "Hương Thủy": (16.4022, 107.6833),
     "Hương Trà": (16.4525, 107.4989),
     "Phú Vang": (16.4506, 107.7289),
@@ -356,7 +356,7 @@ DISTRICT_BOUNDARY_GEOJSON_PATH = BASE_DIR / "data" / "geo" / "thuathienhue_distr
 # trong data/historical/. Dùng làm dự phòng khi CHƯA có model đã triển khai (xem
 # get_latest_flood_predictions()) và để lấy quan trắc gần nhất phục vụ suy luận model thật.
 LOCATION_HISTORICAL_FILE: dict[str, str] = {
-    "TP Huế": "TP_Hue_10years.csv",
+    "Thuận Hóa": "TP_Hue_10years.csv",
     "Hương Thủy": "Huong_Thuy_10years.csv",
     "Hương Trà": "Huong_Tra_10years.csv",
     "Phú Vang": "Phu_Vang_10years.csv",
@@ -3285,7 +3285,7 @@ def _fetch_or_estimate_tide_heights(
 
     Ưu tiên dữ liệu THẬT từ Open-Meteo Marine API (`wave_height_max`) tại chính tọa độ (lat, lon).
     Marine API CHỈ có dữ liệu tại các điểm lưới nằm trên/gần biển - với tọa độ NỘI ĐỊA THỰC SỰ (đã
-    kiểm chứng bằng gọi API sống: TP Huế, Hương Trà), API trả về `null` cho toàn bộ ngày, khi đó hàm
+    kiểm chứng bằng gọi API sống: Thuận Hóa, Hương Trà), API trả về `null` cho toàn bộ ngày, khi đó hàm
     dùng công thức triều tổng hợp (bán nhật triều chu kỳ ~12.42 giờ + chu kỳ mặt trăng ~29.53 ngày)
     làm giá trị xấp xỉ - ĐÚNG phương pháp đã dùng để sinh cột `Chiều_cao_triều_m` khi xây dựng dữ liệu
     huấn luyện lịch sử (xem `calculate_synthetic_tide()` trong `fetch_data.py`), giúp đầu vào suy luận
@@ -3296,7 +3296,7 @@ def _fetch_or_estimate_tide_heights(
     LƯU Ý: KHÔNG hardcode danh sách "địa phương nội địa -> bỏ qua Marine API" để tiết kiệm 1 lượt gọi
     mạng, dù có vẻ hợp lý - lưới dữ liệu của Marine API khá thô (~0.25 độ) nên vẫn "chụp" được điểm
     biển gần nhất cho một số tọa độ tưởng chừng nội địa (ví dụ Quảng Điền, Phú Vang, Hương Thủy trong
-    5 địa phương giám sát THỰC RA vẫn nhận được dữ liệu triều thật, chỉ TP Huế/Hương Trà là luôn
+    5 địa phương giám sát THỰC RA vẫn nhận được dữ liệu triều thật, chỉ Thuận Hóa/Hương Trà là luôn
     `null`) - hardcode sai sẽ âm thầm hạ chất lượng đầu vào của đúng những địa phương có dữ liệu thật.
     """
     forecast_days_needed = len(forecast_dates) - past_days
@@ -4690,7 +4690,7 @@ def render_smart_routing_tab() -> None:
     # dùng có thể click để thay đổi bất cứ lúc nào.
     # ==============================================================================================
     if "routing_start_point" not in st.session_state:
-        st.session_state["routing_start_point"] = REAL_MONITORED_LOCATIONS["TP Huế"]
+        st.session_state["routing_start_point"] = REAL_MONITORED_LOCATIONS["Thuận Hóa"]
     if "routing_end_point" not in st.session_state:
         st.session_state["routing_end_point"] = REAL_MONITORED_LOCATIONS["Phú Vang"]
 
