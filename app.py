@@ -148,6 +148,12 @@ WEATHER_PROVIDER_OPTIONS = [
         "signup_url": "https://developer.tomtom.com/",
     },
     {
+        "label": "Google Maps JavaScript API (nền bản đồ Tab Bản đồ)",
+        "secret_key": "GOOGLE_MAPS_KEY",
+        "env_var_name": "GOOGLE_MAPS_API_KEY",
+        "signup_url": "https://console.cloud.google.com/google/maps-apis/credentials",
+    },
+    {
         "label": "OpenWeatherMap",
         "secret_key": "OPENWEATHER_KEY",
         "env_var_name": "OPENWEATHER_API_KEY",
@@ -421,6 +427,12 @@ def apply_global_ui_theme():
         h1, h2, h3, h4, h5, h6 {
             color: #f8fafc !important;
             font-weight: 700 !important;
+        }
+        /* Tiêu đề trang chính (st.title() - "Dự báo ngập lụt Thừa Thiên Huế") - tăng cỡ chữ to hơn
+           hẳn mặc định của Streamlit để nổi bật ngay khi mở app, đúng vai trò tiêu đề duy nhất/quan
+           trọng nhất của toàn trang (khác các st.subheader() ở từng tab, vẫn giữ nguyên cỡ h2/h3). */
+        h1 {
+            font-size: 3rem !important;
         }
         p, li, label, span, div {
             color: #e5eefc;
@@ -4327,6 +4339,93 @@ def build_forecast_popup_html(location_name: str, location_forecast_df: pd.DataF
     )
 
 
+# Style JSON "Night mode" cho Google Maps JavaScript API (định dạng chuẩn của Google Maps Styling
+# Wizard) - phối màu khớp theme tối chung của app (nền #0b1220/#0f172a, chữ #cbd5e1/#f8fafc, giống hệt
+# `apply_global_ui_theme()`/`apply_dark_plotly_theme()`), để bản đồ không bị "sáng lạc quẻ" giữa 1 app
+# toàn giao diện tối.
+GOOGLE_MAPS_DARK_STYLE = [
+    {"elementType": "geometry", "stylers": [{"color": "#0b1220"}]},
+    {"elementType": "labels.text.stroke", "stylers": [{"color": "#0b1220"}]},
+    {"elementType": "labels.text.fill", "stylers": [{"color": "#cbd5e1"}]},
+    {"featureType": "administrative", "elementType": "geometry", "stylers": [{"color": "#334155"}]},
+    {"featureType": "administrative.country", "elementType": "labels.text.fill", "stylers": [{"color": "#f8fafc"}]},
+    {"featureType": "administrative.land_parcel", "stylers": [{"visibility": "off"}]},
+    {"featureType": "administrative.locality", "elementType": "labels.text.fill", "stylers": [{"color": "#f8fafc"}]},
+    {"featureType": "poi", "elementType": "labels.text.fill", "stylers": [{"color": "#94a3b8"}]},
+    {"featureType": "poi.park", "elementType": "geometry", "stylers": [{"color": "#0f172a"}]},
+    {"featureType": "road", "elementType": "geometry", "stylers": [{"color": "#1e293b"}]},
+    {"featureType": "road", "elementType": "geometry.stroke", "stylers": [{"color": "#0b1220"}]},
+    {"featureType": "road", "elementType": "labels.text.fill", "stylers": [{"color": "#94a3b8"}]},
+    {"featureType": "road.highway", "elementType": "geometry", "stylers": [{"color": "#334155"}]},
+    {"featureType": "road.highway", "elementType": "geometry.stroke", "stylers": [{"color": "#0b1220"}]},
+    {"featureType": "road.highway", "elementType": "labels.text.fill", "stylers": [{"color": "#cbd5e1"}]},
+    {"featureType": "transit", "elementType": "geometry", "stylers": [{"color": "#1e293b"}]},
+    {"featureType": "transit.station", "elementType": "labels.text.fill", "stylers": [{"color": "#94a3b8"}]},
+    {"featureType": "water", "elementType": "geometry", "stylers": [{"color": "#020817"}]},
+    {"featureType": "water", "elementType": "labels.text.fill", "stylers": [{"color": "#64748b"}]},
+]
+
+
+def inject_google_maps_tile_layer(routing_map: folium.Map, api_key: str) -> None:
+    """
+    Thay nền bản đồ bằng Google Maps THẬT (theme tối tuỳ chỉnh `GOOGLE_MAPS_DARK_STYLE`) - dùng plugin
+    cộng đồng `Leaflet.GoogleMutant` để nhúng ĐÚNG LUẬT (qua chính Google Maps JavaScript API + API key
+    thật), KHÔNG dùng URL tile thô kiểu `mt0.google.com/vt?...` như nhiều nơi vẫn làm - cách đó VI PHẠM
+    điều khoản dịch vụ của Google (chỉ được phép hiển thị Google Maps qua chính SDK/API chính thức).
+
+    NGUYÊN LÝ: `GoogleMutant` không tải "tile ảnh" như Leaflet thường làm - nó tạo 1 instance Google
+    Maps THẬT (ẩn) rồi đồng bộ (mutate) DOM của nó khớp với khung nhìn Leaflet hiện tại, nên vẫn tương
+    thích với toàn bộ marker/GeoJson/PolyLine mà `folium` đã vẽ trên map Leaflet gốc.
+
+    GIỚI HẠN CẦN BIẾT (đọc kỹ trước khi bật):
+    - Cần API key Google Maps JavaScript API THẬT, gắn với tài khoản Google Cloud CÓ THANH TOÁN (dù có
+      gói miễn phí ~$200/tháng) - xem `WEATHER_PROVIDER_OPTIONS` (secret_key='GOOGLE_MAPS_KEY').
+    - Nhãn địa danh trên Google Maps do CHÍNH GOOGLE cập nhật, KHÔNG do code này kiểm soát được - vẫn
+      cần tự mở bản đồ bằng trình duyệt thật để xác nhận đã đúng cấu trúc hành chính 2025 (phường/xã)
+      hay chưa, TƯƠNG TỰ cách đã kiểm chứng Esri/CartoDB/OSM trước đó bằng ảnh tile thật.
+    - CHƯA kiểm chứng được bằng cách tải ảnh tĩnh qua `curl` như 3 nguồn kia - Google Maps JS API cần
+      API key thật + trình duyệt thật để khởi tạo (không có endpoint ảnh tĩnh miễn phí để tải trước) -
+      nghĩa là PHẢI tự mở app bằng trình duyệt thật sau khi cấu hình key để xác nhận bản đồ hiện đúng,
+      không phải màn hình trắng/lỗi console (ví dụ do API "Maps JavaScript API" chưa được BẬT trong
+      Google Cloud Console, dù đã có API key).
+    """
+    routing_map.get_root().header.add_child(
+        folium.JavascriptLink(f"https://maps.googleapis.com/maps/api/js?key={api_key}")
+    )
+    routing_map.get_root().header.add_child(
+        folium.JavascriptLink(
+            "https://unpkg.com/leaflet.gridlayer.googlemutant@latest/dist/Leaflet.GoogleMutant.js"
+        )
+    )
+
+    map_variable_name = routing_map.get_name()
+    style_json = json.dumps(GOOGLE_MAPS_DARK_STYLE)
+    # Chờ CẢ 2 script (Google Maps JS SDK + plugin GoogleMutant) tải xong bằng cách tự kiểm tra định kỳ
+    # (polling) thay vì giả định thứ tự tải - `<script src>` không đảm bảo đã CHẠY XONG (parse+eval)
+    # ngay khi DOM tới được dòng tiếp theo trong mọi trình duyệt/điều kiện mạng.
+    injection_script = f"""
+    <script>
+    (function() {{
+        function addGoogleMutantLayer() {{
+            if (typeof google === 'undefined' || typeof google.maps === 'undefined' ||
+                typeof L === 'undefined' || typeof L.gridLayer === 'undefined' ||
+                typeof L.gridLayer.googleMutant === 'undefined' ||
+                typeof {map_variable_name} === 'undefined') {{
+                setTimeout(addGoogleMutantLayer, 200);
+                return;
+            }}
+            L.gridLayer.googleMutant({{
+                type: 'roadmap',
+                styles: {style_json}
+            }}).addTo({map_variable_name});
+        }}
+        addGoogleMutantLayer();
+    }})();
+    </script>
+    """
+    routing_map.get_root().script.add_child(folium.Element(injection_script))
+
+
 def build_smart_routing_map(
     df_predictions: pd.DataFrame,
     real_flooded_polygons: list,
@@ -4345,41 +4444,46 @@ def build_smart_routing_map(
     """
     center_lat = sum(lat for lat, _ in REAL_MONITORED_LOCATIONS.values()) / len(REAL_MONITORED_LOCATIONS)
     center_lon = sum(lon for _, lon in REAL_MONITORED_LOCATIONS.values()) / len(REAL_MONITORED_LOCATIONS)
-    # NỀN BẢN ĐỒ: dùng Esri "World Dark Gray Canvas" (server.arcgisonline.com) thay vì OpenStreetMap
-    # hoặc CartoDB mặc định trước đây - ĐÃ KIỂM CHỨNG THỰC TẾ CẢ HAI ĐỀU LỖI:
-    #   1. `tile.openstreetmap.org` (OSM gốc): chặn/không phản hồi ổn định từ nhiều môi trường server/
-    #      cloud (chính sách Tile Usage Policy của OSM ưu tiên trình duyệt người dùng cuối).
-    #   2. `basemaps.cartocdn.com` ("CartoDB dark_matter"): tải được (HTTP 200) nhưng trả về ẢNH
-    #      WATERMARK "API KEY REQUIRED" thay vì bản đồ thật - CARTO đã đổi chính sách, gói ẩn danh
-    #      miễn phí không còn dùng được cho basemap nữa (lỗi thật gặp khi deploy, đã tự kiểm tra bằng
-    #      cách tải ảnh tile về xem trực tiếp, không chỉ dựa vào mã HTTP 200 - 200 không có nghĩa là
-    #      NỘI DUNG đúng).
+    # NỀN BẢN ĐỒ: ưu tiên Google Maps THẬT (qua `inject_google_maps_tile_layer()`) nếu đã cấu hình
+    # GOOGLE_MAPS_KEY - nhãn địa danh do Google tự cập nhật, độc lập với Esri (vốn còn hiển thị "Huyện"/
+    # "Thị Xã" cũ, chưa cập nhật theo đợt sáp nhập hành chính 2025 của Việt Nam). KHÔNG cấu hình key thì
+    # fallback về Esri "World Dark Gray Canvas" như cũ - ĐÃ KIỂM CHỨNG THỰC TẾ CẢ 2 NGUỒN THAY THẾ MIỄN
+    # PHÍ KHÁC ĐỀU LỖI:
+    #   1. `tile.openstreetmap.org` (OSM gốc): nhãn đúng nhưng giao diện sáng lệch theme, và vi phạm
+    #      Tile Usage Policy của OSM nếu dùng cho app production (chỉ dành cho cá nhân/thử nghiệm).
+    #   2. `basemaps.cartocdn.com` ("CartoDB dark_all"): tải được (HTTP 200) nhưng trả về ẢNH WATERMARK
+    #      "API KEY REQUIRED" thay vì bản đồ thật - Carto đã bỏ gói ẩn danh miễn phí cho basemap (đã tự
+    #      kiểm tra bằng cách tải ảnh tile về XEM TRỰC TIẾP, không chỉ dựa vào mã HTTP 200).
     # Esri Dark Gray Canvas (2 lớp: Base + Reference nhãn) ĐÃ kiểm chứng bằng cách tải + xem ảnh tile
     # THẬT tại chính khu vực Huế - ra bản đồ chi tiết, không watermark, không cần API key, thuộc dịch
     # vụ ArcGIS Online công khai của Esri (được phép dùng ẩn danh cho mục đích tham chiếu chung).
     routing_map = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles=None)
-    folium.TileLayer(
-        tiles=(
-            "https://server.arcgisonline.com/ArcGIS/rest/services/"
-            "Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
-        ),
-        attr="Esri, HERE, Garmin, FAO, NOAA, USGS",
-        name="Nền bản đồ",
-        overlay=False,
-        control=False,
-        max_zoom=16,
-    ).add_to(routing_map)
-    folium.TileLayer(
-        tiles=(
-            "https://server.arcgisonline.com/ArcGIS/rest/services/"
-            "Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
-        ),
-        attr="Esri",
-        name="Nhãn tên đường/địa danh",
-        overlay=True,
-        control=False,
-        max_zoom=16,
-    ).add_to(routing_map)
+    google_maps_api_key = get_api_secret("GOOGLE_MAPS_KEY", "GOOGLE_MAPS_API_KEY")
+    if google_maps_api_key:
+        inject_google_maps_tile_layer(routing_map, google_maps_api_key)
+    else:
+        folium.TileLayer(
+            tiles=(
+                "https://server.arcgisonline.com/ArcGIS/rest/services/"
+                "Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+            ),
+            attr="Esri, HERE, Garmin, FAO, NOAA, USGS",
+            name="Nền bản đồ",
+            overlay=False,
+            control=False,
+            max_zoom=16,
+        ).add_to(routing_map)
+        folium.TileLayer(
+            tiles=(
+                "https://server.arcgisonline.com/ArcGIS/rest/services/"
+                "Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
+            ),
+            attr="Esri",
+            name="Nhãn tên đường/địa danh",
+            overlay=True,
+            control=False,
+            max_zoom=16,
+        ).add_to(routing_map)
 
     # ---- (1) Giám sát: TÔ RANH GIỚI HÀNH CHÍNH thật của 5 địa phương, màu theo đúng 'Nguy cơ' dự báo
     # của AI. FAIL-SAFE: thiếu dòng dữ liệu cũng KHÔNG mặc định "An toàn" (xem docstring
