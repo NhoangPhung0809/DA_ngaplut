@@ -582,6 +582,12 @@ def apply_smote_to_training_data(X_train_scaled: pd.DataFrame, y_train: pd.Serie
     """Áp dụng SMOTE chỉ trên tập train để cân bằng 3 lớp."""
     print("\nClass distribution BEFORE SMOTE:")
     print(y_train.value_counts().sort_index())
+    export_ctgan_comparison_artifacts(
+        X_before=X_train_scaled,
+        y_before=y_train,
+        method_used="SMOTE",
+        status="before_exported",
+    )
 
     min_class_count = int(y_train.value_counts().min())
     if min_class_count < 2:
@@ -596,6 +602,19 @@ def apply_smote_to_training_data(X_train_scaled: pd.DataFrame, y_train: pd.Serie
 
     X_train_balanced = pd.DataFrame(X_train_balanced, columns=FEATURE_COLS)
     y_train_balanced = pd.Series(y_train_balanced, name=TARGET_COL)
+    # BUG THẬT đã gặp: trước đây hàm này KHÔNG export artifact "after" - khi người dùng chọn method=
+    # "smote" (không fallback từ CTGAN), khối "Biểu đồ so sánh phân phối lớp trước/sau" trên UI vẫn
+    # hiển thị `ctgan_class_distribution.json` CŨ (từ lần chạy trước, có thể method="none"), khiến
+    # người dùng thấy "Method dùng thực tế: NONE" dù thực tế vừa train bằng SMOTE thành công - trông
+    # như dữ liệu "tự đổi lại" giữa các lần xem, thật ra chỉ là export bị bỏ sót nên không cập nhật.
+    export_ctgan_comparison_artifacts(
+        X_before=X_train_scaled,
+        y_before=y_train,
+        X_after=X_train_balanced,
+        y_after=y_train_balanced,
+        method_used="SMOTE",
+        status="completed",
+    )
     return X_train_balanced, y_train_balanced
 
 
