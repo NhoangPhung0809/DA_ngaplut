@@ -692,10 +692,17 @@ def export_hyperparameter_tuning_results(tuning_results: dict) -> None:
 
 
 def resolve_balancing_method(balancing_method: str = "auto") -> str:
-    """Chọn chiến lược cân bằng dữ liệu an toàn cho pipeline."""
+    """
+    Chọn chiến lược cân bằng dữ liệu an toàn cho pipeline.
+
+    `"none"`: KHÔNG áp dụng CTGAN/SMOTE nào cả - giữ nguyên phân phối lớp mất cân bằng gốc của tập
+    train. Dùng để LÀM BASELINE đối chứng - trả lời trực tiếp câu hỏi "cân bằng dữ liệu có thực sự cải
+    thiện F1-Macro không, hay model vẫn học tốt như vậy dù không cân bằng gì?" bằng cách so sánh kết
+    quả huấn luyện CÙNG 1 model giữa 2 lần chạy (có/không cân bằng) - không suy diễn, có số liệu thật.
+    """
     requested_method = str(balancing_method or "auto").strip().lower()
-    if requested_method not in {"auto", "gan", "smote"}:
-        raise ValueError("balancing_method phải là một trong: 'auto', 'gan', 'smote'.")
+    if requested_method not in {"auto", "gan", "smote", "none"}:
+        raise ValueError("balancing_method phải là một trong: 'auto', 'gan', 'smote', 'none'.")
 
     if requested_method == "auto":
         return "gan" if CTGAN is not None else "smote"
@@ -865,13 +872,29 @@ def balance_training_data(
     y_train: pd.Series,
     balancing_method: str = "auto",
 ):
-    """Cân bằng dữ liệu train bằng CTGAN hoặc SMOTE tùy cấu hình."""
+    """Cân bằng dữ liệu train bằng CTGAN hoặc SMOTE tùy cấu hình - hoặc GIỮ NGUYÊN nếu chọn "none"."""
     selected_method = resolve_balancing_method(balancing_method)
     print(f"\nSelected balancing method: {selected_method.upper()}")
 
     if selected_method == "gan":
         return apply_gan_data_augmentation(X_train_scaled, y_train)
-    return apply_smote_to_training_data(X_train_scaled, y_train)
+    if selected_method == "smote":
+        return apply_smote_to_training_data(X_train_scaled, y_train)
+
+    # "none" - KHÔNG cân bằng gì cả, vẫn xuất artifact Before/After (giống hệt nhau) để khối "Cân bằng
+    # dữ liệu" trên UI không bị trống/lỗi, và người xem thấy RÕ RÀNG là bước này đã bị bỏ qua có chủ ý
+    # (status="skipped_by_user"), không phải quên chạy hay lỗi.
+    print("Class distribution (KHÔNG cân bằng - giữ nguyên gốc):")
+    print(y_train.value_counts().sort_index())
+    export_ctgan_comparison_artifacts(
+        X_before=X_train_scaled,
+        y_before=y_train,
+        X_after=X_train_scaled,
+        y_after=y_train,
+        method_used="NONE",
+        status="skipped_by_user",
+    )
+    return X_train_scaled, y_train
 
 
 def build_daily_modeling_dataset(df: pd.DataFrame) -> pd.DataFrame:

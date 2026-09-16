@@ -1661,12 +1661,13 @@ def build_ctgan_distribution_discussion(distribution_df: pd.DataFrame, title: st
 def render_ctgan_before_after_chart(before_distribution_df: pd.DataFrame, after_distribution_df: pd.DataFrame) -> None:
     """
     Biểu đồ CỘT NHÓM (grouped bar) so sánh trực quan phân phối 3 lớp nguy cơ ngập TRƯỚC và SAU khi xử
-    lý mất cân bằng (CTGAN, fallback SMOTE) - bổ sung cho 2 bảng số liệu ở `render_ctgan_dataset_panel()`
-    vốn đặt cạnh nhau ở 2 CỘT RIÊNG BIỆT nên khó so sánh trực tiếp bằng mắt.
+    lý mất cân bằng (CTGAN, fallback SMOTE, hoặc "none" - không xử lý gì) - bổ sung cho 2 bảng số liệu
+    ở `render_ctgan_dataset_panel()` vốn đặt cạnh nhau ở 2 CỘT RIÊNG BIỆT nên khó so sánh trực tiếp
+    bằng mắt.
 
-    "Trước" và "Sau" là 2 THỰC THỂ khác nhau (categorical - identity), KHÔNG phải 1 đại lượng đo lường
-    liên tục, nên dùng 2 MÀU CỐ ĐỊNH (xám = trước/còn vấn đề, xanh dương = sau/đã xử lý) thay vì thang
-    màu sequential/diverging.
+    BỐ CỤC: 2 CỤM trên trục X ("Trước xử lý" / "Sau xử lý"), MỖI CỤM có 3 cột - 1 cột/lớp, TÔ MÀU
+    THEO LỚP (không phải theo giai đoạn như bản trước) - cùng 1 màu cho 1 lớp ở CẢ 2 cụm, giúp dễ dò
+    theo mắt xem RIÊNG lớp nào tăng/giảm bao nhiêu giữa 2 giai đoạn, thay vì so 2 màu theo giai đoạn.
     """
     if before_distribution_df.empty and after_distribution_df.empty:
         st.info("Chưa có đủ dữ liệu phân phối lớp để vẽ biểu đồ so sánh.")
@@ -1682,24 +1683,24 @@ def render_ctgan_before_after_chart(before_distribution_df: pd.DataFrame, after_
         [_prepare(before_distribution_df, "Trước xử lý"), _prepare(after_distribution_df, "Sau xử lý")],
         ignore_index=True,
     )
-    class_order = [
-        CLASS_LABEL_VI[key] for key in ["0", "1", "2"] if CLASS_LABEL_VI[key] in combined_df["Nhãn lớp"].values
-    ]
-    stage_colors = {"Trước xử lý": "#64748b", "Sau xử lý": "#3b82f6"}
+    stage_order = ["Trước xử lý", "Sau xử lý"]
+    # Cùng 1 bảng màu theo LỚP dùng xuyên suốt app (khớp `render_class_distribution_interactive()`) -
+    # để người xem quen mắt: lớp nào luôn 1 màu đó ở MỌI biểu đồ trong hệ thống, không riêng biểu đồ này.
+    class_colors = {"0": "#4C78A8", "1": "#F58518", "2": "#E45756"}
 
     fig = go.Figure()
-    for stage_label, stage_color in stage_colors.items():
-        stage_df = combined_df[combined_df["Giai đoạn"] == stage_label]
-        if stage_df.empty:
+    for class_key in ["0", "1", "2"]:
+        class_label = CLASS_LABEL_VI.get(class_key)
+        if class_label is None or class_label not in combined_df["Nhãn lớp"].values:
             continue
-        stage_df = stage_df.set_index("Nhãn lớp").reindex(class_order).reset_index()
+        class_df = combined_df[combined_df["Nhãn lớp"] == class_label].set_index("Giai đoạn").reindex(stage_order)
         fig.add_trace(
             go.Bar(
-                name=stage_label,
-                x=stage_df["Nhãn lớp"],
-                y=stage_df["Số lượng"],
-                marker_color=stage_color,
-                text=[f"{value:,.0f}" if pd.notna(value) else "" for value in stage_df["Số lượng"]],
+                name=class_label,
+                x=stage_order,
+                y=class_df["Số lượng"],
+                marker_color=class_colors.get(class_key, "#94a3b8"),
+                text=[f"{value:,.0f}" if pd.notna(value) else "" for value in class_df["Số lượng"]],
                 textposition="outside",
                 textfont=dict(color="#f8fafc"),
             )
@@ -1961,7 +1962,10 @@ def render_time_series_cv_section() -> None:
 
     fold_metadata = payload.get("fold_metadata", [])
     if fold_metadata:
-        with st.expander("Chi tiết từng fold (phạm vi thời gian train/test)", expanded=False):
+        # DÙNG checkbox thay vì st.expander lồng bên trong - Streamlit KHÔNG cho phép expander lồng
+        # expander (hàm này luôn được gọi bên trong 1 expander khác ở render_preprocessing_training_tab()
+        # - lỗi thật đã gặp: "Expanders may not be nested inside other expanders" làm crash cả trang).
+        if st.checkbox("Xem chi tiết từng fold (phạm vi thời gian train/test)", key="show_cv_fold_details"):
             st.dataframe(pd.DataFrame(fold_metadata), use_container_width=True, hide_index=True)
 
     render_chart_discussion(
@@ -1990,10 +1994,14 @@ def render_training_controls_panel() -> None:
         )
         balancing_method = st.selectbox(
             "Phương pháp cân bằng dữ liệu",
-            options=["auto", "gan", "smote"],
+            options=["auto", "gan", "smote", "none"],
             index=0,
             key="selected_balancing_method",
-            help="'auto' ưu tiên CTGAN, tự fallback sang SMOTE nếu thiếu thư viện hoặc lỗi khi chạy.",
+            help=(
+                "'auto' ưu tiên CTGAN, tự fallback sang SMOTE nếu thiếu thư viện hoặc lỗi khi chạy. "
+                "'none' KHÔNG cân bằng gì cả (giữ nguyên phân phối lớp gốc) - dùng để đối chứng, xem "
+                "cân bằng dữ liệu có thực sự cải thiện F1-Macro so với không làm gì hay không."
+            ),
         )
         if st.button(
             "Bắt đầu Huấn luyện Nền",
