@@ -2135,31 +2135,9 @@ def render_preprocessing_training_tab() -> None:
                 "- **Phương pháp**: chia theo mốc thời gian (`shuffle=False`) - tập Test luôn nằm sau "
                 "tập Train, không chia ngẫu nhiên.\n"
             )
-            # QUAN TRỌNG - GIẢI THÍCH KỸ THUẬT DÙNG CHO PHẦN BẢO VỆ LUẬN VĂN:
-            # Với dữ liệu chuỗi thời gian, TUYỆT ĐỐI không dùng train_test_split(shuffle=True) hay K-Fold
-            # thông thường, vì sẽ để lọt thông tin TƯƠNG LAI vào tập huấn luyện (data leakage), khiến độ
-            # chính xác đánh giá bị "ảo" (cao hơn thực tế khi triển khai thật).
-            #
-            # TRƯỚC ĐÂY khối này chỉ là đoạn code MINH HOẠ Ý TƯỞNG (`sklearn.TimeSeriesSplit`, kèm
-            # `# TODO: fit/evaluate mô hình cho từng fold tại đây`) - KHÔNG hề chạy thật, chỉ để giải
-            # thích khái niệm. GVPB đề cương đã góp ý đúng điểm này ("nên thiết kế kiểm định chéo theo
-            # chuỗi thời gian") - đã triển khai THẬT (không còn là TODO nữa) ở `analyze_and_train.py::
-            # generate_chronological_cv_folds()`/`run_time_series_cv_pipeline()`, dùng logic walk-forward
-            # tương đương TimeSeriesSplit nhưng tách RIÊNG từng địa phương trước khi gộp fold (tránh 1
-            # fold lẫn dữ liệu tương lai của địa phương này với quá khứ của địa phương khác). Chạy thật
-            # và xem kết quả ở khối "Kiểm định chéo theo chuỗi thời gian (Time Series CV)" bên dưới,
-            # không còn là code minh hoạ suông nữa.
-            st.info(
-                "Kiểm định chéo theo chuỗi thời gian (Time Series CV, kiểu walk-forward) **đã được triển "
-                "khai thật** - không còn là code minh hoạ nữa. Mở khối **'Kiểm định chéo theo chuỗi thời "
-                "gian (Time Series CV)'** bên dưới để chọn model và chạy thật, xem F1 trung bình ± độ "
-                "lệch chuẩn qua nhiều giai đoạn thời gian."
-            )
-            render_chart_discussion(
-                "Time Series CV khác K-Fold thông thường ở chỗ nó không xáo trộn dữ liệu - đảm bảo mọi "
-                "lần đánh giá đều mô phỏng đúng bối cảnh dự báo thực tế (chỉ dùng dữ liệu quá khứ để dự "
-                "báo tương lai), tránh đánh giá bị 'ảo' do rò rỉ thông tin tương lai."
-            )
+            # Kiểm định chéo theo chuỗi thời gian (Time Series CV, walk-forward) đã triển khai THẬT ở
+            # `analyze_and_train.py::generate_chronological_cv_folds()`/`run_time_series_cv_pipeline()` -
+            # xem kết quả ở khối "Kiểm định chéo theo chuỗi thời gian (Time Series CV)" bên dưới.
 
     st.markdown("---")
 
