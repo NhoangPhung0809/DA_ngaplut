@@ -10,7 +10,7 @@ def main():
     
     # Danh sách OSM Relation ID của các huyện Thừa Thiên Huế
     districts = [
-        {"name": "TP Huế", "osm_id": "R4468442"},
+        {"name": "Thuận Hóa", "osm_id": "R4468442"},
         {"name": "Hương Thủy", "osm_id": "R4468443"},
         {"name": "Phú Vang", "osm_id": "R4468444"},
         {"name": "Hương Trà", "osm_id": "R4468445"},

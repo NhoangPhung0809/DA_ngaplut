@@ -332,7 +332,7 @@ def render_admin_api_key_panel() -> None:
 # phương) - thay thế hoàn toàn cho dữ liệu giả lập (dummy) trước đây. Đây là DUY NHẤT nguồn tọa độ
 # dùng cho cả bản đồ giám sát lẫn 2 ô chọn điểm đi/điểm đến của tính năng định tuyến bên dưới.
 REAL_MONITORED_LOCATIONS: dict[str, tuple[float, float]] = {
-    "TP Huế": (16.4637, 107.5909),
+    "Thuận Hóa": (16.4637, 107.5909),
     "Hương Thủy": (16.4022, 107.6833),
     "Hương Trà": (16.4525, 107.4989),
     "Phú Vang": (16.4506, 107.7289),
@@ -350,11 +350,18 @@ DISTRICT_BOUNDARY_GEOJSON_PATH = BASE_DIR / "data" / "geo" / "thuathienhue_distr
 # trong data/historical/. Dùng làm dự phòng khi CHƯA có model đã triển khai (xem
 # get_latest_flood_predictions()) và để lấy quan trắc gần nhất phục vụ suy luận model thật.
 LOCATION_HISTORICAL_FILE: dict[str, str] = {
-    "TP Huế": "TP_Hue_10years.csv",
+    "Thuận Hóa": "TP_Hue_10years.csv",
     "Hương Thủy": "Huong_Thuy_10years.csv",
     "Hương Trà": "Huong_Tra_10years.csv",
     "Phú Vang": "Phu_Vang_10years.csv",
     "Quảng Điền": "Quang_Dien_10years.csv",
+}
+
+# Chiều NGƯỢC LẠI của `LOCATION_HISTORICAL_FILE` (filename -> tên địa phương) - dùng ở
+# `load_eda_sample_dataframe()` để tra ĐÚNG tên hiển thị hiện hành, tránh tự suy tên từ filename (từng
+# sinh nhãn "TP Hue" không dấu, lệch với "Thuận Hóa" dùng ở mọi nơi khác trong app).
+HISTORICAL_FILE_TO_LOCATION_NAME: dict[str, str] = {
+    filename: location_name for location_name, filename in LOCATION_HISTORICAL_FILE.items()
 }
 
 # Danh sách đặc trưng đầu vào của model - import từ `shared_constants.py` (dùng CHUNG với
@@ -421,6 +428,12 @@ def apply_global_ui_theme():
         h1, h2, h3, h4, h5, h6 {
             color: #f8fafc !important;
             font-weight: 700 !important;
+        }
+        /* Tiêu đề trang chính (st.title() - "Dự báo ngập lụt Thừa Thiên Huế") - tăng cỡ chữ to hơn
+           hẳn mặc định của Streamlit để nổi bật ngay khi mở app, đúng vai trò tiêu đề duy nhất/quan
+           trọng nhất của toàn trang (khác các st.subheader() ở từng tab, vẫn giữ nguyên cỡ h2/h3). */
+        h1 {
+            font-size: 3rem !important;
         }
         p, li, label, span, div {
             color: #e5eefc;
@@ -1092,7 +1105,15 @@ def load_eda_sample_dataframe() -> pd.DataFrame:
             df = pd.read_csv(csv_file, on_bad_lines="skip", engine="python")
         except Exception:
             continue
-        df["Địa phương"] = csv_file.stem.replace("_10years", "").replace("_", " ").strip()
+        # Tra CHÍNH XÁC theo `LOCATION_HISTORICAL_FILE` (khớp key với REAL_MONITORED_LOCATIONS) thay vì
+        # tự suy tên từ filename (`csv_file.stem.replace("_10years", "").replace("_", " ")`) - cách cũ
+        # từng sinh ra "TP Hue" (KHÔNG dấu, từ file `TP_Hue_10years.csv`) hiển thị lẫn trong biểu đồ EDA
+        # trong khi mọi nơi khác trong app đã đổi đúng thành "Thuận Hóa" - 2 nhãn khác nhau cho CÙNG 1
+        # địa phương gây hiểu lầm là 2 vùng riêng biệt. Fallback về cách cũ CHỈ khi file không nằm trong
+        # danh sách 5 địa phương đã khai báo (an toàn hơn là để trống).
+        df["Địa phương"] = HISTORICAL_FILE_TO_LOCATION_NAME.get(
+            csv_file.name, csv_file.stem.replace("_10years", "").replace("_", " ").strip()
+        )
         frames.append(df)
 
     if not frames:
@@ -1658,19 +1679,18 @@ def build_ctgan_distribution_discussion(distribution_df: pd.DataFrame, title: st
     )
 
 
-def render_ctgan_before_after_chart(before_distribution_df: pd.DataFrame, after_distribution_df: pd.DataFrame) -> None:
+def build_ctgan_before_after_figure(before_distribution_df: pd.DataFrame, after_distribution_df: pd.DataFrame) -> "go.Figure | None":
     """
-    Biểu đồ CỘT NHÓM (grouped bar) so sánh trực quan phân phối 3 lớp nguy cơ ngập TRƯỚC và SAU khi xử
-    lý mất cân bằng (CTGAN, fallback SMOTE) - bổ sung cho 2 bảng số liệu ở `render_ctgan_dataset_panel()`
-    vốn đặt cạnh nhau ở 2 CỘT RIÊNG BIỆT nên khó so sánh trực tiếp bằng mắt.
+    Dựng Figure CỘT NHÓM (grouped bar) so sánh trực quan phân phối 3 lớp nguy cơ ngập TRƯỚC và SAU khi
+    xử lý mất cân bằng (CTGAN, fallback SMOTE, hoặc "none" - không xử lý gì) - tách riêng khỏi
+    `render_ctgan_before_after_chart()` để tái sử dụng khi xuất báo cáo (`build_evaluation_report_html()`).
 
-    "Trước" và "Sau" là 2 THỰC THỂ khác nhau (categorical - identity), KHÔNG phải 1 đại lượng đo lường
-    liên tục, nên dùng 2 MÀU CỐ ĐỊNH (xám = trước/còn vấn đề, xanh dương = sau/đã xử lý) thay vì thang
-    màu sequential/diverging.
+    BỐ CỤC: 2 CỤM trên trục X ("Trước xử lý" / "Sau xử lý"), MỖI CỤM có 3 cột - 1 cột/lớp, TÔ MÀU
+    THEO LỚP (không phải theo giai đoạn như bản trước) - cùng 1 màu cho 1 lớp ở CẢ 2 cụm, giúp dễ dò
+    theo mắt xem RIÊNG lớp nào tăng/giảm bao nhiêu giữa 2 giai đoạn, thay vì so 2 màu theo giai đoạn.
     """
     if before_distribution_df.empty and after_distribution_df.empty:
-        st.info("Chưa có đủ dữ liệu phân phối lớp để vẽ biểu đồ so sánh.")
-        return
+        return None
 
     def _prepare(distribution_df: pd.DataFrame, stage_label: str) -> pd.DataFrame:
         prepared_df = distribution_df.copy()
@@ -1682,24 +1702,24 @@ def render_ctgan_before_after_chart(before_distribution_df: pd.DataFrame, after_
         [_prepare(before_distribution_df, "Trước xử lý"), _prepare(after_distribution_df, "Sau xử lý")],
         ignore_index=True,
     )
-    class_order = [
-        CLASS_LABEL_VI[key] for key in ["0", "1", "2"] if CLASS_LABEL_VI[key] in combined_df["Nhãn lớp"].values
-    ]
-    stage_colors = {"Trước xử lý": "#64748b", "Sau xử lý": "#3b82f6"}
+    stage_order = ["Trước xử lý", "Sau xử lý"]
+    # Cùng 1 bảng màu theo LỚP dùng xuyên suốt app (khớp `render_class_distribution_interactive()`) -
+    # để người xem quen mắt: lớp nào luôn 1 màu đó ở MỌI biểu đồ trong hệ thống, không riêng biểu đồ này.
+    class_colors = {"0": "#4C78A8", "1": "#F58518", "2": "#E45756"}
 
     fig = go.Figure()
-    for stage_label, stage_color in stage_colors.items():
-        stage_df = combined_df[combined_df["Giai đoạn"] == stage_label]
-        if stage_df.empty:
+    for class_key in ["0", "1", "2"]:
+        class_label = CLASS_LABEL_VI.get(class_key)
+        if class_label is None or class_label not in combined_df["Nhãn lớp"].values:
             continue
-        stage_df = stage_df.set_index("Nhãn lớp").reindex(class_order).reset_index()
+        class_df = combined_df[combined_df["Nhãn lớp"] == class_label].set_index("Giai đoạn").reindex(stage_order)
         fig.add_trace(
             go.Bar(
-                name=stage_label,
-                x=stage_df["Nhãn lớp"],
-                y=stage_df["Số lượng"],
-                marker_color=stage_color,
-                text=[f"{value:,.0f}" if pd.notna(value) else "" for value in stage_df["Số lượng"]],
+                name=class_label,
+                x=stage_order,
+                y=class_df["Số lượng"],
+                marker_color=class_colors.get(class_key, "#94a3b8"),
+                text=[f"{value:,.0f}" if pd.notna(value) else "" for value in class_df["Số lượng"]],
                 textposition="outside",
                 textfont=dict(color="#f8fafc"),
             )
@@ -1714,6 +1734,16 @@ def render_ctgan_before_after_chart(before_distribution_df: pd.DataFrame, after_
         yaxis=dict(title="Số lượng quan sát", color="#cbd5e1", gridcolor="#334155"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(color="#f8fafc", size=13)),
     )
+    return fig
+
+
+def render_ctgan_before_after_chart(before_distribution_df: pd.DataFrame, after_distribution_df: pd.DataFrame) -> None:
+    """Hiển thị biểu đồ so sánh phân phối lớp trước/sau xử lý mất cân bằng lên UI - việc dựng Figure
+    nằm ở `build_ctgan_before_after_figure()`."""
+    fig = build_ctgan_before_after_figure(before_distribution_df, after_distribution_df)
+    if fig is None:
+        st.info("Chưa có đủ dữ liệu phân phối lớp để vẽ biểu đồ so sánh.")
+        return
     st.plotly_chart(fig, use_container_width=True)
     render_chart_discussion(
         "Biểu đồ trên đặt cạnh nhau 2 giai đoạn để thấy ngay hiệu quả xử lý mất cân bằng: cột xám "
@@ -1961,7 +1991,10 @@ def render_time_series_cv_section() -> None:
 
     fold_metadata = payload.get("fold_metadata", [])
     if fold_metadata:
-        with st.expander("Chi tiết từng fold (phạm vi thời gian train/test)", expanded=False):
+        # DÙNG checkbox thay vì st.expander lồng bên trong - Streamlit KHÔNG cho phép expander lồng
+        # expander (hàm này luôn được gọi bên trong 1 expander khác ở render_preprocessing_training_tab()
+        # - lỗi thật đã gặp: "Expanders may not be nested inside other expanders" làm crash cả trang).
+        if st.checkbox("Xem chi tiết từng fold (phạm vi thời gian train/test)", key="show_cv_fold_details"):
             st.dataframe(pd.DataFrame(fold_metadata), use_container_width=True, hide_index=True)
 
     render_chart_discussion(
@@ -1990,10 +2023,14 @@ def render_training_controls_panel() -> None:
         )
         balancing_method = st.selectbox(
             "Phương pháp cân bằng dữ liệu",
-            options=["auto", "gan", "smote"],
+            options=["auto", "gan", "smote", "none"],
             index=0,
             key="selected_balancing_method",
-            help="'auto' ưu tiên CTGAN, tự fallback sang SMOTE nếu thiếu thư viện hoặc lỗi khi chạy.",
+            help=(
+                "'auto' ưu tiên CTGAN, tự fallback sang SMOTE nếu thiếu thư viện hoặc lỗi khi chạy. "
+                "'none' KHÔNG cân bằng gì cả (giữ nguyên phân phối lớp gốc) - dùng để đối chứng, xem "
+                "cân bằng dữ liệu có thực sự cải thiện F1-Macro so với không làm gì hay không."
+            ),
         )
         if st.button(
             "Bắt đầu Huấn luyện Nền",
@@ -2129,11 +2166,11 @@ def render_preprocessing_training_tab() -> None:
 # ==================================================================================================
 # TAB 3 - ĐÁNH GIÁ MÔ HÌNH
 # ==================================================================================================
-def render_confusion_matrix_heatmap(confusion_matrix_json_path: Path) -> None:
+def build_confusion_matrix_figure(confusion_matrix_json_path: Path) -> "go.Figure | None":
     """
-    Confusion Matrix dạng heatmap TƯƠNG TÁC (Plotly) - đọc dữ liệu số thô từ `confusion_matrix.json`
-    (do `build_confusion_matrix_from_labels()` trong `analyze_and_train.py` xuất kèm ảnh PNG), thay
-    cho ảnh tĩnh trước đây. Hover để xem chính xác số lượng từng ô, zoom được khi cần soi kỹ.
+    Dựng Figure Confusion Matrix (Plotly) từ `confusion_matrix.json` - tách riêng khỏi
+    `render_confusion_matrix_heatmap()` để có thể tái sử dụng khi xuất báo cáo (`build_evaluation_report_html()`),
+    không chỉ để `st.plotly_chart()` trực tiếp lên UI.
     """
     with confusion_matrix_json_path.open("r", encoding="utf-8") as file:
         payload = json.load(file)
@@ -2141,8 +2178,7 @@ def render_confusion_matrix_heatmap(confusion_matrix_json_path: Path) -> None:
     labels = payload.get("labels") or []
     matrix = payload.get("matrix") or []
     if not labels or not matrix:
-        st.info("File `confusion_matrix.json` rỗng hoặc thiếu dữ liệu.")
-        return
+        return None
 
     matrix_array = np.asarray(matrix, dtype=float)
     max_value = matrix_array.max() if matrix_array.size else 0
@@ -2185,16 +2221,26 @@ def render_confusion_matrix_heatmap(confusion_matrix_json_path: Path) -> None:
         margin=dict(t=50, b=40, l=10, r=10),
     )
     fig.update_traces(colorbar=dict(title=dict(text="Số lượng", font=dict(color="#f8fafc")), tickfont=dict(color="#cbd5e1")))
+    return fig
+
+
+def render_confusion_matrix_heatmap(confusion_matrix_json_path: Path) -> None:
+    """
+    Confusion Matrix dạng heatmap TƯƠNG TÁC (Plotly) - hover để xem chính xác số lượng từng ô, zoom
+    được khi cần soi kỹ. Chỉ lo phần hiển thị lên UI, việc dựng Figure nằm ở `build_confusion_matrix_figure()`.
+    """
+    fig = build_confusion_matrix_figure(confusion_matrix_json_path)
+    if fig is None:
+        st.info("File `confusion_matrix.json` rỗng hoặc thiếu dữ liệu.")
+        return
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> None:
+def build_feature_importance_figure(feature_importance_json_path: Path) -> "go.Figure | None":
     """
-    Biểu đồ THANH NGANG (horizontal bar, Plotly) cho Feature Importance - theo góp ý của GVHD (đổi từ
-    heatmap sang thanh màu, dễ so sánh độ lớn giữa các biến hơn heatmap 1 hàng). Đọc dữ liệu số thô từ
-    `feature_importance.json` (do `plot_feature_importance()` trong `analyze_and_train.py` xuất kèm
-    ảnh PNG) - KHÔNG tính lại importance ở đây, tránh chạy lại `permutation_importance` (tốn thời
-    gian) mỗi lần Streamlit rerun.
+    Dựng Figure Feature Importance (Plotly) từ `feature_importance.json` - tách riêng khỏi
+    `render_feature_importance_bar_chart()` để tái sử dụng khi xuất báo cáo
+    (`build_evaluation_report_html()`).
 
     Sắp xếp GIẢM DẦN theo Importance, TẤT CẢ các thanh dùng CHUNG 1 MÀU (không tô gradient theo giá
     trị) - vì các thanh đang biểu diễn CÙNG 1 đại lượng (mức độ quan trọng), độ dài thanh đã đủ thể
@@ -2206,8 +2252,7 @@ def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> N
 
     importance_df = pd.DataFrame(importance_records)
     if importance_df.empty:
-        st.info("File `feature_importance.json` rỗng.")
-        return
+        return None
     # Sắp xếp TĂNG DẦN vì Plotly vẽ thanh ngang từ DƯỚI LÊN - biến quan trọng nhất cần nằm TRÊN CÙNG.
     importance_df = importance_df.sort_values("Importance", ascending=True)
 
@@ -2238,6 +2283,15 @@ def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> N
         yaxis=dict(color="#f8fafc", tickfont=dict(size=15)),
         showlegend=False,
     )
+    return fig
+
+
+def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> None:
+    """Hiển thị Figure Feature Importance lên UI - việc dựng Figure nằm ở `build_feature_importance_figure()`."""
+    fig = build_feature_importance_figure(feature_importance_json_path)
+    if fig is None:
+        st.info("File `feature_importance.json` rỗng.")
+        return
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -2790,6 +2844,216 @@ def render_managerial_insights_section(
     )
 
 
+def _escape_html_text(value) -> str:
+    """Escape tối thiểu (&, <, >) cho text chèn thô vào template HTML của báo cáo xuất - tránh lỗi
+    hiển thị nếu tên model/giá trị vô tình chứa ký tự đặc biệt của HTML."""
+    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def build_evaluation_report_html(evaluation_metrics: dict, deployment_config: dict, runtime_info: dict) -> bytes:
+    """
+    Xuất báo cáo đánh giá mô hình (bảng so sánh + Confusion Matrix + Feature Importance) ra 1 file HTML
+    tự chứa (mở trực tiếp bằng trình duyệt, không cần chạy lại Streamlit) - kèm SIÊU DỮ LIỆU của lần
+    train sinh ra kết quả này (phương pháp cân bằng dữ liệu CTGAN/SMOTE/NONE, thời điểm train). Cần
+    thiết vì `models/latest/` bị GHI ĐÈ mỗi lần train mới - không có cách nào khác để đối chiếu lại kết
+    quả của 1 lần chạy CŨ (ví dụ so sánh "có CTGAN" và "none/không cân bằng") sau khi đã train đè lên.
+    """
+    best_model_name = deployment_config.get("model_name", "N/A")
+    best_model_metrics = evaluation_metrics.get(best_model_name, {}) if isinstance(evaluation_metrics, dict) else {}
+    balancing_method_used = best_model_metrics.get("balancing_method", "unknown") if isinstance(best_model_metrics, dict) else "unknown"
+    generated_at = deployment_config.get("generated_at", "unknown")
+
+    metrics_rows = []
+    for model_name, metric_values in evaluation_metrics.items():
+        if not isinstance(metric_values, dict):
+            continue
+        metrics_rows.append(
+            {
+                "Model": metric_values.get("model_name", model_name),
+                "Balancing method": metric_values.get("balancing_method", "unknown"),
+                "Accuracy": metric_values.get("accuracy"),
+                "Precision (Macro)": metric_values.get("precision_macro"),
+                "Recall (Macro)": metric_values.get("recall_macro"),
+                "F1 (Macro)": metric_values.get("f1_macro"),
+            }
+        )
+    metrics_df = pd.DataFrame(metrics_rows)
+    if not metrics_df.empty:
+        metrics_df = metrics_df.sort_values(by="F1 (Macro)", ascending=False).reset_index(drop=True)
+        metrics_df.insert(0, "Xếp hạng", range(1, len(metrics_df) + 1))
+        metrics_table_html = metrics_df.to_html(
+            index=False,
+            float_format=lambda value: f"{value:.4f}" if pd.notna(value) else "-",
+        )
+    else:
+        metrics_table_html = "<p>Không có dữ liệu metrics.</p>"
+
+    # Recall THEO TỪNG LỚP cho MỌI model, đọc từ `classification_report` (sklearn, output_dict=True) -
+    # bảng này quan trọng hơn F1-Macro tổng thể khi xét mất cân bằng nặng: 1 model có thể đạt F1-Macro
+    # cao chỉ nhờ đoán tốt lớp đa số ("Safe"), trong khi gần như bỏ sót toàn bộ lớp thiểu số ("Heavy
+    # Flood") - đúng lớp quan trọng nhất với cảnh báo ngập. Xem riêng Recall từng lớp mới phát hiện được
+    # điều này, KHÔNG thấy được nếu chỉ nhìn Accuracy/F1-Macro như bảng trên.
+    per_class_recall_rows = []
+    for model_name, metric_values in evaluation_metrics.items():
+        if not isinstance(metric_values, dict):
+            continue
+        class_report = metric_values.get("classification_report") or {}
+        per_class_recall_rows.append(
+            {
+                "Model": metric_values.get("model_name", model_name),
+                "Balancing method": metric_values.get("balancing_method", "unknown"),
+                "Recall (Safe)": class_report.get("Safe", {}).get("recall"),
+                "Recall (Light Flood)": class_report.get("Light Flood", {}).get("recall"),
+                "Recall (Heavy Flood)": class_report.get("Heavy Flood", {}).get("recall"),
+            }
+        )
+    per_class_recall_df = pd.DataFrame(per_class_recall_rows)
+    if not per_class_recall_df.empty:
+        per_class_recall_df = per_class_recall_df.sort_values(by="Recall (Heavy Flood)", ascending=False).reset_index(drop=True)
+        per_class_recall_table_html = per_class_recall_df.to_html(
+            index=False,
+            float_format=lambda value: f"{value:.4f}" if pd.notna(value) else "-",
+        )
+    else:
+        per_class_recall_table_html = "<p>Không có dữ liệu classification_report.</p>"
+
+    # Bảng chi tiết Precision/Recall/F1/Support theo từng lớp - CHỈ model tốt nhất, để soi kỹ model sẽ
+    # thực sự được triển khai (không phải toàn bộ danh sách như bảng Recall so sánh ở trên).
+    best_class_report = best_model_metrics.get("classification_report") or {} if isinstance(best_model_metrics, dict) else {}
+    best_class_report_rows = [
+        {
+            "Lớp": class_name,
+            "Precision": values.get("precision"),
+            "Recall": values.get("recall"),
+            "F1-score": values.get("f1-score"),
+            "Support": values.get("support"),
+        }
+        for class_name, values in best_class_report.items()
+        if class_name in {"Safe", "Light Flood", "Heavy Flood"} and isinstance(values, dict)
+    ]
+    best_class_report_df = pd.DataFrame(best_class_report_rows)
+    best_class_report_table_html = (
+        best_class_report_df.to_html(
+            index=False,
+            float_format=lambda value: f"{value:.4f}" if pd.notna(value) else "-",
+        )
+        if not best_class_report_df.empty
+        else "<p>Không có classification_report cho model tốt nhất.</p>"
+    )
+
+    # ROC-AUC theo từng lớp (One-vs-Rest) cho model tốt nhất - đọc từ `roc_curve_data.json` nếu có.
+    roc_curve_json_path = LATEST_MODELS_DIR / "roc_curve_data.json"
+    roc_auc_table_html = "<p>Không có dữ liệu ROC-AUC (`roc_curve_data.json`).</p>"
+    if roc_curve_json_path.exists():
+        try:
+            with roc_curve_json_path.open("r", encoding="utf-8") as roc_file:
+                roc_payload = json.load(roc_file)
+            roc_curves = roc_payload.get("curves") or {}
+            roc_auc_rows = [
+                {"Lớp": CLASS_LABEL_VI.get(class_key, class_key), "ROC-AUC (OvR)": curve.get("auc")}
+                for class_key, curve in roc_curves.items()
+            ]
+            roc_auc_df = pd.DataFrame(roc_auc_rows)
+            if not roc_auc_df.empty:
+                roc_auc_table_html = roc_auc_df.to_html(
+                    index=False,
+                    float_format=lambda value: f"{value:.4f}" if pd.notna(value) else "-",
+                )
+        except Exception:
+            pass
+
+    # Biểu đồ so sánh phân phối lớp trước/sau xử lý mất cân bằng (CTGAN/SMOTE/none) - cùng dữ liệu với
+    # khối "Cân bằng dữ liệu (CTGAN Before/After)" ở Tab 2, đưa vào đây để báo cáo có đủ ngữ cảnh: kết
+    # quả model ở trên là VỚI/KHÔNG VỚI cân bằng dữ liệu như thế nào.
+    ctgan_note_html = ""
+    ctgan_chart_html = "<p>Chưa có file export CTGAN (`data_before_ctgan.csv`/`data_after_ctgan.csv`).</p>"
+    ctgan_artifacts = load_ctgan_comparison_artifacts()
+    if ctgan_artifacts is not None:
+        ctgan_summary = ctgan_artifacts["summary"]
+        ctgan_method_used = ctgan_summary.get("method_used", "Unknown")
+        ctgan_status = ctgan_summary.get("status", "unknown")
+        ctgan_error_detail = ctgan_summary.get("error_detail")
+        if ctgan_method_used != "CTGAN":
+            ctgan_note_html = (
+                f"<p><b>Lưu ý:</b> lần export gần nhất KHÔNG hoàn tất bằng CTGAN thuần. Method dùng thực "
+                f"tế: <code>{_escape_html_text(ctgan_method_used)}</code> | trạng thái: "
+                f"<code>{_escape_html_text(ctgan_status)}</code>"
+                + (
+                    f" | lý do: {_escape_html_text(ctgan_error_detail)}</p>"
+                    if ctgan_error_detail
+                    else ".</p>"
+                )
+            )
+        ctgan_fig = build_ctgan_before_after_figure(
+            build_ctgan_distribution_dataframe(ctgan_summary.get("before")),
+            build_ctgan_distribution_dataframe(ctgan_summary.get("after")),
+        )
+        if ctgan_fig is not None:
+            ctgan_chart_html = ctgan_fig.to_html(full_html=False, include_plotlyjs=False)
+
+    latest_dir = Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR)))
+    confusion_json_path = latest_dir / "confusion_matrix.json"
+    importance_json_path = latest_dir / "feature_importance.json"
+    confusion_fig = build_confusion_matrix_figure(confusion_json_path) if confusion_json_path.exists() else None
+    importance_fig = build_feature_importance_figure(importance_json_path) if importance_json_path.exists() else None
+
+    confusion_html = (
+        confusion_fig.to_html(full_html=False, include_plotlyjs=False)
+        if confusion_fig is not None
+        else "<p>Chưa có dữ liệu Confusion Matrix (`confusion_matrix.json`).</p>"
+    )
+    importance_html = (
+        importance_fig.to_html(full_html=False, include_plotlyjs=False)
+        if importance_fig is not None
+        else "<p>Chưa có dữ liệu Feature Importance (`feature_importance.json`).</p>"
+    )
+
+    report_html = f"""<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>Bao cao danh gia mo hinh - {_escape_html_text(best_model_name)}</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+body {{ font-family: 'Segoe UI', Arial, sans-serif; background:#0b1220; color:#e5eefc; padding:24px; }}
+table {{ border-collapse: collapse; width:100%; margin-bottom: 24px; }}
+th, td {{ border:1px solid #334155; padding:6px 10px; text-align:center; }}
+th {{ background:#1e293b; }}
+h1, h2 {{ color:#f8fafc; }}
+.meta {{ background:#111827; border:1px solid #334155; border-radius:8px; padding:16px; margin-bottom:24px; }}
+</style>
+</head>
+<body>
+<h1>Báo cáo đánh giá mô hình - Dự báo ngập lụt Thừa Thiên Huế</h1>
+<div class="meta">
+<p><b>Model tốt nhất:</b> {_escape_html_text(best_model_name)}</p>
+<p><b>Phương pháp cân bằng dữ liệu (lần train này):</b> {_escape_html_text(str(balancing_method_used).upper())}</p>
+<p><b>Thời điểm huấn luyện (generated_at):</b> {_escape_html_text(generated_at)}</p>
+<p><b>Ngày giờ xuất báo cáo:</b> {datetime.now().isoformat(timespec="seconds")}</p>
+</div>
+<h2>Bảng so sánh chỉ số các mô hình</h2>
+{metrics_table_html}
+<h2>Recall theo từng lớp - so sánh tất cả model</h2>
+<p>Quan trọng hơn Accuracy/F1-Macro khi dữ liệu mất cân bằng nặng - Recall thấp ở cột "Heavy Flood" nghĩa
+là model đang BỎ SÓT phần lớn các trường hợp ngập nặng thật, dù điểm tổng thể có thể vẫn cao.</p>
+{per_class_recall_table_html}
+<h2>Chi tiết Precision/Recall/F1/Support theo lớp - model tốt nhất ({_escape_html_text(best_model_name)})</h2>
+{best_class_report_table_html}
+<h2>ROC-AUC theo từng lớp (One-vs-Rest) - model tốt nhất</h2>
+{roc_auc_table_html}
+<h2>Biểu đồ so sánh phân phối lớp trước/sau xử lý mất cân bằng</h2>
+{ctgan_note_html}
+{ctgan_chart_html}
+<h2>Confusion Matrix</h2>
+{confusion_html}
+<h2>Feature Importance</h2>
+{importance_html}
+</body>
+</html>
+"""
+    return report_html.encode("utf-8")
+
+
 def render_evaluation_tab() -> None:
     """
     Nội dung Tab 3 - Đánh giá mô hình, bước THỨ BA của vòng đời Data Science.
@@ -2807,6 +3071,9 @@ def render_evaluation_tab() -> None:
             "Hãy khởi chạy huấn luyện ở Tab 2 (Tiền xử lý & huấn luyện) trước."
         )
         return
+
+    # Nút "Xuất báo cáo đánh giá" đặt ở SIDEBAR (toolbar chung, cạnh nút "Làm mới toàn bộ cache") - xem
+    # `render_sidebar()` - không lặp lại ở đây nữa.
 
     with st.expander("So sánh chỉ số mô hình (F1-Score / Precision / Recall)", expanded=True):
         render_model_metrics(evaluation_metrics, deployment_config, runtime_info)
@@ -3229,7 +3496,7 @@ def _fetch_or_estimate_tide_heights(
 
     Ưu tiên dữ liệu THẬT từ Open-Meteo Marine API (`wave_height_max`) tại chính tọa độ (lat, lon).
     Marine API CHỈ có dữ liệu tại các điểm lưới nằm trên/gần biển - với tọa độ NỘI ĐỊA THỰC SỰ (đã
-    kiểm chứng bằng gọi API sống: TP Huế, Hương Trà), API trả về `null` cho toàn bộ ngày, khi đó hàm
+    kiểm chứng bằng gọi API sống: Thuận Hóa, Hương Trà), API trả về `null` cho toàn bộ ngày, khi đó hàm
     dùng công thức triều tổng hợp (bán nhật triều chu kỳ ~12.42 giờ + chu kỳ mặt trăng ~29.53 ngày)
     làm giá trị xấp xỉ - ĐÚNG phương pháp đã dùng để sinh cột `Chiều_cao_triều_m` khi xây dựng dữ liệu
     huấn luyện lịch sử (xem `calculate_synthetic_tide()` trong `fetch_data.py`), giúp đầu vào suy luận
@@ -3240,7 +3507,7 @@ def _fetch_or_estimate_tide_heights(
     LƯU Ý: KHÔNG hardcode danh sách "địa phương nội địa -> bỏ qua Marine API" để tiết kiệm 1 lượt gọi
     mạng, dù có vẻ hợp lý - lưới dữ liệu của Marine API khá thô (~0.25 độ) nên vẫn "chụp" được điểm
     biển gần nhất cho một số tọa độ tưởng chừng nội địa (ví dụ Quảng Điền, Phú Vang, Hương Thủy trong
-    5 địa phương giám sát THỰC RA vẫn nhận được dữ liệu triều thật, chỉ TP Huế/Hương Trà là luôn
+    5 địa phương giám sát THỰC RA vẫn nhận được dữ liệu triều thật, chỉ Thuận Hóa/Hương Trà là luôn
     `null`) - hardcode sai sẽ âm thầm hạ chất lượng đầu vào của đúng những địa phương có dữ liệu thật.
     """
     forecast_days_needed = len(forecast_dates) - past_days
@@ -4283,6 +4550,19 @@ def build_forecast_popup_html(location_name: str, location_forecast_df: pd.DataF
     )
 
 
+# ĐÃ THỬ (và loại bỏ): Google Maps thật qua plugin `Leaflet.GoogleMutant`, tiêm JS bằng
+# `routing_map.get_root().script.add_child(...)`. Test thật bằng key thật + xem Console (F12) trên
+# trình duyệt xác nhận: KHÔNG CÓ request nào tới `maps.googleapis.com`/`unpkg.com` được gửi đi - đoạn
+# <script> tiêm vào KHÔNG BAO GIỜ được chạy. Nguyên nhân: bản đồ render qua `st_folium()` (bắt buộc
+# phải dùng để đọc `last_clicked` cho tính năng chọn điểm đi/đến bằng click) - đây là 1 Streamlit
+# Component tự dựng lại bản đồ bằng Leaflet bundle JS RIÊNG ở phía trình duyệt, KHÔNG thực thi thẻ
+# <script> tuỳ chỉnh chèn vào `get_root()` như `folium_static()` làm được (giới hạn đã biết của
+# streamlit-folium: discuss.streamlit.io/t/how-simulate-and-remove-click-on-map-how-inject-js/83369).
+# => KHÔNG KHẢ THI với kiến trúc hiện tại - quay lại dùng Esri Dark Gray Canvas (mục dưới), nguồn DUY
+# NHẤT trong 4 nguồn đã thử THẬT SỰ hiển thị được bản đồ (Esri ổn định, OSM vi phạm chính sách sử dụng,
+# CartoDB đòi API key trả phí, Google Maps bị chặn bởi giới hạn kỹ thuật của st_folium).
+
+
 def build_smart_routing_map(
     df_predictions: pd.DataFrame,
     real_flooded_polygons: list,
@@ -4301,15 +4581,13 @@ def build_smart_routing_map(
     """
     center_lat = sum(lat for lat, _ in REAL_MONITORED_LOCATIONS.values()) / len(REAL_MONITORED_LOCATIONS)
     center_lon = sum(lon for _, lon in REAL_MONITORED_LOCATIONS.values()) / len(REAL_MONITORED_LOCATIONS)
-    # NỀN BẢN ĐỒ: dùng Esri "World Dark Gray Canvas" (server.arcgisonline.com) thay vì OpenStreetMap
-    # hoặc CartoDB mặc định trước đây - ĐÃ KIỂM CHỨNG THỰC TẾ CẢ HAI ĐỀU LỖI:
-    #   1. `tile.openstreetmap.org` (OSM gốc): chặn/không phản hồi ổn định từ nhiều môi trường server/
-    #      cloud (chính sách Tile Usage Policy của OSM ưu tiên trình duyệt người dùng cuối).
-    #   2. `basemaps.cartocdn.com` ("CartoDB dark_matter"): tải được (HTTP 200) nhưng trả về ẢNH
-    #      WATERMARK "API KEY REQUIRED" thay vì bản đồ thật - CARTO đã đổi chính sách, gói ẩn danh
-    #      miễn phí không còn dùng được cho basemap nữa (lỗi thật gặp khi deploy, đã tự kiểm tra bằng
-    #      cách tải ảnh tile về xem trực tiếp, không chỉ dựa vào mã HTTP 200 - 200 không có nghĩa là
-    #      NỘI DUNG đúng).
+    # NỀN BẢN ĐỒ: Esri "World Dark Gray Canvas" - ĐÃ KIỂM CHỨNG THỰC TẾ CẢ 3 NGUỒN THAY THẾ MIỄN PHÍ
+    # KHÁC ĐỀU LỖI/KHÔNG KHẢ THI (xem comment chi tiết phía trên `build_smart_routing_map`):
+    #   1. `tile.openstreetmap.org` (OSM gốc): nhãn đúng nhưng giao diện sáng lệch theme, và vi phạm
+    #      Tile Usage Policy của OSM nếu dùng cho app production (chỉ dành cho cá nhân/thử nghiệm).
+    #   2. `basemaps.cartocdn.com` ("CartoDB dark_all"): tải được (HTTP 200) nhưng trả về ẢNH WATERMARK
+    #      "API KEY REQUIRED" thay vì bản đồ thật - Carto đã bỏ gói ẩn danh miễn phí cho basemap (đã tự
+    #      kiểm tra bằng cách tải ảnh tile về XEM TRỰC TIẾP, không chỉ dựa vào mã HTTP 200).
     # Esri Dark Gray Canvas (2 lớp: Base + Reference nhãn) ĐÃ kiểm chứng bằng cách tải + xem ảnh tile
     # THẬT tại chính khu vực Huế - ra bản đồ chi tiết, không watermark, không cần API key, thuộc dịch
     # vụ ArcGIS Online công khai của Esri (được phép dùng ẩn danh cho mục đích tham chiếu chung).
@@ -4325,17 +4603,11 @@ def build_smart_routing_map(
         control=False,
         max_zoom=16,
     ).add_to(routing_map)
-    folium.TileLayer(
-        tiles=(
-            "https://server.arcgisonline.com/ArcGIS/rest/services/"
-            "Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
-        ),
-        attr="Esri",
-        name="Nhãn tên đường/địa danh",
-        overlay=True,
-        control=False,
-        max_zoom=16,
-    ).add_to(routing_map)
+    # KHÔNG thêm lớp "World_Dark_Gray_Reference" (nhãn tên đường/địa danh của Esri) - lớp này là ảnh
+    # raster đóng gói CHUNG cả nhãn hành chính (huyện/thị xã cũ, CHƯA cập nhật theo đợt sáp nhập 2025)
+    # lẫn tên đường/sông, không thể tách riêng để chỉ ẩn phần nhãn hành chính sai. Vì đồ án ưu tiên
+    # TUYỆT ĐỐI tính chính xác, thà bỏ hẳn lớp này (mất nhãn đường/sông) còn hơn hiển thị nhãn hành
+    # chính SAI cạnh nhãn ĐÚNG do chính app vẽ (polygon xanh + tooltip/label ở dưới).
 
     # ---- (1) Giám sát: TÔ RANH GIỚI HÀNH CHÍNH thật của 5 địa phương, màu theo đúng 'Nguy cơ' dự báo
     # của AI. FAIL-SAFE: thiếu dòng dữ liệu cũng KHÔNG mặc định "An toàn" (xem docstring
@@ -4542,7 +4814,7 @@ def render_smart_routing_tab() -> None:
     # dùng có thể click để thay đổi bất cứ lúc nào.
     # ==============================================================================================
     if "routing_start_point" not in st.session_state:
-        st.session_state["routing_start_point"] = REAL_MONITORED_LOCATIONS["TP Huế"]
+        st.session_state["routing_start_point"] = REAL_MONITORED_LOCATIONS["Thuận Hóa"]
     if "routing_end_point" not in st.session_state:
         st.session_state["routing_end_point"] = REAL_MONITORED_LOCATIONS["Phú Vang"]
 
@@ -4715,6 +4987,37 @@ def render_sidebar() -> None:
         st.cache_data.clear()
         st.cache_resource.clear()
         st.sidebar.success("Đã xóa cache - dữ liệu sẽ được nạp lại ở lần chạy tiếp theo.")
+
+    # Nút xuất báo cáo đánh giá đặt CHUNG toolbar sidebar (cạnh nút "Làm mới toàn bộ cache") thay vì
+    # đứng riêng 1 mình ở đầu Tab 3 - gọn hơn, cùng nhóm với các thao tác quản trị/tiện ích khác. Bọc
+    # try/except vì sidebar render ở MỌI tab, kể cả khi CHƯA có model nào được train (chưa có
+    # deployment_config.json/evaluation_metrics.json) - khi đó ẩn nút đi thay vì lỗi cả sidebar.
+    try:
+        evaluation_metrics, deployment_config, runtime_info = load_evaluation_artifacts()
+        best_model_name_for_export = deployment_config.get("model_name", "model")
+        best_model_metrics_for_export = (
+            evaluation_metrics.get(best_model_name_for_export, {}) if isinstance(evaluation_metrics, dict) else {}
+        )
+        balancing_method_for_export = (
+            best_model_metrics_for_export.get("balancing_method", "unknown")
+            if isinstance(best_model_metrics_for_export, dict)
+            else "unknown"
+        )
+        generated_at_slug = str(deployment_config.get("generated_at", "unknown")).replace(":", "-").replace(" ", "_")
+        st.sidebar.download_button(
+            "📥 Xuất báo cáo đánh giá",
+            data=build_evaluation_report_html(evaluation_metrics, deployment_config, runtime_info),
+            file_name=f"bao_cao_danh_gia_{balancing_method_for_export}_{generated_at_slug}.html",
+            mime="text/html",
+            use_container_width=True,
+            help=(
+                f"Phương pháp cân bằng dữ liệu của lần train hiện tại: {str(balancing_method_for_export).upper()} - "
+                f"train lúc: {deployment_config.get('generated_at', 'không rõ')}. Lưu file này lại TRƯỚC KHI train "
+                "lần khác để so sánh (models/latest/ bị ghi đè mỗi lần train mới)."
+            ),
+        )
+    except Exception:
+        pass
 
     render_admin_api_key_panel()
 

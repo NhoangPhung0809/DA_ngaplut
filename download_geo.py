@@ -10,7 +10,7 @@ def main():
     
     # Tên các huyện với admin_level=6
     places = [
-        {"name": "TP Huế", "query": "Thành phố Huế, Thừa Thiên Huế, Việt Nam"},
+        {"name": "Thuận Hóa", "query": "Phường Thuận Hóa, Thành phố Huế, Việt Nam"},
         {"name": "Hương Thủy", "query": "Huyện Hương Thủy, Thừa Thiên Huế, Việt Nam"},
         {"name": "Phú Vang", "query": "Huyện Phú Vang, Thừa Thiên Huế, Việt Nam"},
         {"name": "Hương Trà", "query": "Huyện Hương Trà, Thừa Thiên Huế, Việt Nam"},

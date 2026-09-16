@@ -218,11 +218,25 @@ def list_available_models() -> list[str]:
     return list(build_model_registry().keys())
 
 
+# Tra CHÍNH XÁC theo stem file CSV -> tên địa phương hiện hành (khớp `LOCATION_HISTORICAL_FILE` trong
+# `app.py`). Không tự suy tên bằng cách thay "_" thành " " - cách đó biến "TP_Hue_10years" thành
+# "TP Hue" (không dấu, tên hành chính CŨ đã bỏ theo đợt sáp nhập 2025), trong khi app.py/GeoJSON đã
+# đổi đúng thành "Thuận Hóa" - lệch nhãn sẽ khiến việc groupby địa phương trong log/artifact không
+# khớp với tên hiển thị trên map/UI.
+LOCATION_STEM_TO_NAME: dict[str, str] = {
+    "TP_Hue_10years": "Thuận Hóa",
+    "Huong_Thuy_10years": "Hương Thủy",
+    "Huong_Tra_10years": "Hương Trà",
+    "Phu_Vang_10years": "Phú Vang",
+    "Quang_Dien_10years": "Quảng Điền",
+}
+
+
 def normalize_location_name(file_path: str) -> str:
-    """Chuẩn hóa tên địa phương từ tên file CSV."""
+    """Chuẩn hóa tên địa phương từ tên file CSV - ưu tiên tra `LOCATION_STEM_TO_NAME`, chỉ fallback
+    suy diễn từ filename nếu gặp file lạ ngoài 5 địa phương đã khai báo."""
     stem = Path(file_path).stem
-    stem = stem.replace("_10years", "").replace("_", " ").strip()
-    return stem
+    return LOCATION_STEM_TO_NAME.get(stem, stem.replace("_10years", "").replace("_", " ").strip())
 
 
 def load_and_concatenate_csvs(data_dir: Path = DATA_DIR) -> pd.DataFrame:
@@ -692,10 +706,17 @@ def export_hyperparameter_tuning_results(tuning_results: dict) -> None:
 
 
 def resolve_balancing_method(balancing_method: str = "auto") -> str:
-    """Chọn chiến lược cân bằng dữ liệu an toàn cho pipeline."""
+    """
+    Chọn chiến lược cân bằng dữ liệu an toàn cho pipeline.
+
+    `"none"`: KHÔNG áp dụng CTGAN/SMOTE nào cả - giữ nguyên phân phối lớp mất cân bằng gốc của tập
+    train. Dùng để LÀM BASELINE đối chứng - trả lời trực tiếp câu hỏi "cân bằng dữ liệu có thực sự cải
+    thiện F1-Macro không, hay model vẫn học tốt như vậy dù không cân bằng gì?" bằng cách so sánh kết
+    quả huấn luyện CÙNG 1 model giữa 2 lần chạy (có/không cân bằng) - không suy diễn, có số liệu thật.
+    """
     requested_method = str(balancing_method or "auto").strip().lower()
-    if requested_method not in {"auto", "gan", "smote"}:
-        raise ValueError("balancing_method phải là một trong: 'auto', 'gan', 'smote'.")
+    if requested_method not in {"auto", "gan", "smote", "none"}:
+        raise ValueError("balancing_method phải là một trong: 'auto', 'gan', 'smote', 'none'.")
 
     if requested_method == "auto":
         return "gan" if CTGAN is not None else "smote"
@@ -865,13 +886,29 @@ def balance_training_data(
     y_train: pd.Series,
     balancing_method: str = "auto",
 ):
-    """Cân bằng dữ liệu train bằng CTGAN hoặc SMOTE tùy cấu hình."""
+    """Cân bằng dữ liệu train bằng CTGAN hoặc SMOTE tùy cấu hình - hoặc GIỮ NGUYÊN nếu chọn "none"."""
     selected_method = resolve_balancing_method(balancing_method)
     print(f"\nSelected balancing method: {selected_method.upper()}")
 
     if selected_method == "gan":
         return apply_gan_data_augmentation(X_train_scaled, y_train)
-    return apply_smote_to_training_data(X_train_scaled, y_train)
+    if selected_method == "smote":
+        return apply_smote_to_training_data(X_train_scaled, y_train)
+
+    # "none" - KHÔNG cân bằng gì cả, vẫn xuất artifact Before/After (giống hệt nhau) để khối "Cân bằng
+    # dữ liệu" trên UI không bị trống/lỗi, và người xem thấy RÕ RÀNG là bước này đã bị bỏ qua có chủ ý
+    # (status="skipped_by_user"), không phải quên chạy hay lỗi.
+    print("Class distribution (KHÔNG cân bằng - giữ nguyên gốc):")
+    print(y_train.value_counts().sort_index())
+    export_ctgan_comparison_artifacts(
+        X_before=X_train_scaled,
+        y_before=y_train,
+        X_after=X_train_scaled,
+        y_after=y_train,
+        method_used="NONE",
+        status="skipped_by_user",
+    )
+    return X_train_scaled, y_train
 
 
 def build_daily_modeling_dataset(df: pd.DataFrame) -> pd.DataFrame:

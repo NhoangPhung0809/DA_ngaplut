@@ -1,0 +1,485 @@
+===================================================================================================
+TÀI LIỆU CHUẨN BỊ BẢO VỆ - THAM SỐ & Ý NGHĨA CÁC THUẬT TOÁN / KỸ THUẬT TRONG ĐỒ ÁN
+===================================================================================================
+Toàn bộ số liệu dưới đây lấy ĐÚNG từ code thật (analyze_and_train.py, hyperparameter_tuning.py) tại
+thời điểm biên soạn - không phải số liệu lý thuyết chung chung. Nếu hội đồng hỏi "tại sao chọn giá trị
+X", câu trả lời nằm ngay trong phần "Vì sao" của từng mục.
+
+CẢNH BÁO QUAN TRỌNG (đọc trước khi vào phòng bảo vệ):
+- Optuna tuning cho LSTM (hàm tune_lstm_optuna() trong hyperparameter_tuning.py) ĐÃ VIẾT XONG code
+  nhưng CHƯA được gọi trong pipeline chính (analyze_and_train.py). Nghĩa là: LSTM/GRU/CNN đang chạy
+  bằng kiến trúc CỐ ĐỊNH (fixed), CHƯA thực sự qua Optuna tuning trong lần train gần nhất.
+  => Nếu hội đồng hỏi "LSTM có tune bằng Optuna không?", trả lời trung thực: "Module tuning cho LSTM
+     bằng Optuna đã cài đặt sẵn (kể cả tìm kiến trúc mạng - architecture search), nhưng hiện tại pipeline
+     chính đang dùng kiến trúc LSTM cố định để đảm bảo thời gian huấn luyện, có thể bật tuning này lên
+     làm hướng phát triển tiếp theo." KHÔNG nên nói "có" nếu không train lại để wiring nó vào trước.
+- Optuna THỰC SỰ đang chạy cho: XGBoost (30 trial, TPE).
+- GridSearchCV THỰC SỰ đang chạy cho: Random Forest (48 tổ hợp, cv=3).
+
+
+===================================================================================================
+PHẦN 1 - OPTUNA (Bayesian Optimization - TPE)
+===================================================================================================
+
+1.1. Optuna là gì (giải thích ngắn gọn cho hội đồng)
+---------------------------------------------------------------------------------------------------
+Optuna là thư viện tối ưu hoá siêu tham số dùng thuật toán TPE (Tree-structured Parzen Estimator) -
+một dạng Bayesian Optimization. Khác GridSearchCV (duyệt vét cạn "mù quáng" mọi tổ hợp), Optuna XÂY
+DỰNG một mô hình xác suất về việc "vùng tham số nào có khả năng cho kết quả tốt", dựa trên kết quả của
+các trial (lần thử) TRƯỚC ĐÓ, rồi ưu tiên thử tiếp ở vùng có tiềm năng cao - hội tụ nhanh hơn nhiều so
+với duyệt ngẫu nhiên/vét cạn trên không gian tham số lớn.
+
+1.2. Tham số cấu hình Optuna (dùng cho XGBoost) - và ý nghĩa
+---------------------------------------------------------------------------------------------------
+- n_trials = 30
+  -> Số lần thử (mỗi trial = 1 bộ tham số + 1 lần huấn luyện + đánh giá). 30 trial là con số cân bằng
+     giữa thời gian huấn luyện và độ phủ không gian tham số cho luận văn (không quá ít để bỏ lỡ vùng
+     tối ưu, không quá nhiều gây tốn thời gian không cần thiết).
+
+- sampler = TPESampler(seed=42)
+  -> TPESampler: thuật toán chọn trial tiếp theo dựa trên TPE. seed=42: cố định hạt giống ngẫu nhiên
+     để KẾT QUẢ TÁI LẬP ĐƯỢC giữa các lần chạy - quan trọng khi hội đồng yêu cầu chạy lại kiểm chứng.
+
+- pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=0)
+  -> Cơ chế "cắt tỉa sớm" (pruning): nếu 1 trial đang chạy cho kết quả tệ hơn median (trung vị) của
+     các trial trước đó, Optuna dừng sớm trial đó thay vì chạy hết, tiết kiệm thời gian.
+     n_startup_trials=5: 5 trial ĐẦU TIÊN không bị cắt tỉa (cần đủ dữ liệu để tính median trước).
+     n_warmup_steps=0: không cần "khởi động" thêm bước nào trong mỗi trial trước khi bắt đầu xét cắt tỉa.
+
+- direction = "maximize"
+  -> Optuna sẽ TỐI ĐA HOÁ giá trị trả về của hàm objective (ở đây là F1-Macro trên tập validation).
+
+1.3. Không gian tham số Optuna tìm cho XGBoost (search space) - và ý nghĩa TỪNG tham số
+---------------------------------------------------------------------------------------------------
+- n_estimators: suggest_int(100, 500, step=50)
+  -> Số cây (tree) trong mô hình boosting. Nhiều cây hơn = học được nhiều hơn nhưng dễ overfitting và
+     chậm hơn. Thử các giá trị 100, 150, 200, ..., 500 (step=50).
+
+- max_depth: suggest_int(3, 10)
+  -> Độ sâu tối đa của MỖI cây quyết định. Sâu hơn = mô hình phức tạp hơn, dễ bắt được tương tác phi
+     tuyến giữa nhiều biến hơn, nhưng cũng dễ overfitting hơn nếu quá sâu so với lượng dữ liệu.
+
+- learning_rate: suggest_float(1e-3, 0.3, log=True)
+  -> Tốc độ học - mức độ mỗi cây mới "sửa" bao nhiêu phần trăm lỗi của các cây trước. Lấy mẫu theo
+     THANG LOG (không phải tuyến tính) vì ảnh hưởng của learning_rate mang tính chất NHÂN: khoảng cách
+     0.001->0.01 có ý nghĩa tương đương khoảng cách 0.01->0.1, không phải "khoảng cách số học" thông
+     thường.
+
+- subsample: suggest_float(0.5, 1.0)
+  -> Tỉ lệ % số DÒNG dữ liệu được lấy ngẫu nhiên (không hoàn lại) để huấn luyện MỖI cây. <1.0 giúp
+     giảm overfitting và tăng đa dạng giữa các cây (tương tự bagging).
+
+- colsample_bytree: suggest_float(0.5, 1.0)
+  -> Tỉ lệ % số CỘT (đặc trưng/feature) được lấy ngẫu nhiên cho MỖI cây. Cùng mục đích chống
+     overfitting như subsample, nhưng áp dụng theo chiều cột thay vì dòng.
+
+- min_child_weight: suggest_int(1, 10)
+  -> Tổng trọng số mẫu tối thiểu cần có trong 1 "lá" (leaf node) để cây được phép chia tiếp (split).
+     Giá trị càng LỚN thì cây càng "dè dặt" khi chia nhánh -> chống overfitting trên các nhóm dữ liệu
+     quá nhỏ/hiếm (quan trọng với lớp "Ngập nặng" vốn ít mẫu).
+
+- reg_lambda: suggest_float(1e-3, 10.0, log=True)
+  -> Hệ số regularization L2 (phạt trọng số lớn) áp dụng lên các lá của cây. Giá trị càng lớn thì mô
+     hình càng bị "phạt" nặng khi trọng số quá lớn -> chống overfitting.
+
+1.4. Hàm mục tiêu (objective function) của Optuna cho XGBoost
+---------------------------------------------------------------------------------------------------
+Mỗi trial: khởi tạo XGBClassifier với bộ tham số Optuna đề xuất -> huấn luyện trên X_train/y_train ->
+dự đoán trên X_valid -> trả về F1-Macro (average="macro") trên tập validation. Optuna MAXIMIZE giá trị
+này qua 30 trial, chọn ra bộ tham số cho F1-Macro validation cao nhất.
+
+1.5. Optuna cho LSTM (đã viết, CHƯA wiring vào pipeline chính - xem cảnh báo đầu file)
+---------------------------------------------------------------------------------------------------
+Không gian tìm kiếm (nếu được bật lên):
+- n_layers: suggest_int(1, 3) -> số lớp LSTM xếp chồng.
+- units_layer_i: suggest_int(32, 256, step=32) cho MỖI lớp -> số unit (neuron) của lớp LSTM thứ i.
+  Đây là "conditional search space" (không gian tìm kiếm CÓ ĐIỀU KIỆN) - số tham số units_layer_i phụ
+  thuộc vào n_layers vừa chọn - dạng bài toán mà GridSearchCV KHÔNG biểu diễn được vì cần khai báo lưới
+  tĩnh cố định từ đầu.
+- dropout: suggest_float(0.1, 0.5) -> tỉ lệ unit bị "tắt" ngẫu nhiên mỗi lần huấn luyện, chống overfitting.
+- learning_rate: suggest_float(1e-4, 1e-2, log=True) -> tốc độ học của optimizer (Adam).
+- batch_size: suggest_categorical([16, 32, 64]) -> số mẫu xử lý cùng lúc mỗi bước cập nhật trọng số.
+Mục tiêu tối ưu: val_loss (MINIMIZE) - dùng loss thay vì F1 trực tiếp vì loss mượt/ổn định hơn giữa
+các epoch, giúp Optuna hội tụ ổn định hơn; F1-Macro vẫn được TÍNH THÊM và lưu lại để đối chiếu báo cáo.
+
+
+===================================================================================================
+PHẦN 2 - GridSearchCV
+===================================================================================================
+
+2.1. GridSearchCV là gì
+---------------------------------------------------------------------------------------------------
+Duyệt VÉT CẠN (exhaustive search) TẤT CẢ tổ hợp giá trị tham số được khai báo trong 1 lưới (grid) cố
+định, đánh giá MỖI tổ hợp bằng k-fold cross-validation, chọn tổ hợp có điểm trung bình cao nhất.
+
+2.2. Cấu hình thực tế dùng cho Random Forest
+---------------------------------------------------------------------------------------------------
+- param_grid:
+    n_estimators:      [100, 200, 300, 400]        (4 giá trị)
+    max_depth:          [None, 8, 12, 16]            (4 giá trị)
+    min_samples_split:  [2, 5, 10]                    (3 giá trị)
+  => Tổng tổ hợp = 4 x 4 x 3 = 48 tổ hợp.
+
+- cv = 3
+  -> Chia dữ liệu train thành 3 phần (fold), mỗi tổ hợp tham số được huấn luyện 3 lần (mỗi lần dùng
+     2 fold để train, 1 fold để validate), lấy điểm trung bình 3 lần đó làm điểm đánh giá cho tổ hợp.
+  => Tổng số lần huấn luyện thực tế = 48 tổ hợp x 3 fold = 144 lần fit.
+
+- scoring = "f1_macro"
+  -> Tiêu chí chọn tổ hợp tốt nhất là F1-Macro (không phải Accuracy) - lý do: bài toán mất cân bằng
+     lớp nặng, Accuracy dễ "bị lừa" bởi lớp đa số (An toàn), F1-Macro buộc phải cân bằng tốt cho CẢ 3
+     lớp kể cả lớp hiếm (Ngập nặng).
+
+- n_jobs = -1
+  -> Dùng TẤT CẢ lõi CPU chạy song song để tăng tốc quá trình duyệt 144 lần fit.
+
+- refit = True
+  -> Sau khi tìm ra tổ hợp tốt nhất, TỰ ĐỘNG huấn luyện lại 1 lần cuối trên TOÀN BỘ tập train (không
+     chỉ 2/3 fold) với tổ hợp tham số đó, để lấy model cuối cùng dùng cho đánh giá/triển khai.
+
+- class_weight = "balanced_subsample" (đặt cố định trên base_model, KHÔNG nằm trong lưới tìm kiếm)
+  -> Mỗi cây trong rừng tự động tính lại trọng số các lớp dựa trên bootstrap sample RIÊNG của chính
+     cây đó (khác "balanced" - tính 1 lần duy nhất trên toàn bộ tập train) - phù hợp hơn cho Random
+     Forest vì mỗi cây nhìn thấy 1 tập con dữ liệu khác nhau.
+
+2.3. Ý nghĩa từng tham số trong lưới (param_grid)
+---------------------------------------------------------------------------------------------------
+- n_estimators (số cây): nhiều cây hơn thường ổn định hơn (giảm variance nhờ trung bình hoá) nhưng
+  chậm hơn khi dự đoán và có điểm bão hoà (từ 1 ngưỡng nào đó, thêm cây không cải thiện đáng kể).
+- max_depth (độ sâu tối đa mỗi cây): None nghĩa là cây phát triển tới khi các lá "thuần khiết" (chỉ
+  còn 1 lớp) hoặc chạm min_samples_split - luôn cần so sánh với các giá trị GIỚI HẠN (8/12/16) để
+  kiểm tra xem việc giới hạn độ sâu có giúp giảm overfitting mà vẫn giữ được độ chính xác hay không.
+- min_samples_split (số mẫu tối thiểu để 1 node được phép chia tiếp): giá trị càng LỚN thì cây càng
+  "dè dặt" hơn khi chia nhánh, giúp chống overfitting trên các nhóm dữ liệu nhỏ/nhiễu.
+
+2.4. Vì sao KHÔNG dùng GridSearchCV cho XGBoost/LSTM (câu hỏi hội đồng hay hỏi)
+---------------------------------------------------------------------------------------------------
+Không gian tham số của XGBoost/LSTM là LIÊN TỤC và RỘNG (ví dụ learning_rate trải dài 1e-3 đến 0.3).
+Nếu muốn lưới đủ mịn để không bỏ sót vùng tối ưu, số tổ hợp sẽ TĂNG THEO CẤP SỐ NHÂN theo số tham số
+(combinatorial explosion / curse of dimensionality) - không khả thi về thời gian trong khuôn khổ luận
+văn. Optuna (Bayesian Optimization) giải quyết vấn đề này bằng cách học từ lịch sử các trial trước để
+ưu tiên vùng tham số tiềm năng, không cần duyệt hết lưới.
+
+
+===================================================================================================
+PHẦN 3 - CHIA TRAIN/TEST (Time-based Split, KHÔNG xáo trộn ngẫu nhiên)
+===================================================================================================
+
+3.1. Cách chia thực tế (hàm chronological_train_test_split())
+---------------------------------------------------------------------------------------------------
+- train_ratio = 0.8 (80% train / 20% test)
+- Chia RIÊNG cho TỪNG địa phương (groupby địa phương trước khi chia) - không gộp chung 5 địa phương
+  rồi chia 1 lần, vì mỗi địa phương có 1 trục thời gian độc lập.
+- Trong mỗi địa phương: sắp xếp theo thời gian TĂNG DẦN, lấy train_test_split(..., shuffle=False) -
+  tức 80% dòng ĐẦU (quá khứ) làm train, 20% dòng SAU (gần hiện tại nhất) làm test.
+- Thứ tự thực hiện: chia train/test THEO THỜI GIAN xong mới tạo nhãn T+1 (time-lag shift) - tránh
+  feature ngày T bị dùng để dự đoán nhãn của chính ngày T, và tránh nhãn của tập train "ăn lấn" sang
+  khoảng thời gian thuộc tập test.
+- Địa phương có dưới 4 dòng dữ liệu: bị BỎ QUA hoàn toàn (không đủ để chia + tạo nhãn T+1).
+
+3.2. Vì sao KHÔNG dùng train_test_split(shuffle=True) hay K-Fold thường (câu hỏi hội đồng hay hỏi)
+---------------------------------------------------------------------------------------------------
+Dữ liệu là CHUỖI THỜI GIAN. Nếu xáo trộn ngẫu nhiên, dữ liệu TƯƠNG LAI có thể lọt vào tập huấn luyện
+(data leakage theo thời gian) - mô hình "nhìn thấy trước" 1 phần tương lai trong lúc học, khiến độ
+chính xác đánh giá bị ẢO (cao hơn nhiều so với thực tế). Trong vận hành thực tế, mô hình CHỈ CÓ dữ
+liệu quá khứ để dự báo tương lai - cách chia time-based mô phỏng ĐÚNG bối cảnh đó.
+
+3.3. Áp dụng nhất quán cho bước điền dữ liệu khuyết (liên quan, hay bị hỏi chung)
+---------------------------------------------------------------------------------------------------
+Median dùng để điền giá trị thiếu (xem hàm compute_train_only_medians()) cũng CHỈ tính trên phần dữ
+liệu SẼ THUỘC TẬP TRAIN (theo đúng ranh giới 80% ở trên, tính RIÊNG cho từng địa phương) - để tránh
+rò rỉ thống kê của tập test vào tập train dù bước điền khuyết xảy ra TRƯỚC bước chia train/test chính
+thức trong pipeline.
+
+3.4. Chia dữ liệu riêng cho các model chuỗi thời gian/sequence (LSTM/GRU/CNN/ARIMA/SARIMA)
+---------------------------------------------------------------------------------------------------
+- Model dạng sequence (LSTM/GRU/CNN...): dùng cửa sổ trượt (sliding window) 7 ngày liên tiếp
+  (SEQUENCE_WINDOW = 7) làm 1 mẫu đầu vào, nhãn là trạng thái ngập NGAY SAU cửa sổ đó.
+- ARIMA/SARIMA: split_index = max(6, min(80% số dòng, tổng số dòng - 1)) cho TỪNG địa phương - đảm
+  bảo luôn có tối thiểu 6 điểm dữ liệu trong tập train để mô hình chuỗi thời gian có đủ lịch sử ước
+  lượng tham số.
+
+
+===================================================================================================
+PHẦN 4 - THAM SỐ CỤ THỂ CỦA TỪNG THUẬT TOÁN (16 model trong build_model_registry())
+===================================================================================================
+(Ý NGHĨA nguyên lý từng thuật toán đã có đầy đủ trong TAI_LIEU_KY_THUAT_HE_THONG.docx, Mục 7 - phần
+này CHỈ liệt kê THAM SỐ CỤ THỂ đã dùng, để trả lời nhanh khi hội đồng hỏi "model X dùng tham số gì?".)
+
+4.1. Nhóm Thống kê
+---------------------------------------------------------------------------------------------------
+- Linear Regression Threshold: LinearRegression() - dùng tham số MẶC ĐỊNH của sklearn (không tinh
+  chỉnh, vì đây là model baseline đơn giản nhất, mục đích là làm mốc so sánh).
+- Polynomial Regression Threshold: PolynomialFeatures(degree=2, include_bias=False) + LinearRegression().
+  degree=2: chỉ sinh thêm đặc trưng bậc 2 (không bậc 3 trở lên, tránh bùng nổ số chiều đặc trưng với
+  5 biến gốc). include_bias=False: không tự thêm cột hằng số 1 (LinearRegression đã tự có intercept).
+
+4.2. Nhóm Machine Learning
+---------------------------------------------------------------------------------------------------
+- Random Forest (SAU KHI GridSearchCV tune xong, nếu tuning chạy thành công):
+    n_estimators, max_depth, min_samples_split: LẤY TỪ kết quả GridSearchCV (xem Phần 2).
+    Nếu tuning KHÔNG chạy (thiếu thư viện/lỗi): dùng tham số cố định mặc định trong build_model_registry():
+    n_estimators=300, random_state=42, n_jobs=-1 (các tham số khác giữ mặc định sklearn).
+
+- KNN: KNeighborsClassifier() - tham số MẶC ĐỊNH (n_neighbors=5, weights='uniform',
+  metric='minkowski' p=2 tức khoảng cách Euclidean).
+
+- SVC: SVC(probability=True, random_state=42) - kernel MẶC ĐỊNH là 'rbf' (Radial Basis Function),
+  C=1.0, gamma='scale'. probability=True: bật tính predict_proba() (cần cho ROC-AUC), làm chậm huấn
+  luyện hơn 1 chút (SVC dùng thêm 1 bước hiệu chỉnh xác suất nội bộ - Platt scaling).
+
+- AdaBoost: AdaBoostClassifier(random_state=42) - tham số MẶC ĐỊNH (n_estimators=50, learning_rate=1.0,
+  base estimator mặc định là cây quyết định nông - decision stump).
+
+- XGBoost (SAU KHI Optuna tune xong, nếu tuning chạy thành công):
+    n_estimators, max_depth, learning_rate, subsample, colsample_bytree, min_child_weight, reg_lambda:
+    LẤY TỪ kết quả Optuna (xem Phần 1.3).
+    Nếu tuning KHÔNG chạy: dùng tham số cố định trong build_model_registry():
+    objective='multi:softprob', num_class=3, n_estimators=250, max_depth=6, learning_rate=0.05,
+    subsample=0.9, colsample_bytree=0.9, random_state=42, eval_metric='mlogloss', n_jobs=-1.
+
+- LightGBM: objective='multiclass', num_class=3, n_estimators=250, learning_rate=0.05, num_leaves=31,
+  random_state=42, n_jobs=-1. (num_leaves=31 là mặc định LightGBM - kiểm soát độ phức tạp cây theo
+  chiến lược leaf-wise thay vì level-wise như XGBoost).
+
+- CatBoost: loss_function='MultiClass', iterations=250, learning_rate=0.05, depth=6, random_seed=42.
+  (iterations tương đương n_estimators; depth tương đương max_depth).
+
+4.3. Nhóm Time Series
+---------------------------------------------------------------------------------------------------
+- ARIMA: order=(2, 0, 1)
+    p=2 (AR - bậc tự hồi quy: dùng 2 giá trị quá khứ gần nhất)
+    d=0 (I - bậc sai phân: KHÔNG sai phân, coi chuỗi đã đủ dừng - stationary)
+    q=1 (MA - bậc trung bình trượt: dùng 1 giá trị sai số dự báo quá khứ)
+
+- SARIMA: order=(1, 0, 1), seasonal_order=(1, 0, 0, 7)
+    Phần không mùa vụ: p=1, d=0, q=1.
+    Phần mùa vụ (P, D, Q, s) = (1, 0, 0, 7): P=1 (tự hồi quy mùa vụ bậc 1), D=0 (không sai phân mùa
+    vụ), Q=0 (không trung bình trượt mùa vụ), s=7 (CHU KỲ MÙA VỤ = 7 NGÀY, tức giả định có mẫu hình
+    lặp lại theo TUẦN - hợp lý với dữ liệu ngày, ví dụ thói quen sinh hoạt/thời tiết có chu kỳ tuần).
+
+  Cả 2: enforce_stationarity=False, enforce_invertibility=False - KHÔNG ép buộc chuỗi phải thoả điều
+  kiện dừng/khả nghịch một cách chặt chẽ, tránh lỗi hội tụ khi dữ liệu thực tế có nhiễu/đột biến mạnh
+  (đây cũng là nguồn gốc của cảnh báo "Non-stationary starting autoregressive parameters" thấy trong
+  log huấn luyện - KHÔNG phải lỗi, chỉ là cảnh báo cho biết dữ liệu chưa hoàn toàn thoả giả định lý
+  tưởng của ARIMA).
+
+4.4. Nhóm Deep Learning (kiến trúc CỐ ĐỊNH - chưa qua Optuna tuning, xem cảnh báo đầu file)
+---------------------------------------------------------------------------------------------------
+- LSTM: 1 lớp LSTM(32 unit) -> Dense(16, relu) -> Dense(3, softmax).
+  optimizer='adam', loss='sparse_categorical_crossentropy'. Cửa sổ đầu vào: 7 ngày (SEQUENCE_WINDOW).
+  epochs=30, batch_size=64 (khi train qua train_sequence_deep_model), riêng khi train trong Hybrid
+  (Mục 4.6) dùng epochs=20, batch_size=32, kèm EarlyStopping(patience=5, monitor='val_loss').
+
+- GRU: 1 lớp GRU(32 unit) -> Dense(16, relu) -> Dense(3, softmax). Cùng cấu hình huấn luyện như LSTM.
+
+- 1D-CNN: Conv1D(32, kernel=3) -> MaxPooling1D(2) -> Conv1D(64, kernel=3) -> MaxPooling1D(2) ->
+  Flatten -> Dense(32, relu) -> Dense(3, softmax).
+
+- CNN-LSTM: Conv1D(32, kernel=3) -> MaxPooling1D(2) -> Conv1D(64, kernel=3) -> MaxPooling1D(2) ->
+  LSTM(32) -> Dense(3, softmax) (kiến trúc LAI THEO TẦNG - khác Hybrid ở mục 4.6, đây là 1 mạng neural
+  liền mạch duy nhất, không phải 2 model độc lập ghép nối).
+
+4.5. Kỹ thuật cân bằng dữ liệu
+---------------------------------------------------------------------------------------------------
+- CTGAN: epochs=10 (CTGAN_EPOCHS), batch_size=256 (CTGAN_BATCH_SIZE), pac=1 (SAU khi sửa lỗi
+  AssertionError chia hết batch - mặc định thư viện là pac=10, xem Phần "Lịch sử sửa lỗi thực tế" bên
+  dưới). Giới hạn: tối đa 5000 dòng train/lớp (CTGAN_MAX_TRAIN_ROWS_PER_CLASS) để CTGAN không quá
+  chậm, sinh tối đa tới 10000 dòng/lớp (CTGAN_MAX_TARGET_ROWS_PER_CLASS).
+- SMOTE (fallback): dùng tham số MẶC ĐỊNH của imbalanced-learn (k_neighbors=5).
+
+4.6. Hybrid (CÓ 2 MODEL LAI TRONG ĐỒ ÁN - xem chi tiết luồng chạy ở Phần 6)
+---------------------------------------------------------------------------------------------------
+a) Hybrid LSTM + XGBoost (2 thành phần):
+- Bước 1 (LSTM encoder): epochs=20, batch_size=32, EarlyStopping(patience=5, monitor='val_loss',
+  restore_best_weights=True), class_weight tính động theo build_class_weight_mapping() (cân bằng
+  trọng số loss theo tần suất lớp, KHÁC với CTGAN/SMOTE vốn cân bằng bằng cách sinh thêm DÒNG dữ liệu
+  - ở đây cân bằng bằng cách sinh thêm TRỌNG SỐ loss).
+- Trích embedding: lấy output của layer 'dense_features' (16 chiều) làm đặc trưng đầu vào cho bước 2.
+- Bước 2 (XGBoost classifier trên embedding): n_estimators=200, max_depth=4, learning_rate=0.05,
+  subsample=0.9, colsample_bytree=0.9, random_state=42, eval_metric='mlogloss', n_jobs=-1 (tham số
+  NHẸ HƠN XGBoost độc lập ở Mục 4.2 vì input ở đây chỉ có 16 chiều embedding, không phải 5 chiều
+  feature gốc, và đã được LSTM "tiền xử lý" nên không cần cây phức tạp bằng).
+
+b) Hybrid LSTM + GRU + XGBoost (3 thành phần):
+- Bước 1a (LSTM encoder) và Bước 1b (GRU encoder): huấn luyện SONG SONG, ĐỘC LẬP nhau, CÙNG cấu hình
+  (epochs=20, batch_size=32, EarlyStopping patience=5, cùng class_weight) trên CÙNG 1 tập cửa sổ 7
+  ngày - chỉ khác kiến trúc RNN bên trong (LSTM có 3 cổng, GRU có 1 cổng update).
+- Trích 2 embedding riêng (mỗi cái 16 chiều từ layer 'dense_features' của từng mạng), rồi NỐI
+  (np.concatenate, axis=1) lại thành 1 vector 32 chiều.
+- Bước 2 (XGBoost classifier trên embedding 32 chiều): CÙNG tham số như bản 2 thành phần
+  (n_estimators=200, max_depth=4, learning_rate=0.05, subsample=0.9, colsample_bytree=0.9,
+  random_state=42, eval_metric='mlogloss', n_jobs=-1) - chỉ khác chiều input (32 thay vì 16).
+
+
+===================================================================================================
+PHẦN 5 - LỊCH SỬ SỬA LỖI THỰC TẾ (hội đồng có thể hỏi "quá trình làm gặp khó khăn gì")
+===================================================================================================
+Đây là các sự cố THẬT đã gặp và cách khắc phục - trả lời tốt câu hỏi "khó khăn trong quá trình thực
+hiện đồ án" vì có dẫn chứng cụ thể, không chung chung.
+
+1. Xung đột protobuf: TensorFlow 2.10.1 (server) yêu cầu protobuf<3.20, nhưng Streamlit bản mới yêu
+   cầu protobuf>=3.20 - 2 yêu cầu xung đột trực tiếp trên cùng 1 môi trường. Khắc phục bằng cách ép
+   dùng chế độ parse Python thuần (PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python) thay vì đổi version
+   package (giải pháp chính thức được Google khuyến nghị cho đúng tình huống 2 thư viện đòi hỏi 2
+   khoảng version protobuf khác nhau).
+
+2. CTGAN AssertionError (input_.size()[0] % self.pac == 0): CTGAN dùng kỹ thuật PacGAN (mặc định
+   pac=10) - discriminator bắt buộc mỗi batch đưa vào phải chia hết cho 10. Với lớp thiểu số ít mẫu,
+   batch cuối cùng của mỗi epoch thường không chia hết cho 10 -> lỗi. Khắc phục bằng cách đặt pac=1
+   khi khởi tạo CTGAN (đánh đổi: giảm khả năng chống mode-collapse của PacGAN, chấp nhận được vì mục
+   tiêu chỉ là sinh thêm mẫu thiểu số).
+
+3. Cache Streamlit không tự làm mới: khối hiển thị so sánh CTGAN Before/After bị cache VĨNH VIỄN kết
+   quả của lần train ĐẦU TIÊN (do @st.cache_data không có tham số nào làm cache key), dù file dữ liệu
+   trên đĩa đã được ghi đè bởi lần train mới. Khắc phục bằng cách thêm mtime (thời điểm sửa đổi) của
+   file làm 1 phần cache key - Streamlit tự phát hiện file đổi và đọc lại, không cần bấm nút xoá cache
+   thủ công mỗi lần train lại.
+
+
+===================================================================================================
+PHẦN 6 - MÔ HÌNH LAI (HYBRID) CHẠY THẾ NÀO - GIẢI THÍCH TỪNG BƯỚC (câu hỏi hội đồng RẤT HAY hỏi)
+===================================================================================================
+QUAN TRỌNG: đồ án có ĐỦ 2 MÔ HÌNH LAI KHÁC NHAU trong build_model_registry() (category="Hybrid"):
+  6.1. "LSTM + XGBoost Hybrid"           - lai 2 thành phần (1 mạng RNN + 1 model cây)
+  6.2. "LSTM + GRU + XGBoost Hybrid"     - lai 3 thành phần (2 mạng RNN chạy song song + 1 model cây)
+Cả 2 đều dùng chung 1 nguyên lý gốc (RNN trích xuất đặc trưng, XGBoost phân loại cuối) - bản 3 thành
+phần chỉ thêm 1 nhánh GRU chạy song song với LSTM rồi NỐI 2 embedding lại trước khi đưa vào XGBoost.
+
+---------------------------------------------------------------------------------------------------
+6.1. Hybrid 2 thành phần: LSTM + XGBoost
+---------------------------------------------------------------------------------------------------
+Đúng ý hiểu "kết quả của thằng này đẩy qua cho thằng khác" - NHƯNG cần nói chính xác: cái được đẩy
+qua KHÔNG PHẢI là nhãn dự đoán cuối cùng của LSTM (0/1/2), mà là BIỂU DIỄN ẨN (hidden representation /
+embedding) - tức là "hiểu biết nội bộ" mà LSTM học được về chuỗi 7 ngày, dưới dạng 16 con số, TRƯỚC
+khi LSTM tự đưa ra quyết định phân lớp cuối cùng. Nếu chỉ đẩy nhãn cuối cùng qua thì vô nghĩa (XGBoost
+sẽ chỉ học lại đúng những gì LSTM đã quyết định, không thêm được thông tin gì mới).
+
+Sơ đồ luồng dữ liệu (ĐÚNG code thật trong train_lstm_xgboost_hybrid_model(), analyze_and_train.py):
+
+  Dữ liệu thô 5 biến khí tượng - thủy văn theo ngày
+          |
+          v
+  [Bước 0] Dựng sliding window 7 ngày liên tiếp (build_sequence_datasets(), SEQUENCE_WINDOW=7)
+          -> X_train_seq có shape (số mẫu, 7, 5)  [7 ngày x 5 biến mỗi mẫu]
+          |
+          v
+  [Bước 1] HUẤN LUYỆN LSTM ĐẦY ĐỦ (như 1 model LSTM bình thường, có lớp phân loại cuối)
+          Kiến trúc: Input(7,5) -> LSTM(32 unit) -> Dense(16, relu, tên layer "dense_features")
+                     -> Dense(3, softmax)  [lớp phân loại cuối cùng, ra xác suất 3 lớp]
+          Huấn luyện: epochs=20, batch_size=32, EarlyStopping(patience=5, monitor='val_loss'),
+                      có class_weight để cân bằng lớp thiểu số ngay trong lúc huấn luyện.
+          => Sau bước này đã có 1 model LSTM HOÀN CHỈNH, TỰ NÓ đã có thể phân loại được rồi.
+          |
+          v
+  [Bước 2] "CẮT" MODEL LSTM VỪA HUẤN LUYỆN - lấy phần TRƯỚC lớp phân loại cuối
+          feature_extractor = Model(inputs=lstm_model.input,
+                                     outputs=lstm_model.get_layer("dense_features").output)
+          => Đây là "mổ xẻ" model LSTM: dùng LẠI đúng các trọng số đã học ở Bước 1, nhưng chỉ lấy
+             output tới layer "dense_features" (16 số), BỎ QUA layer Dense(3, softmax) cuối cùng.
+          |
+          v
+  [Bước 3] DÙNG feature_extractor ĐỂ "DỊCH" MỖI CỬA SỔ 7 NGÀY THÀNH 1 VECTOR 16 SỐ (embedding)
+          train_embeddings = feature_extractor.predict(X_train_seq)   -> shape (số mẫu, 16)
+          test_embeddings  = feature_extractor.predict(X_test_seq)    -> shape (số mẫu, 16)
+          => Từng mẫu dữ liệu GIỜ KHÔNG CÒN là "7 ngày x 5 biến thô" nữa, mà đã được LSTM "nén/tóm
+             tắt" lại thành 16 con số - đây chính là phần "đẩy qua" mà bạn hỏi.
+          |
+          v
+  [Bước 4] HUẤN LUYỆN 1 MODEL XGBoost MỚI, HOÀN TOÀN ĐỘC LẬP, TRÊN 16 SỐ EMBEDDING ĐÓ
+          hybrid_classifier = XGBClassifier(n_estimators=200, max_depth=4, learning_rate=0.05, ...)
+          hybrid_classifier.fit(train_embeddings, y_train_seq)
+          => XGBoost KHÔNG hề nhìn thấy dữ liệu thô 5 biến gốc - nó chỉ học trên 16 con số do LSTM
+             tạo ra. Input của XGBoost ở đây là 16 chiều (embedding), KHÁC với XGBoost độc lập ở
+             Mục 4.2 (input là 5 chiều - đúng 5 biến khí tượng gốc).
+          |
+          v
+  [Bước 5] DỰ ĐOÁN CUỐI CÙNG = kết quả của XGBoost (KHÔNG dùng lại nhãn/xác suất mà LSTM tự đoán)
+          hybrid_predictions = hybrid_classifier.predict(test_embeddings)
+
+TÓM TẮT 1 CÂU (dùng khi hội đồng hỏi nhanh):
+"LSTM đóng vai trò TRÍCH XUẤT ĐẶC TRƯNG (feature extractor) - biến 1 chuỗi 7 ngày x 5 biến thô thành
+1 vector 16 số tóm tắt; XGBoost đóng vai trò PHÂN LOẠI CUỐI CÙNG trên vector 16 số đó - hai model
+KHÔNG chạy song song rồi lấy trung bình (đó là kiểu 'ensemble/voting'), mà chạy TUẦN TỰ, output
+(dạng embedding, không phải nhãn) của model trước là input của model sau - đúng kiểu 'stacking' theo
+tầng representation learning."
+
+CÂU HỎI PHỤ HAY GẶP:
+- "Tại sao không dùng luôn output Dense(3, softmax) của LSTM làm kết quả cuối, cần gì thêm XGBoost?"
+  -> Vì lớp Dense(3, softmax) cuối của mạng neural là 1 bộ phân loại TUYẾN TÍNH đơn giản trên 16 chiều
+     embedding. Thay nó bằng XGBoost (bộ phân loại phi tuyến mạnh hơn, dựa trên cây quyết định) trên
+     CHÍNH 16 chiều đó THƯỜNG cho kết quả tốt hơn, đặc biệt khi dữ liệu không quá lớn để mạng neural
+     tự học tốt 1 lớp phân loại phức tạp ở cuối.
+- "Vậy có gọi là Ensemble không?" -> KHÔNG chính xác nếu dùng đúng thuật ngữ. Ensemble (như Random
+  Forest/AdaBoost) là nhiều model CÙNG NHÌN 1 loại input, chạy SONG SONG, rồi kết hợp kết quả (voting/
+  trung bình). Ở đây là 2 model KHÁC LOẠI INPUT, chạy TUẦN TỰ, cái sau học trên OUTPUT TRUNG GIAN của
+  cái trước - đúng thuật ngữ học thuật là "representation learning + stacking" hoặc "feature extraction
+  pipeline", gần với khái niệm "Hybrid model" hơn là "Ensemble model".
+- "CNN-LSTM (Mục 4.4) có giống Hybrid này không?" -> KHÔNG. CNN-LSTM là 1 MẠNG NEURAL DUY NHẤT, liền
+  mạch, huấn luyện end-to-end 1 lần (Conv1D và LSTM cùng nằm trong 1 model, cùng lan truyền ngược -
+  backpropagation - qua nhau). Hybrid LSTM+XGBoost là 2 MODEL ĐỘC LẬP, huấn luyện RIÊNG BIỆT theo 2
+  bước tuần tự như trên - XGBoost không lan truyền ngược vào LSTM được (vì XGBoost không phải mạng
+  neural, không tính gradient qua LSTM).
+
+---------------------------------------------------------------------------------------------------
+6.2. Hybrid 3 thành phần: LSTM + GRU + XGBoost
+---------------------------------------------------------------------------------------------------
+Mở rộng trực tiếp từ 6.1 - thêm 1 nhánh GRU chạy SONG SONG với LSTM (không phải nối tiếp), rồi NỐI
+(concatenate) 2 embedding lại trước khi đưa vào XGBoost. Hàm thật:
+train_lstm_gru_xgboost_hybrid_model() (analyze_and_train.py).
+
+Sơ đồ luồng dữ liệu:
+
+  Dữ liệu thô 5 biến khí tượng - thủy văn theo ngày
+          |
+          v
+  [Bước 0] Dựng sliding window 7 ngày liên tiếp (build_sequence_datasets(), SEQUENCE_WINDOW=7)
+          -> X_train_seq có shape (số mẫu, 7, 5)
+          |
+          +-------------------------------+
+          |                                |
+          v                                v
+  [Bước 1a] Huấn luyện LSTM ĐẦY ĐỦ   [Bước 1b] Huấn luyện GRU ĐẦY ĐỦ
+     (kiến trúc + tham số huấn luyện      (kiến trúc + tham số huấn luyện
+      GIỐNG HỆT bản 6.1, epochs=20,        GIỐNG HỆT LSTM ở cột bên trái,
+      batch_size=32, EarlyStopping)        chỉ khác cơ chế cổng RNN bên trong)
+          |                                |
+          v                                v
+  [Bước 2a] Cắt lấy layer         [Bước 2b] Cắt lấy layer
+     "dense_features" (16 số)        "dense_features" (16 số)
+          |                                |
+          v                                v
+  [Bước 3a] train_lstm_embeddings   [Bước 3b] train_gru_embeddings
+     shape (số mẫu, 16)                 shape (số mẫu, 16)
+          |                                |
+          +---------------+----------------+
+                           |
+                           v
+  [Bước 4] NỐI 2 embedding lại (np.concatenate, axis=1)
+          -> train_combined_embeddings shape (số mẫu, 32)  [16 từ LSTM + 16 từ GRU]
+          |
+          v
+  [Bước 5] Huấn luyện 1 XGBoost MỚI, ĐỘC LẬP, trên 32 số embedding đã NỐI
+          hybrid_classifier.fit(train_combined_embeddings, y_train_seq)
+          => XGBoost KHÔNG biết 16 số đầu từ LSTM hay 16 số sau từ GRU - nó chỉ thấy 32 con số, tự
+             học cách kết hợp thông tin từ CẢ 2 "góc nhìn" khác nhau của LSTM và GRU.
+          |
+          v
+  [Bước 6] Dự đoán cuối cùng = kết quả của XGBoost trên 32 chiều embedding đã nối
+
+TÓM TẮT 1 CÂU (dùng khi hội đồng hỏi nhanh):
+"Khác biệt DUY NHẤT so với bản 2 thành phần (6.1) là có THÊM 1 nhánh GRU chạy SONG SONG, ĐỘC LẬP với
+LSTM trên cùng dữ liệu đầu vào - LSTM và GRU không hề biết tới nhau, không chia sẻ trọng số; chỉ có
+embedding NỐI của cả 2 mới được đưa chung vào 1 XGBoost duy nhất ở bước cuối. Vì vậy đây vẫn là kiểu
+'stacking', không phải 'ensemble' theo đúng nghĩa vote/trung bình kết quả."
+
+CÂU HỎI PHỤ HAY GẶP (riêng cho bản 3 thành phần):
+- "Tại sao không nối cả CNN-LSTM/1D-CNN vào luôn cho thành hybrid 4-5 thành phần?" -> Về mặt kỹ thuật
+  hoàn toàn khả thi (thêm 1 nhánh feature_extractor nữa rồi nối embedding), nhưng đề tài dừng ở 2 nhánh
+  RNN (LSTM+GRU) vì đây là 2 kiến trúc có tính BỔ SUNG rõ ràng nhất cho nhau (cùng học chuỗi thời gian
+  nhưng cơ chế cổng khác nhau); thêm nhánh CNN (vốn thiên về mẫu hình cục bộ hơn là phụ thuộc dài hạn)
+  cần thời gian thử nghiệm/đánh giá riêng để tránh embedding quá nhiều chiều gây nhiễu cho XGBoost.
+- "Huấn luyện 2 mạng RNN có tốn gấp đôi thời gian không?" -> Đúng, đây là ĐÁNH ĐỔI CHÍNH của bản 3
+  thành phần: chi phí huấn luyện cao hơn (phải chạy .fit() cho CẢ LSTM lẫn GRU, thay vì chỉ 1 mạng),
+  đổi lại kỳ vọng embedding đầu vào cho XGBoost giàu thông tin hơn (32 chiều từ 2 góc nhìn, thay vì 16
+  chiều từ 1 góc nhìn duy nhất).

@@ -829,7 +829,7 @@ add_bullets(
                 "Routing API (tham số avoidAreas).",
             ],
         ),
-        "Dự báo theo từng địa phương cụ thể: mỗi trong 5 địa phương (TP Huế, Hương Thủy, Hương Trà, Phú "
+        "Dự báo theo từng địa phương cụ thể: mỗi trong 5 địa phương (Thuận Hóa, Hương Thủy, Hương Trà, Phú "
         "Vang, Quảng Điền) có dự báo 4 ngày riêng - click vào vùng trên bản đồ hiện popup tóm tắt.",
         "Cảnh báo sớm qua dashboard: dự báo 4 ngày tới tự động cập nhật (cache theo ngày), hiển thị bảng "
         "+ biểu đồ ngay khi mở tab, không cần thao tác thêm.",
