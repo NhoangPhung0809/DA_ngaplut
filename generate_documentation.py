@@ -4,12 +4,153 @@ Chạy: python generate_documentation.py
 Kết quả: TAI_LIEU_KY_THUAT_HE_THONG.docx
 """
 
+import json
+from pathlib import Path
+
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 from docx import Document
 from docx.shared import Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
+
+# =====================================================================================
+# BIỂU ĐỒ KẾT QUẢ THẬT (đọc từ models/latest/) - CHÈN ẢNH THẬT VÀO TÀI LIỆU
+# =====================================================================================
+# TRƯỚC ĐÂY file này CHỈ sinh văn bản/bảng tĩnh, MÔ TẢ BẰNG CHỮ các biểu đồ mà app.py hiển thị (vd
+# "Biểu đồ cột ngang so sánh F1-Score toàn bộ mô hình") chứ KHÔNG hề chèn ảnh THẬT nào - người đọc tài
+# liệu không thấy được kết quả cụ thể. Giờ đọc TRỰC TIẾP `evaluation_metrics.json`/`roc_curve_data.json`
+# của lần huấn luyện GẦN NHẤT (giống hệt cách app.py đọc), tự dựng lại ĐÚNG 2 biểu đồ đang hiển thị trên
+# UI (`app.py::render_model_metrics()`), rồi xuất ra PNG bằng Kaleido để chèn vào tài liệu Word.
+#
+# DÙNG NỀN TRẮNG (khác nền tối của app.py) vì đây là tài liệu Word in/đọc trên nền trắng - bê nguyên
+# theme tối của UI vào sẽ khó đọc khi in hoặc xem trên nền trắng của Word.
+BASE_DIR = Path(__file__).resolve().parent
+LATEST_MODELS_DIR = BASE_DIR / "models" / "latest"
+REPORT_CHARTS_DIR = BASE_DIR / "cache" / "report_charts"
+CLASS_LABEL_VI = {"0": "An toàn", "1": "Ngập nhẹ", "2": "Ngập nặng"}
+
+
+def load_latest_metrics_dataframe() -> pd.DataFrame | None:
+    """Đọc `evaluation_metrics.json` của lần train gần nhất, dựng DataFrame giống hệt
+    `render_model_metrics()` trong `app.py` (Model/Accuracy/Precision/Recall/F1)."""
+    metrics_path = LATEST_MODELS_DIR / "evaluation_metrics.json"
+    if not metrics_path.exists():
+        return None
+    with metrics_path.open("r", encoding="utf-8") as file:
+        evaluation_metrics = json.load(file)
+
+    rows = []
+    for model_name, metric_values in evaluation_metrics.items():
+        if not isinstance(metric_values, dict):
+            continue
+        rows.append(
+            {
+                "Model": metric_values.get("model_name", model_name),
+                "Accuracy": metric_values.get("accuracy"),
+                "Precision (Macro)": metric_values.get("precision_macro"),
+                "Recall (Macro)": metric_values.get("recall_macro"),
+                "F1 (Macro)": metric_values.get("f1_macro"),
+            }
+        )
+    if not rows:
+        return None
+    return pd.DataFrame(rows).sort_values(by="F1 (Macro)", ascending=False).reset_index(drop=True)
+
+
+def build_f1_comparison_chart_image(output_path: Path) -> bool:
+    """Xuất PNG biểu đồ cột ngang so sánh F1-Score toàn bộ model (đúng logic `app.py`, thang màu
+    Viridis), nền TRẮNG cho phù hợp tài liệu Word. Trả `False` nếu chưa có dữ liệu train thật."""
+    metrics_df = load_latest_metrics_dataframe()
+    if metrics_df is None or metrics_df.empty:
+        return False
+
+    fig = px.bar(
+        metrics_df,
+        x="F1 (Macro)",
+        y="Model",
+        orientation="h",
+        color="F1 (Macro)",
+        color_continuous_scale="Viridis",
+        text="F1 (Macro)",
+    )
+    fig.update_layout(
+        yaxis={"categoryorder": "total ascending"},
+        coloraxis_colorbar_title="F1",
+        xaxis_title="F1 (Macro)",
+        yaxis_title="Mô hình",
+        title="So sánh F1-Score của toàn bộ mô hình",
+        margin=dict(l=10, r=10, t=50, b=10),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        font=dict(color="#111827"),
+    )
+    fig.update_traces(texttemplate="%{text:.4f}", textposition="outside")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.write_image(str(output_path), width=1100, height=max(400, 32 * len(metrics_df) + 120), scale=2)
+    return True
+
+
+def build_roc_auc_chart_image(output_path: Path) -> bool:
+    """Xuất PNG đường cong ROC-AUC (One-vs-Rest) của best model (đúng logic `app.py`), nền TRẮNG. Trả
+    `False` nếu chưa có dữ liệu hoặc ROC không khả dụng cho model đang triển khai."""
+    roc_path = LATEST_MODELS_DIR / "roc_curve_data.json"
+    if not roc_path.exists():
+        return False
+    with roc_path.open("r", encoding="utf-8") as file:
+        roc_payload = json.load(file)
+    if roc_payload.get("status") != "ok":
+        return False
+
+    class_name_map = roc_payload.get("class_names", {})
+    curves = roc_payload.get("curves", {})
+    model_name = roc_payload.get("model_name", "Best Model")
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(x=[0, 1], y=[0, 1], mode="lines", name="Baseline (AUC = 0.5)", line=dict(color="#9ca3af", width=2, dash="dot"))
+    )
+    colors = {"0": "#2563eb", "1": "#d97706", "2": "#dc2626"}
+    has_any_curve = False
+    for class_key in ["0", "1", "2"]:
+        curve = curves.get(class_key) or {}
+        fpr, tpr, auc_value = curve.get("fpr") or [], curve.get("tpr") or [], curve.get("auc")
+        if not fpr or not tpr:
+            continue
+        has_any_curve = True
+        auc_text = "N/A" if auc_value is None else f"{float(auc_value):.4f}"
+        label_name = CLASS_LABEL_VI.get(class_key, class_name_map.get(class_key, f"Class {class_key}"))
+        fig.add_trace(
+            go.Scatter(
+                x=fpr, y=tpr, mode="lines",
+                name=f"Lớp {label_name} - AUC: {auc_text}",
+                line=dict(color=colors.get(class_key, "#16a34a"), width=3),
+            )
+        )
+    if not has_any_curve:
+        return False
+
+    # Legend đặt PHÍA DƯỚI biểu đồ (y âm) - đặt phía TRÊN (y=1.02) như bản Streamlit gốc bị ĐÈ LÊN
+    # tiêu đề khi xuất ảnh tĩnh bằng Kaleido (khác renderer tương tác trong trình duyệt, không tự co
+    # giãn khoảng trống giữa title/legend) - bug thật đã thấy khi xem ảnh PNG xuất ra.
+    fig.update_layout(
+        title=dict(text=f"Đường cong ROC-AUC (One-vs-Rest) - Best Model: {model_name}", y=0.98),
+        xaxis_title="False Positive Rate (FPR)",
+        yaxis_title="True Positive Rate (TPR)",
+        margin=dict(l=10, r=10, t=60, b=90),
+        legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        font=dict(color="#111827"),
+    )
+    fig.update_xaxes(range=[0, 1], gridcolor="#e5e7eb")
+    fig.update_yaxes(range=[0, 1], gridcolor="#e5e7eb")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.write_image(str(output_path), width=900, height=650, scale=2)
+    return True
 
 
 def set_cell_background(cell, color_hex: str) -> None:
@@ -350,6 +491,22 @@ add_bullets(
         "(Xem giải thích Ý NGHĨA và LÝ DO PHÙ HỢP của từng độ đo ở Mục 4.)",
     ],
 )
+
+# Chèn ẢNH THẬT của 2 biểu đồ kết quả (đọc từ lần huấn luyện gần nhất trong models/latest/) - xem
+# `build_f1_comparison_chart_image()`/`build_roc_auc_chart_image()` đầu file. Bỏ qua êm (không chèn
+# ảnh, không lỗi) nếu CHƯA train lần nào - tài liệu vẫn sinh được bình thường, chỉ thiếu phần minh hoạ.
+f1_chart_path = REPORT_CHARTS_DIR / "f1_comparison.png"
+if build_f1_comparison_chart_image(f1_chart_path):
+    add_para(doc, "Kết quả thật (lần huấn luyện gần nhất):", bold=True)
+    doc.add_picture(str(f1_chart_path), width=Cm(16))
+else:
+    add_para(doc, "(Chưa có kết quả huấn luyện thật trong models/latest/ để chèn biểu đồ F1.)", italic=True)
+
+roc_chart_path = REPORT_CHARTS_DIR / "roc_auc.png"
+if build_roc_auc_chart_image(roc_chart_path):
+    doc.add_picture(str(roc_chart_path), width=Cm(14))
+else:
+    add_para(doc, "(Chưa có `roc_curve_data.json` khả dụng để chèn biểu đồ ROC-AUC.)", italic=True)
 
 # ---- Tab 5 ----
 add_heading(doc, "2.5. Tab 5 - 🗺️ Bản đồ Tránh ngập", level=2)

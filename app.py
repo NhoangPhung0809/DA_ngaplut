@@ -2119,42 +2119,28 @@ def render_preprocessing_training_tab() -> None:
         "cân bằng lớp thiểu số, và tinh chỉnh siêu tham số (Optuna / GridSearchCV)."
     )
 
-    col_clean, col_split = st.columns(2)
-
-    with col_clean:
-        with st.expander("Dữ liệu đã làm sạch (Cleaned Data)", expanded=True):
-            try:
-                cleaned_df = load_cleaned_training_dataframe()
-            except Exception as exc:
-                st.error(f"Không nạp/làm sạch được dữ liệu: {exc}")
-            else:
-                # `.head(20)` trước đây chỉ hiện đúng 1 địa phương (dữ liệu sort theo [Địa phương,
-                # Thời_gian] nên 1 địa phương chiếm liền hàng nghìn dòng đầu) - lấy 4 dòng ĐẦU của MỖI
-                # địa phương (5 địa phương x 4 = 20 dòng) để bảng xem trước thấy xen kẽ đủ cả 5.
-                preview_df = cleaned_df.groupby("Địa phương", sort=False).head(4)
-                st.dataframe(preview_df, use_container_width=True, hide_index=True)
-                render_chart_discussion(
-                    f"Bảng trên là {len(cleaned_df):,} dòng - dữ liệu THEO NGÀY (đã gộp từ dữ liệu theo "
-                    "giờ gốc, đúng granularity model thật sự huấn luyện) sau khi qua "
-                    "`build_daily_feature_dataset()` (gộp ngày + tính 3 cột lag/tích luỹ mưa) -> "
-                    "`create_multiclass_flood_label()` (gán lại nhãn theo luật rule-based, dựa trên "
-                    "mưa/độ ẩm đất/triều cường của CHÍNH ngày đó) -> `preprocess_features()` (ép kiểu số, "
-                    "điền giá trị thiếu bằng trung vị của từng cột - median ít bị lệch bởi outlier hơn "
-                    "trung bình) trong `analyze_and_train.py` - đúng 3 bước đầu tiên của "
-                    "`run_training_pipeline()` thật, không phải logic làm sạch viết riêng cho bảng xem "
-                    "trước này."
-                )
-
-    with col_split:
-        with st.expander("Chia tập Train / Test (Data Splitting)", expanded=True):
-            st.markdown(
-                "- **Tỷ lệ chia**: 80% Train / 20% Test.\n"
-                "- **Phương pháp**: chia theo mốc thời gian (`shuffle=False`) - tập Test luôn nằm sau "
-                "tập Train, không chia ngẫu nhiên.\n"
+    with st.expander("Dữ liệu đã làm sạch (Cleaned Data)", expanded=True):
+        try:
+            cleaned_df = load_cleaned_training_dataframe()
+        except Exception as exc:
+            st.error(f"Không nạp/làm sạch được dữ liệu: {exc}")
+        else:
+            # `.head(20)` trước đây chỉ hiện đúng 1 địa phương (dữ liệu sort theo [Địa phương,
+            # Thời_gian] nên 1 địa phương chiếm liền hàng nghìn dòng đầu) - lấy 4 dòng ĐẦU của MỖI
+            # địa phương (5 địa phương x 4 = 20 dòng) để bảng xem trước thấy xen kẽ đủ cả 5.
+            preview_df = cleaned_df.groupby("Địa phương", sort=False).head(4)
+            st.dataframe(preview_df, use_container_width=True, hide_index=True)
+            render_chart_discussion(
+                f"Bảng trên là {len(cleaned_df):,} dòng - dữ liệu THEO NGÀY (đã gộp từ dữ liệu theo "
+                "giờ gốc, đúng granularity model thật sự huấn luyện) sau khi qua "
+                "`build_daily_feature_dataset()` (gộp ngày + tính 3 cột lag/tích luỹ mưa) -> "
+                "`create_multiclass_flood_label()` (gán lại nhãn theo luật rule-based, dựa trên "
+                "mưa/độ ẩm đất/triều cường của CHÍNH ngày đó) -> `preprocess_features()` (ép kiểu số, "
+                "điền giá trị thiếu bằng trung vị của từng cột - median ít bị lệch bởi outlier hơn "
+                "trung bình) trong `analyze_and_train.py` - đúng 3 bước đầu tiên của "
+                "`run_training_pipeline()` thật, không phải logic làm sạch viết riêng cho bảng xem "
+                "trước này."
             )
-            # Kiểm định chéo theo chuỗi thời gian (Time Series CV, walk-forward) đã triển khai THẬT ở
-            # `analyze_and_train.py::generate_chronological_cv_folds()`/`run_time_series_cv_pipeline()` -
-            # xem kết quả ở khối "Kiểm định chéo theo chuỗi thời gian (Time Series CV)" bên dưới.
 
     st.markdown("---")
 
