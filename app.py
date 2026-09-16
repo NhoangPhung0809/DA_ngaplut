@@ -3030,25 +3030,8 @@ def render_evaluation_tab() -> None:
         )
         return
 
-    best_model_name_for_export = deployment_config.get("model_name", "model")
-    best_model_metrics_for_export = evaluation_metrics.get(best_model_name_for_export, {}) if isinstance(evaluation_metrics, dict) else {}
-    balancing_method_for_export = (
-        best_model_metrics_for_export.get("balancing_method", "unknown")
-        if isinstance(best_model_metrics_for_export, dict)
-        else "unknown"
-    )
-    generated_at_slug = str(deployment_config.get("generated_at", "unknown")).replace(":", "-").replace(" ", "_")
-    st.download_button(
-        "📥 Xuất báo cáo đánh giá (bảng + biểu đồ, kèm phương pháp cân bằng & thời điểm train)",
-        data=build_evaluation_report_html(evaluation_metrics, deployment_config, runtime_info),
-        file_name=f"bao_cao_danh_gia_{balancing_method_for_export}_{generated_at_slug}.html",
-        mime="text/html",
-        help=(
-            f"Phương pháp cân bằng dữ liệu của lần train hiện tại: {str(balancing_method_for_export).upper()} - "
-            f"train lúc: {deployment_config.get('generated_at', 'không rõ')}. Lưu file này lại TRƯỚC KHI train "
-            "lần khác để so sánh (models/latest/ bị ghi đè mỗi lần train mới)."
-        ),
-    )
+    # Nút "Xuất báo cáo đánh giá" đặt ở SIDEBAR (toolbar chung, cạnh nút "Làm mới toàn bộ cache") - xem
+    # `render_sidebar()` - không lặp lại ở đây nữa.
 
     with st.expander("So sánh chỉ số mô hình (F1-Score / Precision / Recall)", expanded=True):
         render_model_metrics(evaluation_metrics, deployment_config, runtime_info)
@@ -4962,6 +4945,37 @@ def render_sidebar() -> None:
         st.cache_data.clear()
         st.cache_resource.clear()
         st.sidebar.success("Đã xóa cache - dữ liệu sẽ được nạp lại ở lần chạy tiếp theo.")
+
+    # Nút xuất báo cáo đánh giá đặt CHUNG toolbar sidebar (cạnh nút "Làm mới toàn bộ cache") thay vì
+    # đứng riêng 1 mình ở đầu Tab 3 - gọn hơn, cùng nhóm với các thao tác quản trị/tiện ích khác. Bọc
+    # try/except vì sidebar render ở MỌI tab, kể cả khi CHƯA có model nào được train (chưa có
+    # deployment_config.json/evaluation_metrics.json) - khi đó ẩn nút đi thay vì lỗi cả sidebar.
+    try:
+        evaluation_metrics, deployment_config, runtime_info = load_evaluation_artifacts()
+        best_model_name_for_export = deployment_config.get("model_name", "model")
+        best_model_metrics_for_export = (
+            evaluation_metrics.get(best_model_name_for_export, {}) if isinstance(evaluation_metrics, dict) else {}
+        )
+        balancing_method_for_export = (
+            best_model_metrics_for_export.get("balancing_method", "unknown")
+            if isinstance(best_model_metrics_for_export, dict)
+            else "unknown"
+        )
+        generated_at_slug = str(deployment_config.get("generated_at", "unknown")).replace(":", "-").replace(" ", "_")
+        st.sidebar.download_button(
+            "📥 Xuất báo cáo đánh giá",
+            data=build_evaluation_report_html(evaluation_metrics, deployment_config, runtime_info),
+            file_name=f"bao_cao_danh_gia_{balancing_method_for_export}_{generated_at_slug}.html",
+            mime="text/html",
+            use_container_width=True,
+            help=(
+                f"Phương pháp cân bằng dữ liệu của lần train hiện tại: {str(balancing_method_for_export).upper()} - "
+                f"train lúc: {deployment_config.get('generated_at', 'không rõ')}. Lưu file này lại TRƯỚC KHI train "
+                "lần khác để so sánh (models/latest/ bị ghi đè mỗi lần train mới)."
+            ),
+        )
+    except Exception:
+        pass
 
     render_admin_api_key_panel()
 
