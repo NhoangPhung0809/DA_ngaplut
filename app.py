@@ -1130,50 +1130,56 @@ def load_eda_sample_dataframe() -> pd.DataFrame:
 
 def regenerate_flood_risk_label(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Tính lại cột `Nguy_cơ_ngập` 3 lớp (0/1/2) bằng ĐÚNG luật chuyên gia dùng trong
-    `create_multiclass_flood_label()` (analyze_and_train.py), thay vì tin thẳng cột `Nguy_cơ_ngập` sẵn
-    có trong CSV thô.
+    Tính lại cột `Nguy_cơ_ngập` 3 lớp (0/1/2) cho dữ liệu THEO GIỜ ở Tab EDA, bằng cách gọi ĐÚNG 2 hàm
+    thật `build_daily_feature_dataset()` + `create_multiclass_flood_label()` (analyze_and_train.py) rồi
+    GÁN LẠI nhãn NGÀY đó cho MỌI dòng giờ thuộc ngày đó - thay vì tin thẳng cột `Nguy_cơ_ngập` sẵn có
+    trong CSV thô, và thay vì tự chép lại luật rule-based (cách cũ).
 
-    LÝ DO CẦN HÀM NÀY (bug thực tế đã gặp): CSV thô trong `data/historical/` lưu nhãn từ MỘT phiên bản
-    fetch/label CŨ hơn (có thể chỉ 0/1 nhị phân, không có lớp 'Ngập nặng'), KHÁC với nhãn 3 lớp rule-
-    based mà pipeline huấn luyện thật sự dùng - `eda_analysis.py` (script độc lập cũ) đã biết vấn đề
-    này và tự quy định lại nhãn trước khi vẽ biểu đồ (xem docstring `save_eda_metadata()` ở đó), nhưng
-    `load_eda_sample_dataframe()` ở `app.py` trước đây LẤY THẲNG cột CSV thô - khiến Tab EDA hiển thị
-    sai lệch nhãn so với thực tế model đang học (ví dụ biểu đồ phân bố lớp bị THIẾU HẲN lớp 'Ngập
-    nặng' dù dữ liệu vẫn có các đợt mưa/triều đủ lớn để được xếp vào lớp đó).
+    BUG THẬT ĐÃ GẶP (lý do đổi cách làm): bản cũ tự CHÉP LẠI luật rule-based ngay trong hàm này, áp
+    thẳng lên `Lượng_mưa_mm` THEO GIỜ. Có 2 vấn đề:
+    1) Ngưỡng mưa (rain>50/25mm) trong `create_multiclass_flood_label()` được hiệu chỉnh cho mưa TÍCH
+       LUỸ CẢ NGÀY (sau khi `build_daily_feature_dataset()` gộp `.sum()` theo ngày) - áp thẳng lên mưa
+       1 GIỜ khiến ngưỡng trở nên cực đoan hơn hẳn dự kiến (mưa 50mm/giờ hiếm hơn nhiều so với 50mm/
+       ngày) -> lớp ngập bị đánh giá THẤP GIẢ (ví dụ chỉ ~1.4% số dòng thay vì đúng tỷ lệ thật).
+    2) Bản chép tay này KHÔNG có điều kiện `rain_3day` (mưa tích luỹ 3 ngày, thêm vào
+       `create_multiclass_flood_label()` sau) - bị "quên cập nhật" theo, gây ra đúng hiện tượng người
+       dùng phát hiện: biểu đồ phân bố lớp ở Tab EDA (Tab 1) lệch hẳn so với biểu đồ ở Tab 2/CTGAN, dù
+       cùng 1 bộ dữ liệu gốc - KHÔNG PHẢI nhãn "bị đánh lại ngẫu nhiên", mà là 2 CÔNG THỨC KHÁC NHAU
+       (1 bản chép tay lỗi thời, 1 bản thật) đang tồn tại song song.
 
-    ĐƠN GIẢN HOÁ so với bản training thật: dùng `fillna(0)` trực tiếp cho 3 biến quyết định nhãn (mưa/
-    độ ẩm đất/triều), KHÔNG áp dụng bước điền median-theo-tập-train phức tạp của
-    `compute_train_only_medians()` - bước đó chỉ cần thiết để tránh rò rỉ dữ liệu khi HUẤN LUYỆN model,
-    không ảnh hưởng tới mục đích XEM PHÂN BỐ dữ liệu ở Tab EDA.
+    CÁCH SỬA: bỏ hẳn bản chép tay, gọi lại đúng 2 hàm thật của pipeline training (đảm bảo nhất quán
+    tuyệt đối, không còn nguy cơ lệch do quên đồng bộ lần sau), rồi merge nhãn NGÀY vào từng dòng GIỜ
+    theo cặp khoá (Địa phương, ngày) - vẫn giữ granularity THEO GIỜ cho các biểu đồ khác của Tab EDA
+    (tương quan, phân phối theo giờ...), chỉ riêng cột nhãn là phản ánh ĐÚNG thứ model thật đang học.
     """
     if df.empty:
         return df
 
-    required_columns = {"Lượng_mưa_mm", "Độ_ẩm_đất", "Chiều_cao_triều_m"}
+    required_columns = {"Lượng_mưa_mm", "Độ_ẩm_đất", "Chiều_cao_triều_m", "Nhiệt_độ_C", "Độ_ẩm_%", "Thời_gian", "Địa phương"}
     if not required_columns.issubset(df.columns):
         return df
 
-    labeled_df = df.copy()
-    rain = pd.to_numeric(labeled_df["Lượng_mưa_mm"], errors="coerce").fillna(0)
-    soil = pd.to_numeric(labeled_df["Độ_ẩm_đất"], errors="coerce").fillna(0)
-    tide = pd.to_numeric(labeled_df["Chiều_cao_triều_m"], errors="coerce").fillna(0)
+    try:
+        train_module = get_train_module()
+        daily_feature_df = train_module.build_daily_feature_dataset(df)
+        daily_labeled_df = train_module.create_multiclass_flood_label(daily_feature_df)
+    except Exception:
+        # An toàn: nếu pipeline training lỗi (ví dụ thiếu cột hiếm gặp), giữ nguyên df thay vì crash
+        # cả Tab EDA - người dùng vẫn xem được các biểu đồ khác không phụ thuộc nhãn.
+        return df
 
-    heavy_flood_mask = (
-        (rain > 50)
-        | ((rain > 30) & (soil > 0.45))
-        | ((rain > 20) & (soil > 0.40) & (tide > 1.50))
-        | (tide > 2.50)
-    )
-    light_flood_mask = (
-        (rain > 25)
-        | ((rain > 15) & (soil > 0.30))
-        | ((rain > 10) & (tide > 1.20))
+    day_label_map = daily_labeled_df[["Địa phương", "Thời_gian", "Nguy_cơ_ngập"]].rename(
+        columns={"Thời_gian": "__ngày__"}
     )
 
-    labeled_df["Nguy_cơ_ngập"] = 0
-    labeled_df.loc[light_flood_mask, "Nguy_cơ_ngập"] = 1
-    labeled_df.loc[heavy_flood_mask, "Nguy_cơ_ngập"] = 2
+    # Bỏ cột `Nguy_cơ_ngập` GỐC (nhãn cũ từ CSV thô) trước khi merge - nếu không, pandas sẽ tự thêm
+    # hậu tố `_x`/`_y` cho 2 cột trùng tên thay vì ghi đè, khiến `labeled_df["Nguy_cơ_ngập"]` bên dưới
+    # KeyError vì cột phẳng đó không còn tồn tại.
+    labeled_df = df.drop(columns="Nguy_cơ_ngập", errors="ignore").copy()
+    labeled_df["__ngày__"] = labeled_df["Thời_gian"].dt.floor("D")
+    labeled_df = labeled_df.merge(day_label_map, on=["Địa phương", "__ngày__"], how="left")
+    labeled_df["Nguy_cơ_ngập"] = labeled_df["Nguy_cơ_ngập"].fillna(0).astype(int)
+    labeled_df = labeled_df.drop(columns="__ngày__")
     return labeled_df
 
 
