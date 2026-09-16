@@ -2157,11 +2157,11 @@ def render_preprocessing_training_tab() -> None:
 # ==================================================================================================
 # TAB 3 - ĐÁNH GIÁ MÔ HÌNH
 # ==================================================================================================
-def render_confusion_matrix_heatmap(confusion_matrix_json_path: Path) -> None:
+def build_confusion_matrix_figure(confusion_matrix_json_path: Path) -> "go.Figure | None":
     """
-    Confusion Matrix dạng heatmap TƯƠNG TÁC (Plotly) - đọc dữ liệu số thô từ `confusion_matrix.json`
-    (do `build_confusion_matrix_from_labels()` trong `analyze_and_train.py` xuất kèm ảnh PNG), thay
-    cho ảnh tĩnh trước đây. Hover để xem chính xác số lượng từng ô, zoom được khi cần soi kỹ.
+    Dựng Figure Confusion Matrix (Plotly) từ `confusion_matrix.json` - tách riêng khỏi
+    `render_confusion_matrix_heatmap()` để có thể tái sử dụng khi xuất báo cáo (`build_evaluation_report_html()`),
+    không chỉ để `st.plotly_chart()` trực tiếp lên UI.
     """
     with confusion_matrix_json_path.open("r", encoding="utf-8") as file:
         payload = json.load(file)
@@ -2169,8 +2169,7 @@ def render_confusion_matrix_heatmap(confusion_matrix_json_path: Path) -> None:
     labels = payload.get("labels") or []
     matrix = payload.get("matrix") or []
     if not labels or not matrix:
-        st.info("File `confusion_matrix.json` rỗng hoặc thiếu dữ liệu.")
-        return
+        return None
 
     matrix_array = np.asarray(matrix, dtype=float)
     max_value = matrix_array.max() if matrix_array.size else 0
@@ -2213,16 +2212,26 @@ def render_confusion_matrix_heatmap(confusion_matrix_json_path: Path) -> None:
         margin=dict(t=50, b=40, l=10, r=10),
     )
     fig.update_traces(colorbar=dict(title=dict(text="Số lượng", font=dict(color="#f8fafc")), tickfont=dict(color="#cbd5e1")))
+    return fig
+
+
+def render_confusion_matrix_heatmap(confusion_matrix_json_path: Path) -> None:
+    """
+    Confusion Matrix dạng heatmap TƯƠNG TÁC (Plotly) - hover để xem chính xác số lượng từng ô, zoom
+    được khi cần soi kỹ. Chỉ lo phần hiển thị lên UI, việc dựng Figure nằm ở `build_confusion_matrix_figure()`.
+    """
+    fig = build_confusion_matrix_figure(confusion_matrix_json_path)
+    if fig is None:
+        st.info("File `confusion_matrix.json` rỗng hoặc thiếu dữ liệu.")
+        return
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> None:
+def build_feature_importance_figure(feature_importance_json_path: Path) -> "go.Figure | None":
     """
-    Biểu đồ THANH NGANG (horizontal bar, Plotly) cho Feature Importance - theo góp ý của GVHD (đổi từ
-    heatmap sang thanh màu, dễ so sánh độ lớn giữa các biến hơn heatmap 1 hàng). Đọc dữ liệu số thô từ
-    `feature_importance.json` (do `plot_feature_importance()` trong `analyze_and_train.py` xuất kèm
-    ảnh PNG) - KHÔNG tính lại importance ở đây, tránh chạy lại `permutation_importance` (tốn thời
-    gian) mỗi lần Streamlit rerun.
+    Dựng Figure Feature Importance (Plotly) từ `feature_importance.json` - tách riêng khỏi
+    `render_feature_importance_bar_chart()` để tái sử dụng khi xuất báo cáo
+    (`build_evaluation_report_html()`).
 
     Sắp xếp GIẢM DẦN theo Importance, TẤT CẢ các thanh dùng CHUNG 1 MÀU (không tô gradient theo giá
     trị) - vì các thanh đang biểu diễn CÙNG 1 đại lượng (mức độ quan trọng), độ dài thanh đã đủ thể
@@ -2234,8 +2243,7 @@ def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> N
 
     importance_df = pd.DataFrame(importance_records)
     if importance_df.empty:
-        st.info("File `feature_importance.json` rỗng.")
-        return
+        return None
     # Sắp xếp TĂNG DẦN vì Plotly vẽ thanh ngang từ DƯỚI LÊN - biến quan trọng nhất cần nằm TRÊN CÙNG.
     importance_df = importance_df.sort_values("Importance", ascending=True)
 
@@ -2266,6 +2274,15 @@ def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> N
         yaxis=dict(color="#f8fafc", tickfont=dict(size=15)),
         showlegend=False,
     )
+    return fig
+
+
+def render_feature_importance_bar_chart(feature_importance_json_path: Path) -> None:
+    """Hiển thị Figure Feature Importance lên UI - việc dựng Figure nằm ở `build_feature_importance_figure()`."""
+    fig = build_feature_importance_figure(feature_importance_json_path)
+    if fig is None:
+        st.info("File `feature_importance.json` rỗng.")
+        return
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -2818,6 +2835,101 @@ def render_managerial_insights_section(
     )
 
 
+def _escape_html_text(value) -> str:
+    """Escape tối thiểu (&, <, >) cho text chèn thô vào template HTML của báo cáo xuất - tránh lỗi
+    hiển thị nếu tên model/giá trị vô tình chứa ký tự đặc biệt của HTML."""
+    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def build_evaluation_report_html(evaluation_metrics: dict, deployment_config: dict, runtime_info: dict) -> bytes:
+    """
+    Xuất báo cáo đánh giá mô hình (bảng so sánh + Confusion Matrix + Feature Importance) ra 1 file HTML
+    tự chứa (mở trực tiếp bằng trình duyệt, không cần chạy lại Streamlit) - kèm SIÊU DỮ LIỆU của lần
+    train sinh ra kết quả này (phương pháp cân bằng dữ liệu CTGAN/SMOTE/NONE, thời điểm train). Cần
+    thiết vì `models/latest/` bị GHI ĐÈ mỗi lần train mới - không có cách nào khác để đối chiếu lại kết
+    quả của 1 lần chạy CŨ (ví dụ so sánh "có CTGAN" và "none/không cân bằng") sau khi đã train đè lên.
+    """
+    best_model_name = deployment_config.get("model_name", "N/A")
+    best_model_metrics = evaluation_metrics.get(best_model_name, {}) if isinstance(evaluation_metrics, dict) else {}
+    balancing_method_used = best_model_metrics.get("balancing_method", "unknown") if isinstance(best_model_metrics, dict) else "unknown"
+    generated_at = deployment_config.get("generated_at", "unknown")
+
+    metrics_rows = []
+    for model_name, metric_values in evaluation_metrics.items():
+        if not isinstance(metric_values, dict):
+            continue
+        metrics_rows.append(
+            {
+                "Model": metric_values.get("model_name", model_name),
+                "Balancing method": metric_values.get("balancing_method", "unknown"),
+                "Accuracy": metric_values.get("accuracy"),
+                "Precision (Macro)": metric_values.get("precision_macro"),
+                "Recall (Macro)": metric_values.get("recall_macro"),
+                "F1 (Macro)": metric_values.get("f1_macro"),
+            }
+        )
+    metrics_df = pd.DataFrame(metrics_rows)
+    if not metrics_df.empty:
+        metrics_df = metrics_df.sort_values(by="F1 (Macro)", ascending=False).reset_index(drop=True)
+        metrics_df.insert(0, "Xếp hạng", range(1, len(metrics_df) + 1))
+        metrics_table_html = metrics_df.to_html(
+            index=False,
+            float_format=lambda value: f"{value:.4f}" if pd.notna(value) else "-",
+        )
+    else:
+        metrics_table_html = "<p>Không có dữ liệu metrics.</p>"
+
+    latest_dir = Path(runtime_info.get("latest_dir", str(LATEST_MODELS_DIR)))
+    confusion_json_path = latest_dir / "confusion_matrix.json"
+    importance_json_path = latest_dir / "feature_importance.json"
+    confusion_fig = build_confusion_matrix_figure(confusion_json_path) if confusion_json_path.exists() else None
+    importance_fig = build_feature_importance_figure(importance_json_path) if importance_json_path.exists() else None
+
+    confusion_html = (
+        confusion_fig.to_html(full_html=False, include_plotlyjs="cdn")
+        if confusion_fig is not None
+        else "<p>Chưa có dữ liệu Confusion Matrix (`confusion_matrix.json`).</p>"
+    )
+    importance_html = (
+        importance_fig.to_html(full_html=False, include_plotlyjs=False)
+        if importance_fig is not None
+        else "<p>Chưa có dữ liệu Feature Importance (`feature_importance.json`).</p>"
+    )
+
+    report_html = f"""<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>Bao cao danh gia mo hinh - {_escape_html_text(best_model_name)}</title>
+<style>
+body {{ font-family: 'Segoe UI', Arial, sans-serif; background:#0b1220; color:#e5eefc; padding:24px; }}
+table {{ border-collapse: collapse; width:100%; margin-bottom: 24px; }}
+th, td {{ border:1px solid #334155; padding:6px 10px; text-align:center; }}
+th {{ background:#1e293b; }}
+h1, h2 {{ color:#f8fafc; }}
+.meta {{ background:#111827; border:1px solid #334155; border-radius:8px; padding:16px; margin-bottom:24px; }}
+</style>
+</head>
+<body>
+<h1>Báo cáo đánh giá mô hình - Dự báo ngập lụt Thừa Thiên Huế</h1>
+<div class="meta">
+<p><b>Model tốt nhất:</b> {_escape_html_text(best_model_name)}</p>
+<p><b>Phương pháp cân bằng dữ liệu (lần train này):</b> {_escape_html_text(str(balancing_method_used).upper())}</p>
+<p><b>Thời điểm huấn luyện (generated_at):</b> {_escape_html_text(generated_at)}</p>
+<p><b>Ngày giờ xuất báo cáo:</b> {datetime.now().isoformat(timespec="seconds")}</p>
+</div>
+<h2>Bảng so sánh chỉ số các mô hình</h2>
+{metrics_table_html}
+<h2>Confusion Matrix</h2>
+{confusion_html}
+<h2>Feature Importance</h2>
+{importance_html}
+</body>
+</html>
+"""
+    return report_html.encode("utf-8")
+
+
 def render_evaluation_tab() -> None:
     """
     Nội dung Tab 3 - Đánh giá mô hình, bước THỨ BA của vòng đời Data Science.
@@ -2835,6 +2947,26 @@ def render_evaluation_tab() -> None:
             "Hãy khởi chạy huấn luyện ở Tab 2 (Tiền xử lý & huấn luyện) trước."
         )
         return
+
+    best_model_name_for_export = deployment_config.get("model_name", "model")
+    best_model_metrics_for_export = evaluation_metrics.get(best_model_name_for_export, {}) if isinstance(evaluation_metrics, dict) else {}
+    balancing_method_for_export = (
+        best_model_metrics_for_export.get("balancing_method", "unknown")
+        if isinstance(best_model_metrics_for_export, dict)
+        else "unknown"
+    )
+    generated_at_slug = str(deployment_config.get("generated_at", "unknown")).replace(":", "-").replace(" ", "_")
+    st.download_button(
+        "📥 Xuất báo cáo đánh giá (bảng + biểu đồ, kèm phương pháp cân bằng & thời điểm train)",
+        data=build_evaluation_report_html(evaluation_metrics, deployment_config, runtime_info),
+        file_name=f"bao_cao_danh_gia_{balancing_method_for_export}_{generated_at_slug}.html",
+        mime="text/html",
+        help=(
+            f"Phương pháp cân bằng dữ liệu của lần train hiện tại: {str(balancing_method_for_export).upper()} - "
+            f"train lúc: {deployment_config.get('generated_at', 'không rõ')}. Lưu file này lại TRƯỚC KHI train "
+            "lần khác để so sánh (models/latest/ bị ghi đè mỗi lần train mới)."
+        ),
+    )
 
     with st.expander("So sánh chỉ số mô hình (F1-Score / Precision / Recall)", expanded=True):
         render_model_metrics(evaluation_metrics, deployment_config, runtime_info)
