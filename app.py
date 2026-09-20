@@ -2065,39 +2065,49 @@ def render_ablation_study_section() -> None:
         }
         for r in results
     ]
+    # KHÔNG dùng `gradient_column` (tô sáng giá trị cao nhất) như bảng leaderboard/Time Series CV -
+    # phản hồi thật đã nhận được: tô sáng F1-Macro cao nhất khiến người xem hiểu lầm "không cân bằng
+    # dữ liệu là cấu hình tốt nhất", trong khi F1-Macro cao hơn ở đây thực ra đến từ việc HY SINH
+    # Recall lớp nguy hiểm (xem ghi chú bên dưới bảng) - không nên gắn nhãn trực quan "tốt/xấu" theo
+    # đúng 1 con số F1-Macro như các bảng so sánh model khác.
     summary_df = pd.DataFrame(summary_rows)
     render_styled_table(
         build_contrast_styler(
             summary_df,
             numeric_formats={"F1-Macro": "{:.4f}", "Δ so với Full": "{:+.4f}"},
-            gradient_column="F1-Macro",
         ),
         height=min(120 + 38 * len(summary_df), 320),
     )
 
     if st.checkbox("Xem chi tiết Precision/Recall từng lớp mỗi cấu hình", key="show_ablation_per_class"):
-        detail_rows = []
-        for r in results:
-            for class_code, class_name in CLASS_LABEL_VI.items():
-                class_metrics = r["per_class_report"].get(class_code)
-                if not class_metrics:
-                    continue
-                detail_rows.append(
-                    {
-                        "Cấu hình": r["arm_name"],
-                        "Lớp": f"{class_code} - {class_name}",
-                        "Precision": class_metrics["precision"],
-                        "Recall": class_metrics["recall"],
-                        "F1-score": class_metrics["f1-score"],
-                    }
+        # TÁCH RIÊNG 1 bảng nhỏ cho MỖI LỚP (thay vì 1 bảng dài gộp cả cấu hình lẫn lớp) - bảng gộp
+        # trước đây khi người dùng bấm sắp xếp theo 1 cột (vd Recall) sẽ trộn lẫn dòng của các LỚP
+        # KHÁC NHAU lại với nhau, không còn so sánh được "cùng 1 lớp, 4 cấu hình" nữa - đây chính là
+        # phản hồi thật đã nhận được ("chưa hiểu cách đọc"). Mỗi bảng nhỏ dưới đây CHỈ có 4 dòng (4 cấu
+        # hình) của ĐÚNG 1 lớp, nên dù có bị sắp xếp lại cũng không gây hiểu lầm giữa các lớp.
+        class_tabs = st.tabs([f"{code} - {name}" for code, name in CLASS_LABEL_VI.items()])
+        for (class_code, class_name), tab in zip(CLASS_LABEL_VI.items(), class_tabs):
+            with tab:
+                class_rows = []
+                for r in results:
+                    class_metrics = r["per_class_report"].get(class_code)
+                    if not class_metrics:
+                        continue
+                    class_rows.append(
+                        {
+                            "Cấu hình": r["arm_name"],
+                            "Precision": class_metrics["precision"],
+                            "Recall": class_metrics["recall"],
+                            "F1-score": class_metrics["f1-score"],
+                        }
+                    )
+                class_df = pd.DataFrame(class_rows)
+                st.dataframe(
+                    class_df.style.format({"Precision": "{:.2f}", "Recall": "{:.2f}", "F1-score": "{:.2f}"}),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(80 + 35 * len(class_df), 260),
                 )
-        detail_df = pd.DataFrame(detail_rows)
-        st.dataframe(
-            detail_df.style.format({"Precision": "{:.2f}", "Recall": "{:.2f}", "F1-score": "{:.2f}"}),
-            use_container_width=True,
-            hide_index=True,
-            height=min(80 + 35 * len(detail_df), 480),
-        )
 
     render_chart_discussion(
         "Lưu ý khi đọc bảng trên: cấu hình 'Full' dùng SMOTE (đổi Precision lấy Recall cho lớp Ngập "
