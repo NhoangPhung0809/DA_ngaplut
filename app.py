@@ -76,6 +76,7 @@ CTGAN_DISTRIBUTION_PATH = BASE_DIR / "data" / "ctgan_class_distribution.json"
 HYPERPARAMETER_TUNING_RESULTS_PATH = BASE_DIR / "data" / "hyperparameter_tuning_results.json"
 TIME_SERIES_CV_RESULTS_PATH = BASE_DIR / "data" / "time_series_cv_results.json"
 ABLATION_STUDY_RESULTS_PATH = BASE_DIR / "data" / "ablation_study_results.json"
+CALIBRATION_STUDY_RESULTS_PATH = BASE_DIR / "data" / "calibration_study_results.json"
 CACHE_DIR = BASE_DIR / "cache"
 TRAINING_WORKER_PATH = BASE_DIR / "training_worker.py"
 TRAINING_STATUS_PATH = CACHE_DIR / "training_status.json"
@@ -2119,6 +2120,126 @@ def render_ablation_study_section() -> None:
     )
 
 
+@st.cache_data(show_spinner=False)
+def _load_calibration_study_results_cached(results_file_mtime: float) -> dict:
+    """Đọc `data/calibration_study_results.json` - xem `_load_hyperparameter_tuning_results_cached()`
+    để biết lý do dùng mtime làm cache key (tự làm mới khi file đổi)."""
+    with CALIBRATION_STUDY_RESULTS_PATH.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def load_calibration_study_results() -> dict | None:
+    if not CALIBRATION_STUDY_RESULTS_PATH.exists():
+        return None
+    return _load_calibration_study_results_cached(CALIBRATION_STUDY_RESULTS_PATH.stat().st_mtime)
+
+
+def build_reliability_diagram_figure(per_class_results: list[dict]) -> "go.Figure":
+    """
+    Vẽ đường tin cậy (reliability diagram): trục X = xác suất model dự đoán (trung bình mỗi bin), trục
+    Y = tần suất THẬT xảy ra trong nhóm đó - đường chéo nét đứt là "hiệu chỉnh hoàn hảo" (model nói 70%
+    thì đúng 70% lần xảy ra thật). Đường nào lệch xa đường chéo là lớp đó bị model quá tự tin (đường
+    dưới đường chéo) hoặc quá thiếu tự tin (đường trên đường chéo) ở vùng xác suất đó.
+    """
+    class_colors = {"An toàn": "#4C78A8", "Ngập nhẹ": "#F58518", "Ngập nặng": "#E45756"}
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=[0, 1],
+            y=[0, 1],
+            mode="lines",
+            name="Hiệu chỉnh hoàn hảo",
+            line=dict(color="#94a3b8", dash="dash", width=1.5),
+            hoverinfo="skip",
+        )
+    )
+    for class_result in per_class_results:
+        curve = class_result["reliability_curve"]
+        class_name = class_result["class_name"]
+        fig.add_trace(
+            go.Scatter(
+                x=curve["mean_predicted_value"],
+                y=curve["fraction_of_positives"],
+                mode="lines+markers",
+                name=f"{class_result['class_label']} - {class_name}",
+                line=dict(color=class_colors.get(class_name, "#94a3b8"), width=2.5),
+                marker=dict(size=7),
+                hovertemplate="Xác suất dự đoán: %{x:.2f}<br>Tần suất thật: %{y:.2f}<extra>" + class_name + "</extra>",
+            )
+        )
+
+    apply_dark_plotly_theme(fig)
+    fig.update_layout(
+        xaxis=dict(title="Xác suất model dự đoán (trung bình mỗi bin)", range=[0, 1]),
+        yaxis=dict(title="Tần suất thật xảy ra", range=[0, 1]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+    )
+    return fig
+
+
+def render_calibration_study_section() -> None:
+    """
+    Khối "Calibration Study" - kiểm tra xác suất model dự đoán ra có ĐÁNG TIN không: khi model nói "70%
+    khả năng Ngập nặng", THỰC TẾ có đúng khoảng 70% các lần đó xảy ra ngập thật không - khác với F1/
+    Accuracy (chỉ quan tâm lớp dự đoán CUỐI CÙNG, không quan tâm độ tin cậy đi kèm). Xem
+    `calibration_study.py` (script độc lập, chạy bằng `python3 calibration_study.py`, dùng CÙNG cấu
+    hình "Full" với `ablation_study.py` để 2 nghiên cứu nhất quán, có thể trích dẫn chung 1 bộ kết quả).
+    """
+    st.caption(
+        "Xác suất model đưa ra có phản ánh đúng khả năng xảy ra thật không - quan trọng vì app hiển thị "
+        "% nguy cơ ngập cho người dùng, không chỉ nhãn lớp cuối cùng."
+    )
+
+    payload = load_calibration_study_results()
+    if payload is None:
+        st.info(
+            "Chưa có kết quả Calibration Study - chạy `python3 calibration_study.py` ở terminal, kết "
+            "quả sẽ tự hiện ở đây sau khi chạy xong."
+        )
+        return
+
+    per_class_results = payload.get("results", [])
+    if not per_class_results:
+        st.info("File kết quả tồn tại nhưng chưa có lớp nào được đánh giá.")
+        return
+
+    st.caption(f"Kết quả gần nhất: {payload.get('generated_at', 'không rõ thời điểm')}.")
+
+    st.plotly_chart(build_reliability_diagram_figure(per_class_results), use_container_width=True)
+
+    metric_df = pd.DataFrame(
+        [
+            {
+                "Lớp": f"{r['class_label']} - {r['class_name']}",
+                "Brier Score (càng thấp càng tốt)": r["brier_score"],
+                "ECE (càng thấp càng tốt)": r["ece"],
+                "Số mẫu dương / tổng": f"{r['n_positive']:,} / {r['n_total']:,}",
+            }
+            for r in per_class_results
+        ]
+    )
+    render_styled_table(
+        build_contrast_styler(
+            metric_df,
+            numeric_formats={
+                "Brier Score (càng thấp càng tốt)": "{:.4f}",
+                "ECE (càng thấp càng tốt)": "{:.4f}",
+            },
+        ),
+        height=min(120 + 38 * len(metric_df), 260),
+    )
+
+    render_chart_discussion(
+        "Đường nào NẰM DƯỚI đường chéo nghĩa là model 'quá tự tin' ở vùng xác suất đó (nói cao hơn khả "
+        "năng thật xảy ra) - đáng lưu ý nhất với lớp Ngập nặng vì liên quan trực tiếp tới mức độ tin "
+        "cậy của cảnh báo hiển thị cho người dùng cuối. Brier Score và ECE càng gần 0 càng đáng tin. "
+        "Nếu phát hiện lệch nhiều, có thể hiệu chỉnh lại bằng `sklearn.calibration.CalibratedClassifierCV` "
+        "(Platt scaling hoặc isotonic regression) fit trên tập validation riêng, không đụng vào tập "
+        "train/test đã dùng đánh giá F1-Macro ở trên."
+    )
+
+
 def render_training_controls_panel() -> None:
     """
     Cụm điều khiển MLOps: chọn mô hình, chạy huấn luyện/tinh chỉnh NỀN (background) và xem log.
@@ -2279,6 +2400,9 @@ def render_preprocessing_training_tab() -> None:
 
     with st.expander("Ablation Study (đóng góp từng thành phần)", expanded=False):
         render_ablation_study_section()
+
+    with st.expander("Calibration Study (độ tin cậy xác suất)", expanded=False):
+        render_calibration_study_section()
 
 
 # ==================================================================================================
