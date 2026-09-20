@@ -27,6 +27,10 @@ from sklearn.ensemble import AdaBoostClassifier
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LogisticRegression
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neural_network import MLPClassifier
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -2141,6 +2145,55 @@ def build_model_registry() -> dict:
                 random_state=42,
                 eval_metric="mlogloss",
                 n_jobs=-1,
+            ),
+        },
+        # 4 MODEL THÊM MỚI - GÓP Ý CỦA GVHD: "thử các mô hình bên môi trường" - đây là 4 thuật toán
+        # xuất hiện phổ biến trong các paper flood prediction/susceptibility đã khảo sát ở phần SOTA
+        # (Logistic Regression và Naive Bayes trong Widyastuti et al. 2026; ANN/MLP trong Pham Quang &
+        # Tallam 2022 - Việt Nam miền Trung; Decision Tree đơn - so sánh baseline với Random Forest đã
+        # có sẵn, cùng họ AD/LM/REP/J48/NB Tree trong Luu et al. 2021 - Quảng Bình) mà đồ án CHƯA có.
+        "Logistic Regression": {
+            "kind": "tabular_classifier",
+            "category": "Machine Learning",
+            "deployment_compatible": True,
+            # C=0.5 (regularization mạnh hơn mặc định 1.0, cùng logic với SVC ở trên) + max_iter tăng
+            # lên 1000 (mặc định 100 thường KHÔNG đủ để hội tụ với 8 đặc trưng đã chuẩn hoá).
+            "model": LogisticRegression(C=0.5, max_iter=1000, random_state=42),
+        },
+        "Naive Bayes": {
+            "kind": "tabular_classifier",
+            "category": "Machine Learning",
+            "deployment_compatible": True,
+            # Không có tham số cần regularize - đây CHỦ Ý là baseline đơn giản (giả định các đặc trưng
+            # độc lập có điều kiện) để đối chiếu xem các model phức tạp hơn có thực sự cần thiết không.
+            "model": GaussianNB(),
+        },
+        "Decision Tree": {
+            "kind": "tabular_classifier",
+            "category": "Machine Learning",
+            "deployment_compatible": True,
+            # SIẾT CHẶT HƠN Random Forest (max_depth 6 thay vì 12, min_samples_leaf 10 thay vì 5) - 1
+            # cây ĐƠN LẺ (không phải ensemble) overfit nhanh hơn nhiều, cần ràng buộc mạnh tay hơn.
+            "model": DecisionTreeClassifier(
+                max_depth=6,
+                min_samples_leaf=10,
+                min_samples_split=20,
+                random_state=42,
+            ),
+        },
+        "MLP (ANN)": {
+            "kind": "tabular_classifier",
+            "category": "Machine Learning",
+            "deployment_compatible": True,
+            # 2 lớp ẩn nhỏ (32/16 neuron) + alpha=0.01 (L2, cao hơn mặc định 0.0001) + early_stopping -
+            # mạng nông (KHÔNG phải Deep Learning/LSTM đã có ở nhóm "Dạng chuỗi") dùng làm đại diện cho
+            # baseline "ANN" xuất hiện phổ biến trong các paper dự báo ngập đã khảo sát.
+            "model": MLPClassifier(
+                hidden_layer_sizes=(32, 16),
+                alpha=0.01,
+                max_iter=500,
+                early_stopping=True,
+                random_state=42,
             ),
         },
     }
