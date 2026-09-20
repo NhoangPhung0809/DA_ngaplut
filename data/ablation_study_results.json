@@ -1,0 +1,216 @@
+{
+  "generated_at": "2026-09-20T08:24:51",
+  "model_used": "RandomForestClassifier (tham số cố định, không tune riêng từng arm)",
+  "fixed_params": {
+    "n_estimators": 300,
+    "max_depth": 12,
+    "min_samples_leaf": 5,
+    "min_samples_split": 10,
+    "random_state": 42,
+    "n_jobs": -1
+  },
+  "note": "T->T+1 shift KHÔNG ablate ở đây - đã có bằng chứng thật từ trước (LSTM F1 0.9263 -> 0.4876 khi sửa rò rỉ).",
+  "results": [
+    {
+      "arm_name": "1. Full (đủ đặc trưng + đủ luật nhãn + SMOTE)",
+      "n_features": 8,
+      "features_used": [
+        "Nhiệt_độ_C",
+        "Độ_ẩm_%",
+        "Lượng_mưa_mm",
+        "Độ_ẩm_đất",
+        "Chiều_cao_triều_m",
+        "Lượng_mưa_mm_lag1",
+        "Lượng_mưa_mm_lag2",
+        "Lượng_mưa_tích_luỹ_3_ngày"
+      ],
+      "balancing_method": "smote",
+      "train_rows": 36951,
+      "test_rows": 3715,
+      "f1_macro": 0.5936566929034145,
+      "per_class_report": {
+        "0": {
+          "precision": 0.9329738058551618,
+          "recall": 0.8196277495769881,
+          "f1-score": 0.8726355611601513,
+          "support": 2955.0
+        },
+        "1": {
+          "precision": 0.30193905817174516,
+          "recall": 0.5278450363196125,
+          "f1-score": 0.3841409691629956,
+          "support": 413.0
+        },
+        "2": {
+          "precision": 0.491183879093199,
+          "recall": 0.5619596541786743,
+          "f1-score": 0.5241935483870968,
+          "support": 347.0
+        },
+        "accuracy": 0.7631224764468372,
+        "macro avg": {
+          "precision": 0.5753655810400353,
+          "recall": 0.6364774800250917,
+          "f1-score": 0.5936566929034145,
+          "support": 3715.0
+        },
+        "weighted avg": {
+          "precision": 0.82155564828325,
+          "recall": 0.7631224764468372,
+          "f1-score": 0.7857828976535361,
+          "support": 3715.0
+        }
+      }
+    },
+    {
+      "arm_name": "2. (-) Lag/Rolling mưa",
+      "n_features": 5,
+      "features_used": [
+        "Nhiệt_độ_C",
+        "Độ_ẩm_%",
+        "Lượng_mưa_mm",
+        "Độ_ẩm_đất",
+        "Chiều_cao_triều_m"
+      ],
+      "balancing_method": "smote",
+      "train_rows": 36951,
+      "test_rows": 3715,
+      "f1_macro": 0.5474258262227277,
+      "per_class_report": {
+        "0": {
+          "precision": 0.9386252045826514,
+          "recall": 0.7763113367174281,
+          "f1-score": 0.8497869975921467,
+          "support": 2955.0
+        },
+        "1": {
+          "precision": 0.2375,
+          "recall": 0.4600484261501211,
+          "f1-score": 0.31327287716405605,
+          "support": 413.0
+        },
+        "2": {
+          "precision": 0.416135881104034,
+          "recall": 0.5648414985590778,
+          "f1-score": 0.4792176039119804,
+          "support": 347.0
+        },
+        "accuracy": 0.721399730820996,
+        "macro avg": {
+          "precision": 0.5307536952288952,
+          "recall": 0.6004004204755424,
+          "f1-score": 0.5474258262227277,
+          "support": 3715.0
+        },
+        "weighted avg": {
+          "precision": 0.8118772894441009,
+          "recall": 0.721399730820996,
+          "f1-score": 0.755529147970661,
+          "support": 3715.0
+        }
+      }
+    },
+    {
+      "arm_name": "3. (-) Điều kiện rain_3day trong luật nhãn",
+      "n_features": 8,
+      "features_used": [
+        "Nhiệt_độ_C",
+        "Độ_ẩm_%",
+        "Lượng_mưa_mm",
+        "Độ_ẩm_đất",
+        "Chiều_cao_triều_m",
+        "Lượng_mưa_mm_lag1",
+        "Lượng_mưa_mm_lag2",
+        "Lượng_mưa_tích_luỹ_3_ngày"
+      ],
+      "balancing_method": "smote",
+      "train_rows": 38550,
+      "test_rows": 3715,
+      "f1_macro": 0.5033782212775968,
+      "per_class_report": {
+        "0": {
+          "precision": 0.9371769383697813,
+          "recall": 0.7660058498537536,
+          "f1-score": 0.8429899856938483,
+          "support": 3077.0
+        },
+        "1": {
+          "precision": 0.18687589158345222,
+          "recall": 0.37971014492753624,
+          "f1-score": 0.25047801147227533,
+          "support": 345.0
+        },
+        "2": {
+          "precision": 0.3306613226452906,
+          "recall": 0.5631399317406144,
+          "f1-score": 0.4166666666666667,
+          "support": 293.0
+        },
+        "accuracy": 0.7141318977119785,
+        "macro avg": {
+          "precision": 0.48490471753284137,
+          "recall": 0.5696186421739681,
+          "f1-score": 0.5033782212775968,
+          "support": 3715.0
+        },
+        "weighted avg": {
+          "precision": 0.819663361909873,
+          "recall": 0.7141318977119785,
+          "f1-score": 0.7543414356046406,
+          "support": 3715.0
+        }
+      }
+    },
+    {
+      "arm_name": "4. (-) Cân bằng dữ liệu (giữ nguyên phân phối gốc)",
+      "n_features": 8,
+      "features_used": [
+        "Nhiệt_độ_C",
+        "Độ_ẩm_%",
+        "Lượng_mưa_mm",
+        "Độ_ẩm_đất",
+        "Chiều_cao_triều_m",
+        "Lượng_mưa_mm_lag1",
+        "Lượng_mưa_mm_lag2",
+        "Lượng_mưa_tích_luỹ_3_ngày"
+      ],
+      "balancing_method": "none",
+      "train_rows": 14865,
+      "test_rows": 3715,
+      "f1_macro": 0.6371118474402403,
+      "per_class_report": {
+        "0": {
+          "precision": 0.8764213046080191,
+          "recall": 0.9912013536379018,
+          "f1-score": 0.9302842623471494,
+          "support": 2955.0
+        },
+        "1": {
+          "precision": 0.6645962732919255,
+          "recall": 0.25907990314769974,
+          "f1-score": 0.37282229965156793,
+          "support": 413.0
+        },
+        "2": {
+          "precision": 0.8018867924528302,
+          "recall": 0.4899135446685879,
+          "f1-score": 0.6082289803220036,
+          "support": 347.0
+        },
+        "accuracy": 0.8629878869448183,
+        "macro avg": {
+          "precision": 0.780968123450925,
+          "recall": 0.5800649338180631,
+          "f1-score": 0.6371118474402403,
+          "support": 3715.0
+        },
+        "weighted avg": {
+          "precision": 0.8459106145268893,
+          "recall": 0.8629878869448183,
+          "f1-score": 0.838229087796409,
+          "support": 3715.0
+        }
+      }
+    }
+  ]
+}
