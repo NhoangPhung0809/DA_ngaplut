@@ -75,6 +75,7 @@ CTGAN_AFTER_PATH = BASE_DIR / "data" / "data_after_ctgan.csv"
 CTGAN_DISTRIBUTION_PATH = BASE_DIR / "data" / "ctgan_class_distribution.json"
 HYPERPARAMETER_TUNING_RESULTS_PATH = BASE_DIR / "data" / "hyperparameter_tuning_results.json"
 TIME_SERIES_CV_RESULTS_PATH = BASE_DIR / "data" / "time_series_cv_results.json"
+ABLATION_STUDY_RESULTS_PATH = BASE_DIR / "data" / "ablation_study_results.json"
 CACHE_DIR = BASE_DIR / "cache"
 TRAINING_WORKER_PATH = BASE_DIR / "training_worker.py"
 TRAINING_STATUS_PATH = CACHE_DIR / "training_status.json"
@@ -2010,6 +2011,104 @@ def render_time_series_cv_section() -> None:
     )
 
 
+@st.cache_data(show_spinner=False)
+def _load_ablation_study_results_cached(results_file_mtime: float) -> dict:
+    """Đọc `data/ablation_study_results.json` - xem `_load_hyperparameter_tuning_results_cached()` để
+    biết lý do dùng mtime làm cache key (tự làm mới khi file đổi)."""
+    with ABLATION_STUDY_RESULTS_PATH.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def load_ablation_study_results() -> dict | None:
+    if not ABLATION_STUDY_RESULTS_PATH.exists():
+        return None
+    return _load_ablation_study_results_cached(ABLATION_STUDY_RESULTS_PATH.stat().st_mtime)
+
+
+def render_ablation_study_section() -> None:
+    """
+    Khối "Ablation Study" - GÓP Ý CỦA GVHD: đo tác động THẬT của từng thành phần trong pipeline (đặc
+    trưng lag/rolling mưa, điều kiện `rain_3day` trong luật nhãn, cân bằng dữ liệu) bằng cách bỏ CHÍNH
+    XÁC 1 thành phần ra khỏi cấu hình "Full" mỗi lần rồi so sánh F1-Macro trên CÙNG 1 tập test - xem
+    `ablation_study.py` (script độc lập, chạy bằng `python3 ablation_study.py`, không tự động chạy kèm
+    "Bắt đầu Huấn luyện Nền" như Time Series CV vì dùng model/scaler RIÊNG - Random Forest tham số cố
+    định, không phải model triển khai thật - để cô lập đúng 1 biến đang test).
+    """
+    st.caption(
+        "So sánh F1-Macro khi bỏ CHÍNH XÁC 1 thành phần khỏi cấu hình đầy đủ (leave-one-out) - trả lời "
+        "câu hỏi mỗi thành phần đóng góp bao nhiêu, có thật sự cần không."
+    )
+
+    payload = load_ablation_study_results()
+    if payload is None:
+        st.info(
+            "Chưa có kết quả Ablation Study - chạy `python3 ablation_study.py` ở terminal, kết quả sẽ "
+            "tự hiện ở đây sau khi chạy xong (mất vài phút, dùng SMOTE + Random Forest cố định tham số)."
+        )
+        return
+
+    results = payload.get("results", [])
+    if not results:
+        st.info("File kết quả tồn tại nhưng chưa có arm nào được đánh giá.")
+        return
+
+    st.caption(f"Kết quả gần nhất: {payload.get('generated_at', 'không rõ thời điểm')}.")
+
+    baseline_f1 = results[0]["f1_macro"]
+    summary_rows = [
+        {
+            "Cấu hình": r["arm_name"],
+            "Số đặc trưng": r["n_features"],
+            "Cân bằng dữ liệu": r["balancing_method"],
+            "F1-Macro": r["f1_macro"],
+            "Δ so với Full": r["f1_macro"] - baseline_f1,
+        }
+        for r in results
+    ]
+    summary_df = pd.DataFrame(summary_rows)
+    render_styled_table(
+        build_contrast_styler(
+            summary_df,
+            numeric_formats={"F1-Macro": "{:.4f}", "Δ so với Full": "{:+.4f}"},
+            gradient_column="F1-Macro",
+        ),
+        height=min(120 + 38 * len(summary_df), 320),
+    )
+
+    if st.checkbox("Xem chi tiết Precision/Recall từng lớp mỗi cấu hình", key="show_ablation_per_class"):
+        detail_rows = []
+        for r in results:
+            for class_code, class_name in CLASS_LABEL_VI.items():
+                class_metrics = r["per_class_report"].get(class_code)
+                if not class_metrics:
+                    continue
+                detail_rows.append(
+                    {
+                        "Cấu hình": r["arm_name"],
+                        "Lớp": f"{class_code} - {class_name}",
+                        "Precision": class_metrics["precision"],
+                        "Recall": class_metrics["recall"],
+                        "F1-score": class_metrics["f1-score"],
+                    }
+                )
+        detail_df = pd.DataFrame(detail_rows)
+        st.dataframe(
+            detail_df.style.format({"Precision": "{:.2f}", "Recall": "{:.2f}", "F1-score": "{:.2f}"}),
+            use_container_width=True,
+            hide_index=True,
+            height=min(80 + 35 * len(detail_df), 480),
+        )
+
+    render_chart_discussion(
+        "Lưu ý khi đọc bảng trên: cấu hình 'Full' dùng SMOTE (đổi Precision lấy Recall cho lớp Ngập "
+        "nặng/Ngập nhẹ - ưu tiên không bỏ sót ca ngập thật) nên F1-Macro có thể THẤP HƠN cấu hình không "
+        "cân bằng dữ liệu - đây KHÔNG phải bằng chứng cân bằng dữ liệu vô dụng, mà là đánh đổi có chủ "
+        "đích: Recall lớp nguy hiểm quan trọng hơn điểm F1-Macro tuyệt đối trong bài toán cảnh báo ngập. "
+        "Ngược lại, đặc trưng lag/rolling mưa và điều kiện `rain_3day` trong luật nhãn đều làm F1-Macro "
+        "GIẢM khi bỏ đi - chứng minh 2 thành phần này có đóng góp thật, không phải thêm cho có."
+    )
+
+
 def render_training_controls_panel() -> None:
     """
     Cụm điều khiển MLOps: chọn mô hình, chạy huấn luyện/tinh chỉnh NỀN (background) và xem log.
@@ -2167,6 +2266,9 @@ def render_preprocessing_training_tab() -> None:
 
     with st.expander("Kiểm định chéo theo chuỗi thời gian (Time Series CV)", expanded=False):
         render_time_series_cv_section()
+
+    with st.expander("Ablation Study (đóng góp từng thành phần)", expanded=False):
+        render_ablation_study_section()
 
 
 # ==================================================================================================

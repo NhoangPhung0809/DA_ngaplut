@@ -1,0 +1,618 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Sơ đồ Quy trình Dự báo Ngập lụt</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light dark;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+
+    --bg: #F5F8F9;
+    --surface: #FFFFFF;
+    --surface-2: #EAF1F3;
+    --ink: #16232B;
+    --ink-muted: #526673;
+    --border: #C7D6DA;
+    --accent: #0E7C86;
+    --accent-strong: #075E66;
+    --warn: #B8720B;
+    --shadow: 0 1px 2px rgba(22,35,43,0.06), 0 8px 24px rgba(22,35,43,0.06);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0A141A;
+      --surface: #101E26;
+      --surface-2: #16262F;
+      --ink: #E6EEF1;
+      --ink-muted: #9FB4BD;
+      --border: #24404A;
+      --accent: #3BC0CA;
+      --accent-strong: #63D2DA;
+      --warn: #E0A23B;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #0A141A;
+    --surface: #101E26;
+    --surface-2: #16262F;
+    --ink: #E6EEF1;
+    --ink-muted: #9FB4BD;
+    --border: #24404A;
+    --accent: #3BC0CA;
+    --accent-strong: #63D2DA;
+    --warn: #E0A23B;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  }
+
+  body {
+    padding-inline: 20px;
+    padding-block: 28px 48px;
+    display: flex;
+    justify-content: center;
+  }
+
+  .page {
+    width: 100%;
+    max-width: 1180px;
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+  }
+
+  header.hero {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .eyebrow {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent-strong);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 18px;
+    height: 2px;
+    background: var(--accent);
+    display: inline-block;
+  }
+
+  h1 {
+    font-family: 'Be Vietnam Pro', sans-serif;
+    font-weight: 800;
+    font-size: clamp(24px, 4vw, 36px);
+    line-height: 1.15;
+    margin: 0;
+    text-wrap: balance;
+    color: var(--ink);
+  }
+
+  .subtitle {
+    max-width: 68ch;
+    font-size: 15.5px;
+    line-height: 1.6;
+    color: var(--ink-muted);
+    margin: 0;
+  }
+
+  .meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin-top: 6px;
+  }
+
+  .meta-chip {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    color: var(--ink-muted);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 5px 12px;
+  }
+
+  button#theme-toggle {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 6px 14px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    transition: border-color 0.15s ease;
+  }
+  button#theme-toggle:hover { border-color: var(--accent); }
+  button#theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  section.legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    padding: 14px 18px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 12.5px;
+    color: var(--ink-muted);
+  }
+
+  .swatch { flex: 0 0 auto; }
+  .swatch.rect {
+    width: 20px; height: 13px;
+    border: 1.5px solid var(--ink-muted);
+    border-radius: 3px;
+  }
+  .swatch.pill {
+    width: 22px; height: 13px;
+    border: 1.5px solid var(--accent);
+    border-radius: 999px;
+  }
+  .swatch.cyl {
+    width: 18px; height: 14px;
+    border: 1.5px solid var(--accent);
+    border-radius: 4px / 6px;
+  }
+  .swatch.diamond {
+    width: 14px; height: 14px;
+    border: 1.5px solid var(--warn);
+    transform: rotate(45deg);
+  }
+  .swatch.dash {
+    width: 22px; height: 0;
+    border-top: 1.5px dashed var(--warn);
+  }
+
+  section.diagram-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    padding: 6px;
+  }
+
+  .diagram-scroll {
+    overflow-x: auto;
+    padding: 22px 18px;
+  }
+
+  #mermaid-target {
+    min-width: 880px;
+    display: flex;
+    justify-content: center;
+  }
+
+  #mermaid-target svg {
+    max-width: none;
+    height: auto;
+  }
+
+  .render-status {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    color: var(--ink-muted);
+    padding: 40px 18px;
+    text-align: center;
+  }
+  .render-status.error { color: #C0362C; }
+
+  section.stage-key {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 12px;
+  }
+
+  .stage-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    display: flex;
+    gap: 12px;
+    box-shadow: var(--shadow);
+  }
+
+  .stage-num {
+    font-family: 'IBM Plex Mono', monospace;
+    font-variant-numeric: tabular-nums;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--accent-strong);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: 30px;
+    height: 30px;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .stage-body h3 {
+    font-family: 'Be Vietnam Pro', sans-serif;
+    font-size: 14.5px;
+    font-weight: 600;
+    margin: 0 0 3px;
+    color: var(--ink);
+  }
+
+  .stage-body p {
+    font-size: 12.8px;
+    line-height: 1.5;
+    color: var(--ink-muted);
+    margin: 0;
+  }
+
+  footer {
+    font-size: 12.5px;
+    color: var(--ink-muted);
+    text-align: center;
+    padding-top: 6px;
+  }
+  footer a { color: var(--accent-strong); }
+
+  @media (max-width: 480px) {
+    body { padding-inline: 14px; }
+    section.legend { gap: 12px 16px; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="hero">
+    <div class="eyebrow">Đồ án tốt nghiệp · Hệ thống dự báo &amp; cảnh báo ngập lụt</div>
+    <h1>Sơ đồ Quy trình Dự báo Ngập lụt</h1>
+    <p class="subtitle">
+      Toàn bộ luồng xử lý từ thu thập dữ liệu khí tượng - thuỷ văn đến huấn luyện 17 mô hình và ứng dụng
+      cảnh báo thời gian thực cho 5 địa phương tại Thừa Thiên Huế, trích trực tiếp từ
+      <code style="font-family:'IBM Plex Mono',monospace; background:var(--surface-2); padding:1px 6px; border-radius:4px;">analyze_and_train.py</code>
+      và <code style="font-family:'IBM Plex Mono',monospace; background:var(--surface-2); padding:1px 6px; border-radius:4px;">app.py</code>.
+    </p>
+    <div class="meta-row">
+      <span class="meta-chip">7 giai đoạn</span>
+      <span class="meta-chip">17 mô hình</span>
+      <span class="meta-chip">F1-Macro làm thước đo chính</span>
+      <button id="theme-toggle" type="button" aria-label="Đổi giao diện sáng / tối">
+        <span id="theme-icon" aria-hidden="true">◐</span>
+        <span id="theme-label">Theo hệ thống</span>
+      </button>
+    </div>
+  </header>
+
+  <section class="legend" aria-label="Chú giải ký hiệu">
+    <div class="legend-item"><span class="swatch pill"></span>Hệ thống / API bên ngoài</div>
+    <div class="legend-item"><span class="swatch cyl"></span>Dữ liệu lưu trữ (file, artifact)</div>
+    <div class="legend-item"><span class="swatch rect"></span>Bước xử lý (hàm trong code)</div>
+    <div class="legend-item"><span class="swatch diamond"></span>Điểm rẽ nhánh / quyết định</div>
+    <div class="legend-item"><span class="swatch dash"></span>Luồng đối chứng / kiểm định song song</div>
+  </section>
+
+  <section class="diagram-panel">
+    <div class="diagram-scroll">
+      <div id="mermaid-target">
+        <div class="render-status" id="render-status">Đang dựng sơ đồ…</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="stage-key" aria-label="Diễn giải từng giai đoạn">
+    <div class="stage-card">
+      <div class="stage-num">01</div>
+      <div class="stage-body">
+        <h3>Thu thập dữ liệu</h3>
+        <p>Gọi Open-Meteo Archive API (khí tượng) và Marine API (triều cường) qua <code>fetch_data.py</code>, lưu thành CSV lịch sử theo giờ cho 5 địa phương.</p>
+      </div>
+    </div>
+    <div class="stage-card">
+      <div class="stage-num">02</div>
+      <div class="stage-body">
+        <h3>Tiền xử lý &amp; Feature Engineering</h3>
+        <p>Gộp dữ liệu theo ngày, tính đặc trưng lag/tích luỹ mưa 3 ngày, gán nhãn 3 lớp theo luật chuyên gia, điền khuyết bằng median chỉ tính trên tập train.</p>
+      </div>
+    </div>
+    <div class="stage-card">
+      <div class="stage-num">03</div>
+      <div class="stage-body">
+        <h3>Chia tập &amp; Chống rò rỉ dữ liệu</h3>
+        <p>Chia train/test theo mốc thời gian (không xáo trộn), dịch đặc trưng ngày T để dự báo nhãn T+1 - khắc phục lỗi rò rỉ dữ liệu đã phát hiện.</p>
+      </div>
+    </div>
+    <div class="stage-card">
+      <div class="stage-num">04</div>
+      <div class="stage-body">
+        <h3>Cân bằng dữ liệu &amp; Kiểm định chéo</h3>
+        <p>CTGAN (ưu tiên) hoặc SMOTE cân bằng 3 lớp thiểu số; chạy song song Time Series CV walk-forward để kiểm định độ ổn định qua nhiều giai đoạn.</p>
+      </div>
+    </div>
+    <div class="stage-card">
+      <div class="stage-num">05</div>
+      <div class="stage-body">
+        <h3>Huấn luyện &amp; Đánh giá 17 mô hình</h3>
+        <p>Nhóm dạng bảng (tinh chỉnh bằng GridSearchCV / Optuna), dạng chuỗi (LSTM/GRU/1D-CNN), Hybrid và thống kê - đánh giá bằng F1-Macro, ROC-AUC, Confusion Matrix.</p>
+      </div>
+    </div>
+    <div class="stage-card">
+      <div class="stage-num">06</div>
+      <div class="stage-body">
+        <h3>Chọn &amp; Triển khai mô hình</h3>
+        <p>Chọn đúng hạng #1 thật trên bảng xếp hạng (không ưu tiên ngầm cho model dạng bảng), xuất artifact triển khai vào <code>models/latest/</code>.</p>
+      </div>
+    </div>
+    <div class="stage-card">
+      <div class="stage-num">07</div>
+      <div class="stage-body">
+        <h3>Ứng dụng thực tế (Streamlit)</h3>
+        <p>Lấy thời tiết/triều thời gian thực, tính lại đặc trưng lag, suy luận bằng model đã triển khai, hiển thị ở tab Dự báo và tab Bản đồ tránh ngập.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    Sơ đồ dựng bằng Mermaid.js, phản ánh đúng luồng hàm thật trong mã nguồn tại thời điểm tạo file.
+  </footer>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  function buildDiagramSource(t) {
+    return [
+      "flowchart TD",
+      "classDef process fill:" + t.surface + ",stroke:" + t.border + ",color:" + t.ink + ",stroke-width:1px;",
+      "classDef store fill:" + t.surface2 + ",stroke:" + t.accent + ",color:" + t.ink + ",stroke-width:1.3px;",
+      "classDef decision fill:" + t.surface2 + ",stroke:" + t.warn + ",color:" + t.ink + ",stroke-width:1.3px;",
+      "classDef source fill:" + t.surface + ",stroke:" + t.accent + ",color:" + t.ink + ",stroke-width:1.3px;",
+      "classDef altpath fill:" + t.surface + ",stroke:" + t.warn + ",color:" + t.inkMuted + ",stroke-width:1px,stroke-dasharray:3 2;",
+
+      'subgraph S1["01 · Thu thập dữ liệu"]',
+      "direction TB",
+      'A1(["Open-Meteo Archive API"]):::source',
+      'A2(["Open-Meteo Marine API"]):::source',
+      'A3["fetch_data.py"]:::process',
+      'A4[("data/historical/*.csv<br/>5 địa phương · ~10 năm · theo giờ")]:::store',
+      "A1 --> A3",
+      "A2 --> A3",
+      "A3 --> A4",
+      "end",
+
+      'subgraph S2["02 · Tiền xử lý &amp; Feature Engineering"]',
+      "direction TB",
+      'B1["load_and_concatenate_csvs()"]:::process',
+      'B2["build_daily_feature_dataset()<br/>gộp theo ngày + lag1/lag2 +<br/>mưa tích luỹ 3 ngày"]:::process',
+      'B3["create_multiclass_flood_label()<br/>luật chuyên gia → 3 lớp:<br/>An toàn / Ngập nhẹ / Ngập nặng"]:::process',
+      'B4["preprocess_features()<br/>điền khuyết median (chỉ từ train) + scale"]:::process',
+      "B1 --> B2 --> B3 --> B4",
+      "end",
+
+      'subgraph S3["03 · Chia tập &amp; Chống rò rỉ dữ liệu"]',
+      "direction TB",
+      'C1["chronological_train_test_split()<br/>80/20 theo mốc thời gian, shuffle=False"]:::process',
+      'C2["build_daily_modeling_dataset()<br/>dữ liệu chuỗi cho LSTM / GRU / Hybrid"]:::process',
+      'C3["apply_time_lag_target_shift()<br/>đặc trưng ngày T → dự báo nhãn T+1"]:::process',
+      'C4["apply_time_lag_target_shift()<br/>áp dụng tương tự cho nhánh chuỗi"]:::process',
+      "C1 --> C3",
+      "C2 --> C4",
+      "end",
+
+      'subgraph S4["04 · Cân bằng dữ liệu &amp; Kiểm định chéo"]',
+      "direction TB",
+      'D1{"balance_training_data()"}:::decision',
+      'D2["CTGAN<br/>GAN sinh mẫu thật"]:::process',
+      'D3["SMOTE<br/>nội suy k-NN"]:::process',
+      'D4["none — đối chứng<br/>giữ nguyên phân phối gốc"]:::altpath',
+      'D5[("Tập train đã cân bằng")]:::store',
+      'D6["Time Series CV<br/>walk-forward, 3-4 fold"]:::altpath',
+      "D1 -->|auto / gan| D2",
+      "D1 -->|smote| D3",
+      "D1 -->|none| D4",
+      "D2 --> D5",
+      "D3 --> D5",
+      "D4 --> D5",
+      "end",
+
+      'subgraph S5["05 · Huấn luyện &amp; Đánh giá 17 mô hình"]',
+      "direction TB",
+      'E1["Dạng bảng · 9 mô hình<br/>RF · KNN · SVC · AdaBoost · XGBoost ·<br/>LightGBM · CatBoost · Linear · Polynomial"]:::process',
+      'E2["Dạng chuỗi<br/>LSTM · GRU · 1D-CNN"]:::process',
+      'E3["Hybrid<br/>LSTM + XGBoost"]:::process',
+      'E4["Thống kê<br/>ARIMA · SARIMA"]:::process',
+      'E5["train_and_evaluate_models()<br/>GridSearchCV (RF) / Optuna (XGBoost)"]:::process',
+      'E6[("F1-Macro · Accuracy ·<br/>Confusion Matrix · ROC-AUC")]:::store',
+      "E1 --> E5",
+      "E2 --> E5",
+      "E3 --> E5",
+      "E4 --> E5",
+      "E5 --> E6",
+      "end",
+
+      'subgraph S6["06 · Chọn &amp; Triển khai mô hình"]',
+      "direction TB",
+      'F1["select_best_model_overall()<br/>chọn đúng hạng #1 thật trên leaderboard"]:::process',
+      'F2["export_deployment_artifacts()"]:::process',
+      'F3[("models/latest/<br/>deployment_config.json")]:::store',
+      "F1 --> F2 --> F3",
+      "end",
+
+      'subgraph S7["07 · Ứng dụng thực tế (Streamlit)"]',
+      "direction TB",
+      'G1(["Open-Meteo forecast +<br/>Tomorrow.io mưa + triều thời gian thực"]):::source',
+      'G2["add_rain_lag_features_inference()"]:::process',
+      'G3["scaler.transform() → model.predict()"]:::process',
+      'G4["Tab · Dự báo 14 ngày tới"]:::process',
+      'G5["Tab · Bản đồ tránh ngập"]:::process',
+      "G1 --> G2 --> G3",
+      "G3 --> G4",
+      "G3 --> G5",
+      "end",
+
+      "A4 --> B1",
+      "B4 --> C1",
+      "B4 --> C2",
+      "C3 --> D1",
+      "C3 -.-> D6",
+      "C4 --> E2",
+      "C4 --> E3",
+      "C4 --> E4",
+      "D5 --> E1",
+      "D6 -.-> E6",
+      "E6 --> F1",
+      "F3 --> G3"
+    ].join("\n");
+  }
+
+  function readTokens() {
+    var cs = getComputedStyle(document.documentElement);
+    var g = function (name) { return cs.getPropertyValue(name).trim(); };
+    return {
+      bg: g("--bg"),
+      surface: g("--surface"),
+      surface2: g("--surface-2"),
+      ink: g("--ink"),
+      inkMuted: g("--ink-muted"),
+      border: g("--border"),
+      accent: g("--accent"),
+      accentStrong: g("--accent-strong"),
+      warn: g("--warn")
+    };
+  }
+
+  var renderSeq = 0;
+
+  async function renderDiagram() {
+    var mySeq = ++renderSeq;
+    var target = document.getElementById("mermaid-target");
+    var tokens = readTokens();
+
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: "base",
+      securityLevel: "strict",
+      themeVariables: {
+        background: tokens.bg,
+        primaryColor: tokens.surface,
+        primaryTextColor: tokens.ink,
+        primaryBorderColor: tokens.border,
+        lineColor: tokens.accent,
+        textColor: tokens.ink,
+        fontFamily: "'IBM Plex Sans', sans-serif",
+        fontSize: "14px",
+        clusterBkg: tokens.surface2,
+        clusterBorder: tokens.border,
+        titleColor: tokens.ink,
+        edgeLabelBackground: tokens.surface2
+      }
+    });
+
+    var source = buildDiagramSource(tokens);
+
+    try {
+      var result = await mermaid.render("flood-pipeline-svg-" + mySeq, source);
+      if (mySeq !== renderSeq) return;
+      target.innerHTML = result.svg;
+    } catch (err) {
+      if (mySeq !== renderSeq) return;
+      target.innerHTML =
+        '<div class="render-status error">Không dựng được sơ đồ: ' +
+        String((err && err.message) || err).replace(/</g, "&lt;") +
+        "</div>";
+    }
+  }
+
+  function effectiveThemeIsDark() {
+    var explicit = document.documentElement.getAttribute("data-theme");
+    if (explicit === "dark") return true;
+    if (explicit === "light") return false;
+    return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  }
+
+  function updateToggleLabel() {
+    var explicit = document.documentElement.getAttribute("data-theme");
+    var icon = document.getElementById("theme-icon");
+    var label = document.getElementById("theme-label");
+    if (explicit === "dark") { icon.textContent = "●"; label.textContent = "Tối"; }
+    else if (explicit === "light") { icon.textContent = "○"; label.textContent = "Sáng"; }
+    else { icon.textContent = "◐"; label.textContent = "Theo hệ thống"; }
+  }
+
+  function applyStoredTheme() {
+    var saved = null;
+    try { saved = localStorage.getItem("flood-pipeline-theme"); } catch (e) {}
+    if (saved === "dark" || saved === "light") {
+      document.documentElement.setAttribute("data-theme", saved);
+    }
+    updateToggleLabel();
+  }
+
+  document.getElementById("theme-toggle").addEventListener("click", function () {
+    var current = document.documentElement.getAttribute("data-theme");
+    var next;
+    if (!current) next = effectiveThemeIsDark() ? "light" : "dark";
+    else if (current === "dark") next = "light";
+    else next = null;
+
+    if (next) document.documentElement.setAttribute("data-theme", next);
+    else document.documentElement.removeAttribute("data-theme");
+
+    try {
+      if (next) localStorage.setItem("flood-pipeline-theme", next);
+      else localStorage.removeItem("flood-pipeline-theme");
+    } catch (e) {}
+
+    updateToggleLabel();
+    renderDiagram();
+  });
+
+  if (window.matchMedia) {
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function () {
+      if (!document.documentElement.getAttribute("data-theme")) renderDiagram();
+    });
+  }
+
+  applyStoredTheme();
+  renderDiagram();
+})();
+</script>
+</body>
+</html>
