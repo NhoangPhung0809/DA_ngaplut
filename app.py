@@ -664,6 +664,10 @@ def get_all_model_names() -> list[str]:
         "SVC",
         "AdaBoost",
         "XGBoost",
+        "Logistic Regression",
+        "Naive Bayes",
+        "Decision Tree",
+        "MLP (ANN)",
         "LightGBM",
         "CatBoost",
         "ARIMA",
@@ -673,6 +677,7 @@ def get_all_model_names() -> list[str]:
         "1D-CNN",
         "CNN-LSTM",
         "LSTM + XGBoost Hybrid",
+        "LSTM + GRU + XGBoost Hybrid",
     ]
     try:
         train_module = get_train_module()
@@ -1472,31 +1477,60 @@ def render_flood_share_by_location_interactive(eda_df: pd.DataFrame) -> None:
 
 
 def render_feature_distribution_by_class_interactive(eda_df: pd.DataFrame, feature_col: str, title: str) -> None:
-    """Phân bố 1 biến số (mưa/triều cường...) theo TỪNG lớp nguy cơ ngập (Plotly histogram chồng lớp,
-    dạng density) - thay cho `rain_distribution_by_class.png`/`tide_distribution_by_class.png` tĩnh."""
+    """
+    Phân bố 1 biến số (mưa/triều cường...) theo TỪNG lớp nguy cơ ngập - dùng BOX PLOT trên dữ liệu đã
+    GỘP THEO NGÀY, thay cho histogram density chồng lớp trên dữ liệu THEO GIỜ trước đây.
+
+    BUG THẬT ĐÃ GẶP (GVHD góp ý "nghiên cứu lại" biểu đồ này): `eda_df` truyền vào là dữ liệu THEO GIỜ
+    (`Lượng_mưa_mm` = mưa của ĐÚNG 1 giờ, gần như luôn ~0mm), trong khi luật gán nhãn thật
+    (`create_multiclass_flood_label()`) dùng ngưỡng cho mưa TÍCH LUỸ CẢ NGÀY (>25mm/>50mm) - lệch hẳn
+    2 bậc đơn vị (giờ vs ngày) khiến CẢ 3 LỚP đều dồn cục sát 0 trên biểu đồ cũ, không thấy khác biệt
+    gì giữa các lớp dù nhãn được gán chính xác. Sửa bằng cách GỘP VỀ THEO NGÀY trước khi vẽ (mưa: tổng
+    cả ngày `sum` - khớp đúng `build_daily_feature_dataset()`; triều: trung bình `mean`) - đúng granularity
+    mà luật nhãn thật sự nhìn vào.
+
+    ĐỔI SANG BOX PLOT (thay vì histogram density chồng lớp): mưa vốn lệch phải rất mạnh (đa số ngày
+    mưa ít/không mưa, số ít ngày mưa cực lớn) - overlay density dễ bị các lớp che khuất lẫn nhau ở
+    vùng gần 0; box plot cho thấy rõ trung vị/tứ phân vị/outlier của TỪNG lớp cạnh nhau, dễ so sánh
+    hơn hẳn với dữ liệu lệch mạnh kiểu này.
+    """
     if eda_df.empty or feature_col not in eda_df.columns or "Nguy_cơ_ngập" not in eda_df.columns:
         st.info(f"Chưa có dữ liệu để vẽ phân bố `{feature_col}`.")
         return
 
-    plot_df = eda_df.copy()
-    plot_df["Nguy_cơ_ngập"] = pd.to_numeric(plot_df["Nguy_cơ_ngập"], errors="coerce")
-    plot_df = plot_df.dropna(subset=["Nguy_cơ_ngập", feature_col])
-    plot_df["Mức độ ngập"] = plot_df["Nguy_cơ_ngập"].astype(int).astype(str).map(CLASS_LABEL_VI)
+    hourly_df = eda_df.copy()
+    hourly_df["Nguy_cơ_ngập"] = pd.to_numeric(hourly_df["Nguy_cơ_ngập"], errors="coerce")
+    hourly_df[feature_col] = pd.to_numeric(hourly_df[feature_col], errors="coerce")
+    hourly_df = hourly_df.dropna(subset=["Nguy_cơ_ngập", feature_col, "Thời_gian", "Địa phương"])
+    hourly_df["__ngày__"] = hourly_df["Thời_gian"].dt.floor("D")
+
+    # Mưa cộng dồn cả ngày (`sum`) - khớp đúng cách `build_daily_feature_dataset()` tính "Lượng_mưa_mm"
+    # theo ngày; các biến khác (vd triều cường) lấy trung bình ngày - cũng khớp aggregation_map thật.
+    daily_agg = "sum" if feature_col == "Lượng_mưa_mm" else "mean"
+    daily_df = (
+        hourly_df.groupby(["Địa phương", "__ngày__"], as_index=False)
+        .agg({feature_col: daily_agg, "Nguy_cơ_ngập": "first"})
+    )
+    daily_df["Mức độ ngập"] = daily_df["Nguy_cơ_ngập"].astype(int).astype(str).map(CLASS_LABEL_VI)
 
     class_colors = {"Không ngập": "#4C78A8", "Ngập nhẹ": "#F58518", "Ngập nặng": "#E45756"}
-    fig = px.histogram(
-        plot_df,
-        x=feature_col,
+    fig = px.box(
+        daily_df,
+        x="Mức độ ngập",
+        y=feature_col,
         color="Mức độ ngập",
-        histnorm="probability density",
-        barmode="overlay",
-        opacity=0.55,
-        nbins=40,
+        points="outliers",
         color_discrete_map=class_colors,
         category_orders={"Mức độ ngập": ["Không ngập", "Ngập nhẹ", "Ngập nặng"]},
     )
     apply_dark_plotly_theme(fig)
-    fig.update_layout(title=dict(text=title), yaxis=dict(title="Mật độ phân bố"))
+    y_axis_title = "Lượng mưa theo NGÀY (mm)" if feature_col == "Lượng_mưa_mm" else feature_col
+    fig.update_layout(
+        title=dict(text=f"{title} (gộp theo ngày)"),
+        xaxis=dict(title=None),
+        yaxis=dict(title=y_axis_title),
+        showlegend=False,
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -3676,7 +3710,10 @@ def _get_latest_flood_predictions_cached(_dependency_signature: tuple) -> pd.Dat
          liệu quan trắc gần nhất trong data/historical/*.csv (vẫn là dữ liệu thật, không phải số
          ngẫu nhiên) để bản đồ luôn phản ánh tình trạng có cơ sở dữ liệu, không bao giờ "đứng im".
 
-    Cột 'Nguy cơ' có 3 giá trị: 'An toàn' / 'Ngập' / 'Không xác định'. FAIL-SAFE THEO THIẾT KẾ: khi
+    Cột 'Nguy cơ' có 4 giá trị: 'An toàn' / 'Ngập nhẹ' / 'Ngập nặng' / 'Không xác định' - TRƯỚC ĐÂY gộp
+    thẳng 2 lớp 'Ngập nhẹ'/'Ngập nặng' về chung 1 nhãn 'Ngập' (chỉ giữ nhị phân) dù model đã dự đoán ra
+    đủ 3 mức - GÓP Ý CỦA GVHD: bản đồ cần tô màu theo ĐÚNG mức độ, không chỉ 2 màu xanh/đỏ. Giữ nguyên
+    `predicted_class` 0/1/2 thật, chỉ đổi tên hiển thị. FAIL-SAFE THEO THIẾT KẾ: khi
     suy luận cho 1 địa phương bị lỗi (thiếu CSV, model hỏng, không đủ dòng cho `window_size`, sai cột
     feature...), KHÔNG mặc định về 'An toàn' như bản trước - với hệ thống cảnh báo ngập, báo nhầm
     "an toàn" trong khi thực ra không xác định được là hướng lỗi NGUY HIỂM HƠN nhiều so với hiển thị
@@ -3708,7 +3745,9 @@ def _get_latest_flood_predictions_cached(_dependency_signature: tuple) -> pd.Dat
                 predicted_class = predict_flood_class(deployed_model, location_df, feature_columns)
             else:
                 predicted_class = int(location_df["Nguy_cơ_ngập"].iloc[-1])
-            risk_status = "An toàn" if predicted_class == 0 else "Ngập"
+            # "An toàn" (không phải "Không ngập" như `CLASS_LABEL_VI`) để khớp đúng wording đã dùng
+            # xuyên suốt code bản đồ này (tooltip, RISK_TOOLTIP_LABEL_MAP, cảnh báo "Không xác định"...).
+            risk_status = {0: "An toàn", 1: "Ngập nhẹ", 2: "Ngập nặng"}.get(predicted_class, "Không xác định")
         except Exception as exc:
             # FAIL-SAFE: xem docstring - CỐ Ý không rơi về "An toàn" khi lỗi.
             risk_status = "Không xác định"
@@ -4735,12 +4774,20 @@ def compute_district_label_anchors() -> dict[str, tuple[float, float]]:
 
 
 # Màu tô theo trạng thái nguy cơ - dùng chung cho cả nhánh tô ranh giới (GeoJson) lẫn nhánh marker
-# dự phòng, đảm bảo 2 cách hiển thị luôn nhất quán màu sắc với nhau.
-RISK_FILL_COLOR_MAP = {"Ngập": "#EF4444", "An toàn": "#22C55E"}
+# dự phòng, đảm bảo 2 cách hiển thị luôn nhất quán màu sắc với nhau. ĐÚNG 3 MÀU khớp với bảng màu theo
+# LỚP dùng xuyên suốt app (`render_class_distribution_interactive()` và các biểu đồ EDA khác) - TRƯỚC
+# ĐÂY chỉ có 2 màu (gộp Ngập nhẹ/Ngập nặng chung 1 màu đỏ) - GÓP Ý CỦA GVHD: bản đồ cần tô theo đúng
+# mức độ, không chỉ nhị phân an toàn/nguy hiểm.
+RISK_FILL_COLOR_MAP = {"An toàn": "#4C78A8", "Ngập nhẹ": "#F58518", "Ngập nặng": "#E45756"}
 RISK_TOOLTIP_LABEL_MAP = {
-    "Ngập": "Nguy cơ NGẬP (dự báo AI)",
     "An toàn": "An toàn",
+    "Ngập nhẹ": "Nguy cơ NGẬP NHẸ (dự báo AI)",
+    "Ngập nặng": "Nguy cơ NGẬP NẶNG (dự báo AI)",
 }
+# folium.Icon chỉ nhận tên màu cố định (không nhận mã hex tuỳ ý) - dùng cho nhánh marker DỰ PHÒNG khi
+# thiếu file GeoJSON ranh giới (xem bên dưới), tách riêng khỏi RISK_FILL_COLOR_MAP (mã hex, dùng cho
+# GeoJson tô ranh giới - nhánh chính) vì 2 API nhận kiểu màu khác nhau.
+RISK_ICON_COLOR_MAP = {"An toàn": "green", "Ngập nhẹ": "orange", "Ngập nặng": "red"}
 
 
 def build_forecast_popup_html(location_name: str, location_forecast_df: pd.DataFrame | None) -> str:
@@ -4894,19 +4941,13 @@ def build_smart_routing_map(
             )
             popup = folium.Popup(build_forecast_popup_html(location_name, location_forecast_df), max_width=320)
 
-            if risk_status == "Ngập":
+            if risk_status in RISK_ICON_COLOR_MAP:
+                risk_icon = "check" if risk_status == "An toàn" else "exclamation-triangle"
                 folium.Marker(
                     location=coordinates,
-                    tooltip=f"{location_name}: Nguy cơ NGẬP (dự báo AI)",
+                    tooltip=f"{location_name}: {RISK_TOOLTIP_LABEL_MAP.get(risk_status, risk_status)}",
                     popup=popup,
-                    icon=folium.Icon(color="red", icon="exclamation-triangle", prefix="fa"),
-                ).add_to(routing_map)
-            elif risk_status == "An toàn":
-                folium.Marker(
-                    location=coordinates,
-                    tooltip=f"{location_name}: An toàn",
-                    popup=popup,
-                    icon=folium.Icon(color="green", icon="check", prefix="fa"),
+                    icon=folium.Icon(color=RISK_ICON_COLOR_MAP[risk_status], icon=risk_icon, prefix="fa"),
                 ).add_to(routing_map)
             else:
                 folium.Marker(
@@ -5031,7 +5072,10 @@ def render_smart_routing_tab() -> None:
     for location_name, coordinates in REAL_MONITORED_LOCATIONS.items():
         risk_rows = df_predictions.loc[df_predictions["Địa phương"] == location_name, "Nguy cơ"]
         risk_status = risk_rows.iloc[0] if not risk_rows.empty else "Không xác định"
-        if risk_status == "Ngập":
+        # Né đường khi ở MỨC ĐỘ NGẬP NÀO CŨNG ĐƯỢC (nhẹ hoặc nặng) - giữ đúng hành vi an toàn như bản
+        # nhị phân cũ (né mọi dự đoán khác 0), chỉ đổi cách HIỂN THỊ màu/nhãn sang đủ 3 mức, không đổi
+        # mức độ thận trọng của routing engine.
+        if risk_status in {"Ngập nhẹ", "Ngập nặng"}:
             real_flooded_polygons.append(build_flood_zone_polygon(coordinates))
             flooded_location_names.append(location_name)
         elif risk_status == "Không xác định":
