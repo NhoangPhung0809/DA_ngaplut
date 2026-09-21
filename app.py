@@ -1469,18 +1469,49 @@ def render_flood_share_by_location_interactive(eda_df: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
+def aggregate_eda_df_to_daily(eda_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Gộp `eda_df` (dữ liệu THEO GIỜ ở Tab EDA) về THEO NGÀY cho từng địa phương - dùng CHUNG cho mọi
+    biểu đồ/bảng cần đúng granularity ngày (khớp `build_daily_feature_dataset()` thật): mưa cộng dồn
+    cả ngày (`sum`), các biến còn lại lấy trung bình ngày (`mean`), nhãn lấy nguyên (`first` - đã được
+    `regenerate_flood_risk_label()` gán nhất quán cho mọi giờ trong cùng 1 ngày từ trước).
+
+    Tách thành hàm riêng (trước đây viết trực tiếp trong `render_feature_distribution_by_class_
+    interactive()`) để dùng lại được cho cả bảng "Tra cứu dữ liệu lịch sử theo năm" - tránh chép lại
+    logic gộp ngày ở 2 nơi dễ lệch nhau khi sửa sau này.
+    """
+    numeric_cols = ["Nhiệt_độ_C", "Độ_ẩm_%", "Lượng_mưa_mm", "Độ_ẩm_đất", "Chiều_cao_triều_m"]
+    available_numeric_cols = [col for col in numeric_cols if col in eda_df.columns]
+
+    hourly_df = eda_df.copy()
+    hourly_df["Nguy_cơ_ngập"] = pd.to_numeric(hourly_df["Nguy_cơ_ngập"], errors="coerce")
+    for col in available_numeric_cols:
+        hourly_df[col] = pd.to_numeric(hourly_df[col], errors="coerce")
+    hourly_df = hourly_df.dropna(subset=["Nguy_cơ_ngập", "Thời_gian", "Địa phương"])
+    hourly_df["Ngày"] = hourly_df["Thời_gian"].dt.floor("D")
+
+    aggregation_map = {
+        col: ("sum" if col == "Lượng_mưa_mm" else "mean") for col in available_numeric_cols
+    }
+    aggregation_map["Nguy_cơ_ngập"] = "first"
+
+    daily_df = hourly_df.groupby(["Địa phương", "Ngày"], as_index=False).agg(aggregation_map)
+    daily_df["Mức độ ngập"] = daily_df["Nguy_cơ_ngập"].astype(int).astype(str).map(CLASS_LABEL_VI)
+    return daily_df
+
+
 def render_feature_distribution_by_class_interactive(eda_df: pd.DataFrame, feature_col: str, title: str) -> None:
     """
     Phân bố 1 biến số (mưa/triều cường...) theo TỪNG lớp nguy cơ ngập - dùng BOX PLOT trên dữ liệu đã
-    GỘP THEO NGÀY, thay cho histogram density chồng lớp trên dữ liệu THEO GIỜ trước đây.
+    GỘP THEO NGÀY (`aggregate_eda_df_to_daily()`), thay cho histogram density chồng lớp trên dữ liệu
+    THEO GIỜ trước đây.
 
     BUG THẬT ĐÃ GẶP (GVHD góp ý "nghiên cứu lại" biểu đồ này): `eda_df` truyền vào là dữ liệu THEO GIỜ
     (`Lượng_mưa_mm` = mưa của ĐÚNG 1 giờ, gần như luôn ~0mm), trong khi luật gán nhãn thật
     (`create_multiclass_flood_label()`) dùng ngưỡng cho mưa TÍCH LUỸ CẢ NGÀY (>25mm/>50mm) - lệch hẳn
     2 bậc đơn vị (giờ vs ngày) khiến CẢ 3 LỚP đều dồn cục sát 0 trên biểu đồ cũ, không thấy khác biệt
-    gì giữa các lớp dù nhãn được gán chính xác. Sửa bằng cách GỘP VỀ THEO NGÀY trước khi vẽ (mưa: tổng
-    cả ngày `sum` - khớp đúng `build_daily_feature_dataset()`; triều: trung bình `mean`) - đúng granularity
-    mà luật nhãn thật sự nhìn vào.
+    gì giữa các lớp dù nhãn được gán chính xác. Sửa bằng cách GỘP VỀ THEO NGÀY trước khi vẽ - đúng
+    granularity mà luật nhãn thật sự nhìn vào.
 
     ĐỔI SANG BOX PLOT (thay vì histogram density chồng lớp): mưa vốn lệch phải rất mạnh (đa số ngày
     mưa ít/không mưa, số ít ngày mưa cực lớn) - overlay density dễ bị các lớp che khuất lẫn nhau ở
@@ -1491,20 +1522,8 @@ def render_feature_distribution_by_class_interactive(eda_df: pd.DataFrame, featu
         st.info(f"Chưa có dữ liệu để vẽ phân bố `{feature_col}`.")
         return
 
-    hourly_df = eda_df.copy()
-    hourly_df["Nguy_cơ_ngập"] = pd.to_numeric(hourly_df["Nguy_cơ_ngập"], errors="coerce")
-    hourly_df[feature_col] = pd.to_numeric(hourly_df[feature_col], errors="coerce")
-    hourly_df = hourly_df.dropna(subset=["Nguy_cơ_ngập", feature_col, "Thời_gian", "Địa phương"])
-    hourly_df["__ngày__"] = hourly_df["Thời_gian"].dt.floor("D")
-
-    # Mưa cộng dồn cả ngày (`sum`) - khớp đúng cách `build_daily_feature_dataset()` tính "Lượng_mưa_mm"
-    # theo ngày; các biến khác (vd triều cường) lấy trung bình ngày - cũng khớp aggregation_map thật.
-    daily_agg = "sum" if feature_col == "Lượng_mưa_mm" else "mean"
-    daily_df = (
-        hourly_df.groupby(["Địa phương", "__ngày__"], as_index=False)
-        .agg({feature_col: daily_agg, "Nguy_cơ_ngập": "first"})
-    )
-    daily_df["Mức độ ngập"] = daily_df["Nguy_cơ_ngập"].astype(int).astype(str).map(CLASS_LABEL_VI)
+    daily_df = aggregate_eda_df_to_daily(eda_df)
+    daily_df = daily_df.dropna(subset=[feature_col])
 
     class_colors = {"Không ngập": "#4C78A8", "Ngập nhẹ": "#F58518", "Ngập nặng": "#E45756"}
     fig = px.box(
@@ -1527,6 +1546,83 @@ def render_feature_distribution_by_class_interactive(eda_df: pd.DataFrame, featu
     st.plotly_chart(fig, use_container_width=True)
 
 
+def render_historical_year_lookup_section(eda_df: pd.DataFrame) -> None:
+    """
+    Khối "Tra cứu dữ liệu lịch sử theo năm" - GÓP Ý CỦA GVHD: cần thêm phần cho phép xem lại dữ liệu
+    lịch sử (khác với "Xu hướng theo tháng" đã có - đó là biểu đồ TRUNG BÌNH gộp nhiều năm, không tra
+    cứu được số liệu THẬT của 1 năm cụ thể). Chọn địa phương + năm, xem thống kê tóm tắt, biểu đồ mưa
+    hàng ngày tô màu theo mức độ ngập, và bảng dữ liệu THEO NGÀY đầy đủ của đúng năm/địa phương đó.
+    """
+    if eda_df.empty or "Thời_gian" not in eda_df.columns:
+        st.info("Chưa có dữ liệu lịch sử để tra cứu.")
+        return
+
+    daily_df = aggregate_eda_df_to_daily(eda_df)
+    if daily_df.empty:
+        st.info("Chưa có dữ liệu lịch sử để tra cứu.")
+        return
+
+    locations = sorted(daily_df["Địa phương"].unique().tolist())
+    years = sorted(daily_df["Ngày"].dt.year.unique().tolist())
+
+    lookup_col1, lookup_col2 = st.columns(2)
+    with lookup_col1:
+        selected_location = st.selectbox(
+            "Địa phương", ["Tất cả 5 địa phương"] + locations, key="history_lookup_location"
+        )
+    with lookup_col2:
+        selected_year = st.selectbox("Năm", years, index=len(years) - 1, key="history_lookup_year")
+
+    filtered_df = daily_df[daily_df["Ngày"].dt.year == selected_year]
+    if selected_location != "Tất cả 5 địa phương":
+        filtered_df = filtered_df[filtered_df["Địa phương"] == selected_location]
+    filtered_df = filtered_df.sort_values(["Địa phương", "Ngày"])
+
+    if filtered_df.empty:
+        st.info(f"Không có dữ liệu cho {selected_location} - năm {selected_year}.")
+        return
+
+    metric_col1, metric_col2, metric_col3, metric_col4, metric_col5 = st.columns(5)
+    metric_col1.metric("Số ngày có dữ liệu", f"{len(filtered_df):,}")
+    metric_col2.metric("Ngày Ngập nhẹ", f"{int((filtered_df['Nguy_cơ_ngập'] == 1).sum()):,}")
+    metric_col3.metric("Ngày Ngập nặng", f"{int((filtered_df['Nguy_cơ_ngập'] == 2).sum()):,}")
+    metric_col4.metric("Tổng lượng mưa (mm)", f"{filtered_df['Lượng_mưa_mm'].sum():,.0f}")
+    metric_col5.metric("Mưa lớn nhất 1 ngày (mm)", f"{filtered_df['Lượng_mưa_mm'].max():,.1f}")
+
+    class_colors = {"Không ngập": "#4C78A8", "Ngập nhẹ": "#F58518", "Ngập nặng": "#E45756"}
+    if selected_location != "Tất cả 5 địa phương":
+        fig = px.bar(
+            filtered_df,
+            x="Ngày",
+            y="Lượng_mưa_mm",
+            color="Mức độ ngập",
+            color_discrete_map=class_colors,
+            category_orders={"Mức độ ngập": ["Không ngập", "Ngập nhẹ", "Ngập nặng"]},
+        )
+        apply_dark_plotly_theme(fig)
+        fig.update_layout(
+            title=dict(text=f"Mưa hàng ngày năm {selected_year} - {selected_location}"),
+            xaxis=dict(title=None),
+            yaxis=dict(title="Lượng mưa (mm)"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.caption(
+            "Chọn 1 địa phương cụ thể (thay vì 'Tất cả') để xem biểu đồ mưa hàng ngày - khi xem gộp cả "
+            "5 địa phương, chỉ bảng dữ liệu bên dưới hiển thị đầy đủ (biểu đồ theo ngày sẽ chồng lấn "
+            "nhiều điểm mỗi ngày, khó đọc)."
+        )
+
+    display_df = filtered_df.rename(columns={"Ngày": "Ngày (đã gộp)"}).drop(columns=["Nguy_cơ_ngập"])
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        height=min(120 + 35 * len(display_df), 420),
+    )
+
+
 def render_eda_tab() -> None:
     """
     Nội dung Tab 1 - Khám phá dữ liệu (EDA), bước ĐẦU TIÊN của vòng đời Data Science.
@@ -1541,6 +1637,11 @@ def render_eda_tab() -> None:
     )
 
     eda_df = load_eda_sample_dataframe()
+
+    with st.expander("Tra cứu dữ liệu lịch sử theo năm", expanded=True):
+        render_historical_year_lookup_section(eda_df)
+
+    st.markdown("---")
 
     # ---- Hàng 1: bố cục 2 CỘT song song bằng st.columns ----
     col_raw, col_stats = st.columns(2)
@@ -3528,9 +3629,14 @@ def fetch_tomtom_route(
 def build_flood_zone_polygon(
     center_point: tuple[float, float], half_size_deg: float = FLOOD_ZONE_HALF_SIZE_DEG
 ) -> list[tuple[float, float]]:
-    """Sinh 1 hình vuông nhỏ (bounding box) bao quanh 1 tọa độ trung tâm, đại diện cho vùng ngập
-    ước tính tại địa phương đó. Đây là polygon THẬT (không phải dummy) vì tâm của nó chính là tọa độ
-    giám sát thực tế trong REAL_MONITORED_LOCATIONS, chỉ có KÍCH THƯỚC là xấp xỉ."""
+    """
+    Sinh 1 hình vuông nhỏ CỐ ĐỊNH bao quanh 1 tọa độ trung tâm - CHỈ dùng làm FALLBACK khi thiếu file
+    ranh giới GeoJSON thật (xem `build_flood_zone_polygon_for_location()` bên dưới, hàm chính pipeline
+    thật sự gọi). BUG THẬT ĐÃ GẶP (người dùng phát hiện qua ảnh chụp bản đồ): ô vuông cố định quanh 1
+    ĐIỂM giám sát KHÔNG trùng tâm với ranh giới hành chính thật (thường dài/uốn theo sông, không phải
+    hình vuông đều quanh 1 điểm) - nhìn như "lệch 1 khúc" so với vùng tô màu theo mức độ ngập vẽ từ
+    GeoJSON thật. Giữ lại hàm này CHỈ để dùng khi hoàn toàn không có file ranh giới (dự phòng 2 lớp).
+    """
     center_lat, center_lon = center_point
     return [
         (center_lat + half_size_deg, center_lon - half_size_deg),
@@ -3538,6 +3644,62 @@ def build_flood_zone_polygon(
         (center_lat - half_size_deg, center_lon + half_size_deg),
         (center_lat - half_size_deg, center_lon - half_size_deg),
     ]
+
+
+def compute_district_bounding_boxes() -> dict[str, tuple[float, float, float, float]]:
+    """
+    Trả về `{tên địa phương: (min_lat, min_lon, max_lat, max_lon)}` - hình chữ nhật bao NGOÀI KHÍT
+    ranh giới hành chính THẬT (từ `load_district_boundaries()`), dùng để vẽ + gửi TomTom thay cho ô
+    vuông cố định xấp xỉ cũ. Lấy TẤT CẢ các mảnh (không chỉ mảnh lớn nhất như
+    `compute_district_label_anchors()`) - mục đích ở đây là bao PHỦ HẾT diện tích cần né, không phải
+    chọn 1 điểm đặt nhãn đẹp, nên mảnh nhỏ tách rời (nếu có) vẫn cần tính vào.
+    """
+    district_boundaries = load_district_boundaries()
+    if not district_boundaries:
+        return {}
+
+    bounding_boxes: dict[str, tuple[float, float, float, float]] = {}
+    for feature in district_boundaries["features"]:
+        location_name = feature.get("properties", {}).get("name")
+        geometry = feature.get("geometry", {})
+        coordinates = geometry.get("coordinates") or []
+        if geometry.get("type") == "MultiPolygon":
+            all_rings = [polygon[0] for polygon in coordinates if polygon]
+        else:
+            all_rings = [coordinates[0]] if coordinates else []
+        if not location_name or not all_rings:
+            continue
+
+        all_points = [point for ring in all_rings for point in ring]
+        longitudes = [p[0] for p in all_points]
+        latitudes = [p[1] for p in all_points]
+        bounding_boxes[location_name] = (min(latitudes), min(longitudes), max(latitudes), max(longitudes))
+    return bounding_boxes
+
+
+def build_flood_zone_polygon_for_location(
+    location_name: str,
+    fallback_center: tuple[float, float],
+    district_bounding_boxes: dict[str, tuple[float, float, float, float]],
+) -> list[tuple[float, float]]:
+    """
+    Trả về polygon (hình chữ nhật, 4 góc) đại diện vùng ngập cần né cho `location_name` - ƯU TIÊN
+    hình chữ nhật bao khít ranh giới hành chính THẬT (`district_bounding_boxes`, tính từ GeoJSON), CHỈ
+    rơi về ô vuông cố định xấp xỉ (`build_flood_zone_polygon`) khi thiếu dữ liệu ranh giới cho địa
+    phương này. Dùng chung 1 hàm cho CẢ 2 mục đích (vẽ Folium + gửi `avoidAreas.rectangles` cho
+    TomTom qua `polygon_to_bounding_rectangle()`) - đảm bảo hình vẽ trên bản đồ và vùng thật sự được
+    né khi định tuyến LUÔN khớp nhau, không lệch giữa 2 nơi.
+    """
+    bounding_box = district_bounding_boxes.get(location_name)
+    if bounding_box is not None:
+        min_lat, min_lon, max_lat, max_lon = bounding_box
+        return [
+            (max_lat, min_lon),
+            (max_lat, max_lon),
+            (min_lat, max_lon),
+            (min_lat, min_lon),
+        ]
+    return build_flood_zone_polygon(fallback_center)
 
 
 def nudge_point_outside_flood_zones(
@@ -5029,6 +5191,36 @@ def build_smart_routing_map(
             tooltip="Tuyến đường di chuyển (đã né vùng ngập)",
         ).add_to(routing_map)
 
+    # CHÚ THÍCH MÀU (legend) - GÓP Ý CỦA GVHD: bản đồ trước đây KHÔNG có legend nào, người xem phải tự
+    # đoán ý nghĩa màu qua tooltip (phải rê/click từng vùng mới biết) - đặc biệt khó với người xem lần
+    # đầu (hội đồng bảo vệ) không có thời gian tương tác thử. Folium không tự sinh legend cho GeoJson/
+    # Marker như Plotly, phải tự chèn 1 khối HTML cố định (`folium.Element`) đè lên góc bản đồ.
+    legend_html = f"""
+    <div style="
+        position: fixed; bottom: 24px; left: 24px; z-index: 9999;
+        background: rgba(15, 23, 42, 0.92); color: #f8fafc; font-size: 12.5px;
+        padding: 10px 14px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.15);
+        font-family: sans-serif; line-height: 1.7; box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    ">
+        <div style="font-weight: 700; margin-bottom: 4px;">Chú thích</div>
+        <div><span style="display:inline-block;width:11px;height:11px;background:{RISK_FILL_COLOR_MAP['An toàn']};
+            border-radius:2px;margin-right:6px;"></span>An toàn</div>
+        <div><span style="display:inline-block;width:11px;height:11px;background:{RISK_FILL_COLOR_MAP['Ngập nhẹ']};
+            border-radius:2px;margin-right:6px;"></span>Ngập nhẹ</div>
+        <div><span style="display:inline-block;width:11px;height:11px;background:{RISK_FILL_COLOR_MAP['Ngập nặng']};
+            border-radius:2px;margin-right:6px;"></span>Ngập nặng</div>
+        <div><span style="display:inline-block;width:11px;height:11px;background:#9CA3AF;
+            border-radius:2px;margin-right:6px;"></span>Không xác định (lỗi model/dữ liệu)</div>
+        <div><span style="display:inline-block;width:11px;height:11px;background:#EF4444;opacity:0.5;
+            border:1.5px solid #B91C1C;border-radius:2px;margin-right:6px;"></span>Vùng né khi định tuyến</div>
+        <div style="margin-top:4px;"><i class="fa fa-play" style="color:#3186cc;width:11px;margin-right:6px;"></i>Điểm xuất phát</div>
+        <div><i class="fa fa-flag-checkered" style="color:#436978;width:11px;margin-right:6px;"></i>Điểm đến</div>
+        <div><span style="display:inline-block;width:16px;height:2.5px;background:#2563EB;
+            margin-right:6px;vertical-align:middle;"></span>Tuyến đường đề xuất</div>
+    </div>
+    """
+    routing_map.get_root().html.add_child(folium.Element(legend_html))
+
     return routing_map
 
 
@@ -5078,6 +5270,10 @@ def render_smart_routing_tab() -> None:
     real_flooded_polygons: list[list[tuple[float, float]]] = []
     flooded_location_names: list[str] = []
     unknown_location_names: list[str] = []
+    # Tính 1 LẦN, dùng chung cho mọi địa phương bên dưới - tránh đọc lại file GeoJSON nhiều lần trong
+    # vòng lặp. Rỗng (không lỗi) khi thiếu file ranh giới - `build_flood_zone_polygon_for_location()`
+    # tự rơi về ô vuông cố định xấp xỉ cho từng địa phương khi đó.
+    district_bounding_boxes = compute_district_bounding_boxes()
     for location_name, coordinates in REAL_MONITORED_LOCATIONS.items():
         risk_rows = df_predictions.loc[df_predictions["Địa phương"] == location_name, "Nguy cơ"]
         risk_status = risk_rows.iloc[0] if not risk_rows.empty else "Không xác định"
@@ -5085,7 +5281,9 @@ def render_smart_routing_tab() -> None:
         # nhị phân cũ (né mọi dự đoán khác 0), chỉ đổi cách HIỂN THỊ màu/nhãn sang đủ 3 mức, không đổi
         # mức độ thận trọng của routing engine.
         if risk_status in {"Ngập nhẹ", "Ngập nặng"}:
-            real_flooded_polygons.append(build_flood_zone_polygon(coordinates))
+            real_flooded_polygons.append(
+                build_flood_zone_polygon_for_location(location_name, coordinates, district_bounding_boxes)
+            )
             flooded_location_names.append(location_name)
         elif risk_status == "Không xác định":
             unknown_location_names.append(location_name)
