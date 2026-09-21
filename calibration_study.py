@@ -162,9 +162,10 @@ def run_calibration_arm(
     y_test: pd.Series,
 ) -> dict:
     """Huấn luyện 1 arm (SMOTE/CTGAN/None) rồi tính reliability diagram/Brier/ECE trên CÙNG 1 tập test -
-    tách hàm này để `main()` gọi nhiều lần với `balancing_method` khác nhau, đảm bảo mọi bước khác (đặc
-    trưng, luật nhãn, chia train/test, scaler) giữ NGUYÊN GIỐNG NHAU giữa các arm - chỉ cô lập đúng 1
-    biến đang so sánh (cân bằng bằng gì, hoặc không cân bằng), không lẫn hiệu ứng nào khác."""
+    tách hàm này để `run_calibration_study()` gọi nhiều lần với `balancing_method` khác nhau, đảm bảo
+    mọi bước khác (đặc trưng, luật nhãn, chia train/test, scaler) giữ NGUYÊN GIỐNG NHAU giữa các arm -
+    chỉ cô lập đúng 1 biến đang so sánh (cân bằng bằng gì, hoặc không cân bằng), không lẫn hiệu ứng nào
+    khác."""
     print(f"\n{'=' * 70}\nARM: {arm_name}\n{'=' * 70}")
 
     if balancing_method == "smote":
@@ -227,7 +228,10 @@ def run_calibration_arm(
     }
 
 
-def main() -> None:
+def run_calibration_study() -> None:
+    """Đặt tên riêng (khác `main()` cũ) để `training_worker.py` import và gọi lại được sau khi huấn
+    luyện chính hoàn tất - giống `run_ablation_study()` trong `ablation_study.py`, cùng lý do: tự động
+    chạy kèm nút "Bắt đầu Huấn luyện Nền", không cần mở terminal chạy tay riêng nữa."""
     print("Đang nạp và gộp dữ liệu thô...")
     raw_df = load_and_concatenate_csvs()
     daily_feature_df = build_daily_feature_dataset(raw_df)
@@ -268,4 +272,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_calibration_study()

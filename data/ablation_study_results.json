@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-20T08:24:51",
+  "generated_at": "2026-09-21T21:33:03",
   "model_used": "RandomForestClassifier (tham số cố định, không tune riêng từng arm)",
   "fixed_params": {
     "n_estimators": 300,

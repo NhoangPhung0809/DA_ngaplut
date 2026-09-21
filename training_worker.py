@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 import traceback
 from datetime import datetime
@@ -92,6 +93,48 @@ def main() -> int:
                 )
             except Exception as cv_exc:
                 print(f"[Time Series CV] Bỏ qua do lỗi (không ảnh hưởng kết quả huấn luyện chính): {cv_exc}")
+
+            # Ablation Study + Calibration Study TỰ ĐỘNG chạy tiếp - GÓP Ý CỦA NGƯỜI DÙNG: trước đây
+            # phải mở terminal chạy tay `python3 ablation_study.py`/`calibration_study.py` riêng, dễ
+            # quên chạy lại nên kết quả hiển thị trên UI bị CŨ so với lần huấn luyện gần nhất. Cả 2 đều
+            # tự dùng RandomForestClassifier tham số cố định + cấu hình "Full" riêng (KHÔNG phụ thuộc
+            # model/balancing_method người dùng chọn ở trên).
+            #
+            # CHẠY BẰNG SUBPROCESS RIÊNG (KHÔNG import hàm rồi gọi thẳng trong CÙNG process như bản đầu
+            # tiên) - LỖI THẬT ĐÃ GẶP: arm CTGAN của `calibration_study.py` từng làm process con SEGFAULT
+            # (crash trong `libtriton.so`, tầng native của PyTorch/CTGAN) - lỗi cấp hệ điều hành này
+            # KHÔNG đi qua được try/except của Python, giết chết ngay lập tức tiến trình đang chạy nó.
+            # Nếu gọi trực tiếp trong process `training_worker.py`, crash đó sẽ kéo sập LUÔN cả tiến
+            # trình chính - kết quả huấn luyện tuy đã xong vẫn KHÔNG kịp ghi "completed" vào training_
+            # status.json, khiến UI hiển thị kẹt mãi ở "Đang huấn luyện". Chạy bằng subprocess riêng
+            # (`subprocess.run`) cô lập hoàn toàn: subprocess con có crash/segfault cỡ nào cũng chỉ trả
+            # về returncode khác 0, `check=True` biến nó thành `CalledProcessError` - try/except ở dưới
+            # bắt được bình thường, không ảnh hưởng tiến trình cha.
+            # ÉP CHẠY CPU THUẦN (`CUDA_VISIBLE_DEVICES=""`) - NGUYÊN NHÂN GỐC ĐÃ TÌM RA của lần segfault
+            # thật: máy có GPU NVIDIA nhưng driver cũ hơn bản CUDA mà PyTorch cần
+            # (`torch.cuda.is_available()` trả `False`), khiến PyTorch/Triton (bên trong CTGAN) dò thấy
+            # GPU tồn tại nhưng không dùng được - crash native trong `libtriton.so` ở trạng thái nửa vời
+            # này. Ẩn hẳn GPU khỏi tiến trình con qua biến môi trường buộc PyTorch đi thẳng nhánh CPU sạch
+            # ngay từ đầu, không dò CUDA nữa - áp dụng cho CẢ 2 script (Ablation không dùng CTGAN nên
+            # không bị ảnh hưởng, nhưng đặt chung cho nhất quán, tránh phải nhớ áp riêng từng nơi sau này).
+            child_env = {**os.environ, "CUDA_VISIBLE_DEVICES": ""}
+            for script_name, script_path in (
+                ("Ablation Study", BASE_DIR / "ablation_study.py"),
+                ("Calibration Study", BASE_DIR / "calibration_study.py"),
+            ):
+                try:
+                    subprocess.run(
+                        [sys.executable, str(script_path)],
+                        cwd=str(BASE_DIR),
+                        env=child_env,
+                        check=True,
+                        timeout=900,
+                    )
+                except Exception as study_exc:
+                    print(
+                        f"[{script_name}] Bỏ qua do lỗi (không ảnh hưởng kết quả huấn luyện chính): "
+                        f"{study_exc}"
+                    )
 
             completed_state = {
                 **running_state,
