@@ -37,10 +37,9 @@ from imblearn.over_sampling import SMOTE
 
 from analyze_and_train import (
     FEATURE_COLS,
-    TARGET_COL,
     build_daily_feature_dataset,
     chronological_train_test_split,
-    compute_train_only_medians,
+    create_multiclass_flood_label,
     load_and_concatenate_csvs,
     preprocess_features,
 )
@@ -59,43 +58,6 @@ RF_FIXED_PARAMS = dict(
 )
 
 LAG_COLS = [RAIN_LAG1_COL, RAIN_LAG2_COL, RAIN_ROLLING_3D_COL]
-
-
-def create_multiclass_flood_label_no_rain3day(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Bản SAO của `create_multiclass_flood_label()` thật (analyze_and_train.py:366-423), CHỈ khác đúng 1
-    chỗ: bỏ 2 điều kiện `rain_3day` khỏi luật - dùng riêng cho arm ablation "(-) rain_3day rule", không
-    dùng cho pipeline thật.
-    """
-    labeled_df = df.copy()
-
-    train_only_medians = compute_train_only_medians(labeled_df, FEATURE_COLS)
-    for column in FEATURE_COLS:
-        if column not in labeled_df.columns:
-            labeled_df[column] = 0.0
-        labeled_df[column] = pd.to_numeric(labeled_df[column], errors="coerce")
-        labeled_df[column] = labeled_df[column].fillna(train_only_medians[column])
-
-    rain = labeled_df["Lượng_mưa_mm"].fillna(0)
-    soil = labeled_df["Độ_ẩm_đất"].fillna(0)
-    tide = labeled_df["Chiều_cao_triều_m"].fillna(0)
-
-    heavy_flood_mask = (
-        (rain > 50)
-        | ((rain > 30) & (soil > 0.45))
-        | ((rain > 20) & (soil > 0.40) & (tide > 1.50))
-        | (tide > 2.50)
-    )
-    light_flood_mask = (
-        (rain > 25)
-        | ((rain > 15) & (soil > 0.30))
-        | ((rain > 10) & (tide > 1.20))
-    )
-
-    labeled_df[TARGET_COL] = 0
-    labeled_df.loc[light_flood_mask, TARGET_COL] = 1
-    labeled_df.loc[heavy_flood_mask, TARGET_COL] = 2
-    return labeled_df
 
 
 def run_arm(name: str, modeling_df: pd.DataFrame, drop_lag_features: bool, apply_balancing: bool) -> dict:
@@ -150,10 +112,8 @@ def main() -> None:
     daily_feature_df = build_daily_feature_dataset(raw_df)
 
     print("\nXây dựng 2 phiên bản nhãn (đủ luật / bỏ rain_3day)...")
-    from analyze_and_train import create_multiclass_flood_label
-
-    labeled_full = create_multiclass_flood_label(daily_feature_df)
-    labeled_no_rain3day = create_multiclass_flood_label_no_rain3day(daily_feature_df)
+    labeled_full = create_multiclass_flood_label(daily_feature_df, include_rain_3day=True)
+    labeled_no_rain3day = create_multiclass_flood_label(daily_feature_df, include_rain_3day=False)
 
     modeling_df_full = preprocess_features(labeled_full)
     modeling_df_no_rain3day = preprocess_features(labeled_no_rain3day)

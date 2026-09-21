@@ -42,3 +42,16 @@ FEATURE_COLS = [
     RAIN_LAG2_COL,
     RAIN_ROLLING_3D_COL,
 ]
+
+# Tra CHÍNH XÁC stem file CSV lịch sử -> tên địa phương hiện hành (đúng đơn vị hành chính sau đợt sáp
+# nhập 2025 của Việt Nam) - TỪNG bị copy-paste ĐỘC LẬP thành 3 bản khác nhau (app.py, analyze_and_train.py,
+# eda_analysis.py) khi sửa lỗi hiển thị "TP Hue" (suy tên tự động từ filename, sai tên hành chính cũ)
+# lệch với "Thuận Hóa" (tên đúng dùng ở GeoJSON/map) - đúng kiểu lỗi mà file `shared_constants.py` này
+# được tạo ra để tránh (xem docstring đầu file). Nay chỉ còn DUY NHẤT 1 định nghĩa ở đây.
+LOCATION_STEM_TO_NAME: dict[str, str] = {
+    "TP_Hue_10years": "Thuận Hóa",
+    "Huong_Thuy_10years": "Hương Thủy",
+    "Huong_Tra_10years": "Hương Trà",
+    "Phu_Vang_10years": "Phú Vang",
+    "Quang_Dien_10years": "Quảng Điền",
+}

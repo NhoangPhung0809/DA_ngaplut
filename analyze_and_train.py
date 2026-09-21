@@ -50,7 +50,13 @@ from sklearn.svm import SVC
 from sklearn.preprocessing import label_binarize
 from xgboost import XGBClassifier
 
-from shared_constants import FEATURE_COLS, RAIN_LAG1_COL, RAIN_LAG2_COL, RAIN_ROLLING_3D_COL
+from shared_constants import (
+    FEATURE_COLS,
+    LOCATION_STEM_TO_NAME,
+    RAIN_LAG1_COL,
+    RAIN_LAG2_COL,
+    RAIN_ROLLING_3D_COL,
+)
 
 try:
     from imblearn.over_sampling import RandomOverSampler, SMOTE
@@ -222,20 +228,6 @@ def list_available_models() -> list[str]:
     return list(build_model_registry().keys())
 
 
-# Tra CHÍNH XÁC theo stem file CSV -> tên địa phương hiện hành (khớp `LOCATION_HISTORICAL_FILE` trong
-# `app.py`). Không tự suy tên bằng cách thay "_" thành " " - cách đó biến "TP_Hue_10years" thành
-# "TP Hue" (không dấu, tên hành chính CŨ đã bỏ theo đợt sáp nhập 2025), trong khi app.py/GeoJSON đã
-# đổi đúng thành "Thuận Hóa" - lệch nhãn sẽ khiến việc groupby địa phương trong log/artifact không
-# khớp với tên hiển thị trên map/UI.
-LOCATION_STEM_TO_NAME: dict[str, str] = {
-    "TP_Hue_10years": "Thuận Hóa",
-    "Huong_Thuy_10years": "Hương Thủy",
-    "Huong_Tra_10years": "Hương Trà",
-    "Phu_Vang_10years": "Phú Vang",
-    "Quang_Dien_10years": "Quảng Điền",
-}
-
-
 def normalize_location_name(file_path: str) -> str:
     """Chuẩn hóa tên địa phương từ tên file CSV - ưu tiên tra `LOCATION_STEM_TO_NAME`, chỉ fallback
     suy diễn từ filename nếu gặp file lạ ngoài 5 địa phương đã khai báo."""
@@ -367,7 +359,7 @@ def compute_train_only_medians(
     return train_only_df[feature_columns].median()
 
 
-def create_multiclass_flood_label(df: pd.DataFrame) -> pd.DataFrame:
+def create_multiclass_flood_label(df: pd.DataFrame, include_rain_3day: bool = True) -> pd.DataFrame:
     """
     Tạo nhãn 3 lớp dựa trên luật chuyên gia.
 
@@ -387,6 +379,12 @@ def create_multiclass_flood_label(df: pd.DataFrame) -> pd.DataFrame:
     luỹ của CHÍNH ngày T) - KHÔNG biết phần mưa thật của ngày T+1 (phần cần dự đoán) - giống hệt nguyên
     tắc dùng xu hướng/quán tính thời tiết trong dự báo thật, khác bản chất với lỗi rò rỉ đã sửa trước
     đó (khi đó model thấy TRỌN VẸN 100% giá trị dùng để tính nhãn, không phải chỉ 2/3).
+
+    `include_rain_3day=False`: BỎ 2 điều kiện `rain_3day` khỏi luật - CHỈ dùng cho arm "(-) rain_3day
+    rule" của `ablation_study.py` (đo tác động thật của riêng điều kiện này bằng leave-one-out), KHÔNG
+    dùng cho pipeline huấn luyện thật. Tách bằng tham số thay vì giữ 1 bản copy tay riêng trong
+    ablation_study.py - tránh 2 bản luật nhãn lệch nhau âm thầm nếu sau này chỉnh ngưỡng ở đây mà quên
+    cập nhật bản copy.
     """
     labeled_df = df.copy()
 
@@ -400,9 +398,12 @@ def create_multiclass_flood_label(df: pd.DataFrame) -> pd.DataFrame:
         labeled_df[column] = labeled_df[column].fillna(train_only_medians[column])
 
     rain = labeled_df["Lượng_mưa_mm"].fillna(0)
-    rain_3day = labeled_df[RAIN_ROLLING_3D_COL].fillna(0)
     soil = labeled_df["Độ_ẩm_đất"].fillna(0)
     tide = labeled_df["Chiều_cao_triều_m"].fillna(0)
+    # rain_3day=0 (thay vì bỏ hẳn điều kiện) khi include_rain_3day=False vẫn ĐÚNG hệt "bỏ điều kiện" -
+    # vì ngưỡng so sánh (>100, >50) luôn dương, "0 > 100"/"0 > 50" luôn False, không đóng góp gì vào
+    # heavy_flood_mask/light_flood_mask - tương đương xoá hẳn 2 điều kiện đó khỏi luật.
+    rain_3day = labeled_df[RAIN_ROLLING_3D_COL].fillna(0) if include_rain_3day else 0.0
 
     heavy_flood_mask = (
         (rain > 50)

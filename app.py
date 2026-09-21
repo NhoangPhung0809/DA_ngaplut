@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 from streamlit_folium import st_folium
 
 from shared_constants import FEATURE_COLS as _SHARED_FEATURE_COLS
-from shared_constants import RAIN_LAG1_COL, RAIN_LAG2_COL, RAIN_ROLLING_3D_COL
+from shared_constants import LOCATION_STEM_TO_NAME, RAIN_LAG1_COL, RAIN_LAG2_COL, RAIN_ROLLING_3D_COL
 
 # Tải biến môi trường từ file .env nếu có (ví dụ TOMTOM_API_KEY).
 load_dotenv()
@@ -357,13 +357,6 @@ LOCATION_HISTORICAL_FILE: dict[str, str] = {
     "Hương Trà": "Huong_Tra_10years.csv",
     "Phú Vang": "Phu_Vang_10years.csv",
     "Quảng Điền": "Quang_Dien_10years.csv",
-}
-
-# Chiều NGƯỢC LẠI của `LOCATION_HISTORICAL_FILE` (filename -> tên địa phương) - dùng ở
-# `load_eda_sample_dataframe()` để tra ĐÚNG tên hiển thị hiện hành, tránh tự suy tên từ filename (từng
-# sinh nhãn "TP Hue" không dấu, lệch với "Thuận Hóa" dùng ở mọi nơi khác trong app).
-HISTORICAL_FILE_TO_LOCATION_NAME: dict[str, str] = {
-    filename: location_name for location_name, filename in LOCATION_HISTORICAL_FILE.items()
 }
 
 # Danh sách đặc trưng đầu vào của model - import từ `shared_constants.py` (dùng CHUNG với
@@ -1112,14 +1105,14 @@ def load_eda_sample_dataframe() -> pd.DataFrame:
             df = pd.read_csv(csv_file, on_bad_lines="skip", engine="python")
         except Exception:
             continue
-        # Tra CHÍNH XÁC theo `LOCATION_HISTORICAL_FILE` (khớp key với REAL_MONITORED_LOCATIONS) thay vì
-        # tự suy tên từ filename (`csv_file.stem.replace("_10years", "").replace("_", " ")`) - cách cũ
-        # từng sinh ra "TP Hue" (KHÔNG dấu, từ file `TP_Hue_10years.csv`) hiển thị lẫn trong biểu đồ EDA
+        # Tra CHÍNH XÁC theo `LOCATION_STEM_TO_NAME` (shared_constants.py - nguồn DUY NHẤT dùng chung
+        # với `analyze_and_train.py`/`eda_analysis.py`) thay vì tự suy tên từ filename - cách cũ từng
+        # sinh ra "TP Hue" (KHÔNG dấu, từ file `TP_Hue_10years.csv`) hiển thị lẫn trong biểu đồ EDA
         # trong khi mọi nơi khác trong app đã đổi đúng thành "Thuận Hóa" - 2 nhãn khác nhau cho CÙNG 1
         # địa phương gây hiểu lầm là 2 vùng riêng biệt. Fallback về cách cũ CHỈ khi file không nằm trong
         # danh sách 5 địa phương đã khai báo (an toàn hơn là để trống).
-        df["Địa phương"] = HISTORICAL_FILE_TO_LOCATION_NAME.get(
-            csv_file.name, csv_file.stem.replace("_10years", "").replace("_", " ").strip()
+        df["Địa phương"] = LOCATION_STEM_TO_NAME.get(
+            csv_file.stem, csv_file.stem.replace("_10years", "").replace("_", " ").strip()
         )
         frames.append(df)
 
@@ -3330,6 +3323,22 @@ là model đang BỎ SÓT phần lớn các trường hợp ngập nặng thật
     return report_html.encode("utf-8")
 
 
+@st.cache_data(show_spinner=False)
+def _build_evaluation_report_html_cached(
+    _evaluation_metrics: dict, _deployment_config: dict, _runtime_info: dict, cache_signature: tuple
+) -> bytes:
+    """
+    Bọc cache cho `build_evaluation_report_html()` - hàm đó dựng LẠI 3 biểu đồ Plotly + đọc lại nhiều
+    file JSON (confusion_matrix/feature_importance/ctgan/roc_curve) + serialize HTML MỖI LẦN được gọi.
+    Nếu gọi trực tiếp từ `render_sidebar()` (hiển thị ở MỌI tab) thì hàm nặng này chạy lại trên MỌI lần
+    rerun của Streamlit (bấm bất kỳ nút nào ở bất kỳ tab nào), dù người dùng chưa chắc đã bấm nút xuất
+    báo cáo - lãng phí thật, phát hiện qua code review. Tham số bắt đầu bằng `_` không được Streamlit
+    hash (tránh lỗi hash dict lớn) - `cache_signature` (mtime các file liên quan) mới là cache key thật,
+    theo đúng pattern đã dùng ở `_load_evaluation_artifacts_cached()`/`_load_ctgan_comparison_artifacts_cached()`.
+    """
+    return build_evaluation_report_html(_evaluation_metrics, _deployment_config, _runtime_info)
+
+
 def render_evaluation_tab() -> None:
     """
     Nội dung Tab 3 - Đánh giá mô hình, bước THỨ BA của vòng đời Data Science.
@@ -5290,9 +5299,15 @@ def render_sidebar() -> None:
             else "unknown"
         )
         generated_at_slug = str(deployment_config.get("generated_at", "unknown")).replace(":", "-").replace(" ", "_")
+        report_cache_signature = (
+            DEPLOYMENT_CONFIG_PATH.stat().st_mtime if DEPLOYMENT_CONFIG_PATH.exists() else None,
+            CTGAN_DISTRIBUTION_PATH.stat().st_mtime if CTGAN_DISTRIBUTION_PATH.exists() else None,
+        )
         st.sidebar.download_button(
             "📥 Xuất báo cáo đánh giá",
-            data=build_evaluation_report_html(evaluation_metrics, deployment_config, runtime_info),
+            data=_build_evaluation_report_html_cached(
+                evaluation_metrics, deployment_config, runtime_info, report_cache_signature
+            ),
             file_name=f"bao_cao_danh_gia_{balancing_method_for_export}_{generated_at_slug}.html",
             mime="text/html",
             use_container_width=True,
