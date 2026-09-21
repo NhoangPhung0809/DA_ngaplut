@@ -2311,8 +2311,9 @@ def render_calibration_study_section() -> None:
     Khối "Calibration Study" - kiểm tra xác suất model dự đoán ra có ĐÁNG TIN không: khi model nói "70%
     khả năng Ngập nặng", THỰC TẾ có đúng khoảng 70% các lần đó xảy ra ngập thật không - khác với F1/
     Accuracy (chỉ quan tâm lớp dự đoán CUỐI CÙNG, không quan tâm độ tin cậy đi kèm). Xem
-    `calibration_study.py` (script độc lập, chạy bằng `python3 calibration_study.py`, dùng CÙNG cấu
-    hình "Full" với `ablation_study.py` để 2 nghiên cứu nhất quán, có thể trích dẫn chung 1 bộ kết quả).
+    `calibration_study.py` (script độc lập, chạy bằng `python3 calibration_study.py`) - chạy 2 ARM
+    (SMOTE vs None) trên CÙNG 1 tập test để so sánh trực tiếp: cân bằng dữ liệu có làm lệch xác suất
+    dự đoán so với KHÔNG cân bằng gì hay không (lệch "prior" - phát hiện qua code review).
     """
     st.caption(
         "Xác suất model đưa ra có phản ánh đúng khả năng xảy ra thật không - quan trọng vì app hiển thị "
@@ -2327,44 +2328,56 @@ def render_calibration_study_section() -> None:
         )
         return
 
-    per_class_results = payload.get("results", [])
-    if not per_class_results:
-        st.info("File kết quả tồn tại nhưng chưa có lớp nào được đánh giá.")
+    arms = payload.get("arms")
+    if not arms:
+        st.warning(
+            "File kết quả đang ở định dạng CŨ (chỉ 1 cấu hình SMOTE, chưa có arm 'None' để so sánh) - "
+            "hãy chạy lại `python3 calibration_study.py` để có bản so sánh SMOTE vs None mới."
+        )
         return
 
     st.caption(f"Kết quả gần nhất: {payload.get('generated_at', 'không rõ thời điểm')}.")
 
-    st.plotly_chart(build_reliability_diagram_figure(per_class_results), use_container_width=True)
+    arm_columns = st.columns(len(arms))
+    for arm_column, arm in zip(arm_columns, arms):
+        with arm_column:
+            per_class_results = arm.get("results", [])
+            st.markdown(f"#### {arm['arm_name']}")
+            if not per_class_results:
+                st.info("Chưa có lớp nào được đánh giá cho arm này.")
+                continue
+            st.plotly_chart(build_reliability_diagram_figure(per_class_results), use_container_width=True)
 
-    metric_df = pd.DataFrame(
-        [
-            {
-                "Lớp": f"{r['class_label']} - {r['class_name']}",
-                "Brier Score (càng thấp càng tốt)": r["brier_score"],
-                "ECE (càng thấp càng tốt)": r["ece"],
-                "Số mẫu dương / tổng": f"{r['n_positive']:,} / {r['n_total']:,}",
-            }
-            for r in per_class_results
-        ]
-    )
-    render_styled_table(
-        build_contrast_styler(
-            metric_df,
-            numeric_formats={
-                "Brier Score (càng thấp càng tốt)": "{:.4f}",
-                "ECE (càng thấp càng tốt)": "{:.4f}",
-            },
-        ),
-        height=min(120 + 38 * len(metric_df), 260),
-    )
+            metric_df = pd.DataFrame(
+                [
+                    {
+                        "Lớp": f"{r['class_label']} - {r['class_name']}",
+                        "Brier Score": r["brier_score"],
+                        "ECE": r["ece"],
+                        "Số mẫu dương / tổng": f"{r['n_positive']:,} / {r['n_total']:,}",
+                    }
+                    for r in per_class_results
+                ]
+            )
+            render_styled_table(
+                build_contrast_styler(
+                    metric_df,
+                    numeric_formats={"Brier Score": "{:.4f}", "ECE": "{:.4f}"},
+                ),
+                height=min(120 + 38 * len(metric_df), 260),
+            )
 
     render_chart_discussion(
         "Đường nào NẰM DƯỚI đường chéo nghĩa là model 'quá tự tin' ở vùng xác suất đó (nói cao hơn khả "
         "năng thật xảy ra) - đáng lưu ý nhất với lớp Ngập nặng vì liên quan trực tiếp tới mức độ tin "
-        "cậy của cảnh báo hiển thị cho người dùng cuối. Brier Score và ECE càng gần 0 càng đáng tin. "
-        "Nếu phát hiện lệch nhiều, có thể hiệu chỉnh lại bằng `sklearn.calibration.CalibratedClassifierCV` "
-        "(Platt scaling hoặc isotonic regression) fit trên tập validation riêng, không đụng vào tập "
-        "train/test đã dùng đánh giá F1-Macro ở trên."
+        "cậy của cảnh báo hiển thị cho người dùng cuối. Brier Score và ECE càng gần 0 càng đáng tin. So "
+        "sánh 2 cột trên: nếu arm 'None' có đường gần đường chéo hơn VÀ Brier/ECE thấp hơn arm 'SMOTE' "
+        "ở lớp Ngập nhẹ/Ngập nặng, đây là bằng chứng THẬT cho thấy việc cân bằng dữ liệu (SMOTE) đang "
+        "làm lệch xác suất dự đoán do lệch tỷ lệ lớp giữa lúc train (~1:1:1 sau SMOTE) và lúc suy luận "
+        "(tỷ lệ thật, mất cân bằng nặng) - không phải lỗi model, mà là đánh đổi cố hữu của việc cân bằng "
+        "dữ liệu. Có thể hiệu chỉnh lại bằng `sklearn.calibration.CalibratedClassifierCV` (Platt scaling "
+        "hoặc isotonic regression) hoặc hiệu chỉnh prior theo công thức, fit trên tập validation riêng, "
+        "không đụng vào tập train/test đã dùng đánh giá F1-Macro ở trên."
     )
 
 
