@@ -106,7 +106,10 @@ def run_arm(name: str, modeling_df: pd.DataFrame, drop_lag_features: bool, apply
     }
 
 
-def main() -> None:
+def run_ablation_study() -> None:
+    """Đặt tên riêng (khác `main()`) để `training_worker.py` import và gọi lại được sau khi huấn luyện
+    chính hoàn tất - GÓP Ý CỦA GVHD/người dùng: tự động chạy kèm nút "Bắt đầu Huấn luyện Nền", giống
+    Time Series CV đã làm, thay vì phải mở terminal chạy tay `python3 ablation_study.py` riêng."""
     print("Đang nạp và gộp dữ liệu thô...")
     raw_df = load_and_concatenate_csvs()
     daily_feature_df = build_daily_feature_dataset(raw_df)
@@ -153,4 +156,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_ablation_study()
