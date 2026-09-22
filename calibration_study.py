@@ -19,6 +19,10 @@ suông. Arm "CTGAN" cho biết lệch prior này có phụ thuộc vào PHƯƠNG
 vs CTGAN sinh bằng GAN) hay không - dự đoán: KHÔNG, vì nguyên nhân là TỶ LỆ lớp sau cân bằng, không
 phải chất lượng/cách sinh mẫu (xem giải thích đã trao đổi).
 
+DÙNG ĐÚNG MODEL TỐT NHẤT ĐANG TRIỂN KHAI THẬT cho cả 3 arm (xem `study_common.load_best_tabular_model_
+spec()`) - KHÔNG dùng cố định Random Forest như bản đầu tiên (phản hồi thật đã nhận được: cố định 1
+model tuỳ ý không phản ánh đúng model thật đang phục vụ người dùng).
+
 KHÔNG dùng trực tiếp `apply_gan_data_augmentation()`/`balance_training_data()` thật của
 `analyze_and_train.py` - hàm đó có side-effect gọi `export_ctgan_comparison_artifacts()`, ghi ĐÈ lên
 đúng file (`data_before_ctgan.csv`/`data_after_ctgan.csv`/`ctgan_class_distribution.json`) mà Tab 2
@@ -45,8 +49,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.base import clone
 from sklearn.calibration import calibration_curve
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import brier_score_loss
 from sklearn.preprocessing import StandardScaler
 
@@ -65,18 +69,10 @@ from analyze_and_train import (
     load_and_concatenate_csvs,
     preprocess_features,
 )
+from study_common import load_best_tabular_model_spec
 
 BASE_DIR = Path(__file__).resolve().parent
 RESULTS_PATH = BASE_DIR / "data" / "calibration_study_results.json"
-
-RF_FIXED_PARAMS = dict(
-    n_estimators=300,
-    max_depth=12,
-    min_samples_leaf=5,
-    min_samples_split=10,
-    random_state=42,
-    n_jobs=-1,
-)
 
 CLASS_NAMES = {0: "An toàn", 1: "Ngập nhẹ", 2: "Ngập nặng"}
 N_BINS = 10
@@ -160,6 +156,7 @@ def run_calibration_arm(
     y_train: pd.Series,
     X_test_scaled: pd.DataFrame,
     y_test: pd.Series,
+    base_model: object,
 ) -> dict:
     """Huấn luyện 1 arm (SMOTE/CTGAN/None) rồi tính reliability diagram/Brier/ECE trên CÙNG 1 tập test -
     tách hàm này để `run_calibration_study()` gọi nhiều lần với `balancing_method` khác nhau, đảm bảo
@@ -179,8 +176,8 @@ def run_calibration_arm(
     else:
         X_train_balanced, y_train_balanced = X_train_scaled, y_train
 
-    print(f"Huấn luyện RandomForestClassifier (tham số cố định) - train_rows={len(X_train_balanced)}...")
-    model = RandomForestClassifier(**RF_FIXED_PARAMS)
+    print(f"Huấn luyện {base_model.__class__.__name__} - train_rows={len(X_train_balanced)}...")
+    model = clone(base_model)
     model.fit(X_train_balanced, y_train_balanced)
 
     y_proba = model.predict_proba(X_test_scaled)
@@ -245,16 +242,17 @@ def run_calibration_study() -> None:
     X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=FEATURE_COLS, index=X_train.index)
     X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=FEATURE_COLS, index=X_test.index)
 
+    model_name, base_model = load_best_tabular_model_spec()
+
     arms = [
-        run_calibration_arm("SMOTE (cân bằng)", "smote", X_train_scaled, y_train, X_test_scaled, y_test),
-        run_calibration_arm("CTGAN (cân bằng)", "gan", X_train_scaled, y_train, X_test_scaled, y_test),
-        run_calibration_arm("None (không cân bằng)", "none", X_train_scaled, y_train, X_test_scaled, y_test),
+        run_calibration_arm("SMOTE (cân bằng)", "smote", X_train_scaled, y_train, X_test_scaled, y_test, base_model=base_model),
+        run_calibration_arm("CTGAN (cân bằng)", "gan", X_train_scaled, y_train, X_test_scaled, y_test, base_model=base_model),
+        run_calibration_arm("None (không cân bằng)", "none", X_train_scaled, y_train, X_test_scaled, y_test, base_model=base_model),
     ]
 
     payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "model_used": "RandomForestClassifier (tham số cố định, cấu hình Full giống ablation_study.py)",
-        "fixed_params": RF_FIXED_PARAMS,
+        "model_used": model_name,
         "n_bins": N_BINS,
         "test_rows": int(len(X_test)),
         "arms": arms,
