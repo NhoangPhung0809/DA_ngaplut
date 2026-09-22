@@ -3,9 +3,11 @@ Ablation Study - đo tác động THẬT của từng thành phần trong pipeli
 phần ra khỏi cấu hình "Full" mỗi lần, rồi so sánh F1-Macro trên CÙNG 1 tập test - trả lời câu hỏi hội
 đồng hay hỏi: "mỗi thành phần đóng góp bao nhiêu, có thật sự cần không?".
 
-DÙNG RandomForestClassifier VỚI THAM SỐ CỐ ĐỊNH (giống hệt `build_model_registry()` trong
-`analyze_and_train.py`) CHO CẢ 4 CẤU HÌNH - không tune lại hyperparameter riêng cho từng cấu hình, vì
-mục tiêu là cô lập đúng 1 biến đang test, không lẫn với hiệu ứng tối ưu hyperparameter khác nhau.
+DÙNG ĐÚNG MODEL TỐT NHẤT ĐANG TRIỂN KHAI THẬT (xem `study_common.load_best_tabular_model_spec()`) CHO
+CẢ 4 CẤU HÌNH - KHÔNG dùng cố định Random Forest như bản đầu tiên (phản hồi thật đã nhận được: cố định
+1 model tuỳ ý không phản ánh đúng model thật đang phục vụ người dùng). Không tune lại hyperparameter
+riêng cho từng cấu hình, vì mục tiêu là cô lập đúng 1 biến đang test, không lẫn với hiệu ứng tối ưu
+hyperparameter khác nhau.
 
 DÙNG SMOTE (không phải CTGAN) làm phương pháp cân bằng cho các arm CÓ cân bằng - lý do: hàm thật
 `apply_gan_data_augmentation()`/`apply_smote_to_training_data()` trong `analyze_and_train.py` hardcode
@@ -29,7 +31,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.base import clone
 from sklearn.metrics import classification_report, f1_score
 from sklearn.preprocessing import StandardScaler
 
@@ -44,23 +46,17 @@ from analyze_and_train import (
     preprocess_features,
 )
 from shared_constants import RAIN_LAG1_COL, RAIN_LAG2_COL, RAIN_ROLLING_3D_COL
+from study_common import load_best_tabular_model_spec
 
 BASE_DIR = Path(__file__).resolve().parent
 RESULTS_PATH = BASE_DIR / "data" / "ablation_study_results.json"
 
-RF_FIXED_PARAMS = dict(
-    n_estimators=300,
-    max_depth=12,
-    min_samples_leaf=5,
-    min_samples_split=10,
-    random_state=42,
-    n_jobs=-1,
-)
-
 LAG_COLS = [RAIN_LAG1_COL, RAIN_LAG2_COL, RAIN_ROLLING_3D_COL]
 
 
-def run_arm(name: str, modeling_df: pd.DataFrame, drop_lag_features: bool, apply_balancing: bool) -> dict:
+def run_arm(
+    name: str, modeling_df: pd.DataFrame, drop_lag_features: bool, apply_balancing: bool, base_model: object
+) -> dict:
     print(f"\n{'=' * 70}\nARM: {name}\n{'=' * 70}")
 
     X_train, X_test, y_train, y_test = chronological_train_test_split(modeling_df, train_ratio=0.8)
@@ -84,7 +80,7 @@ def run_arm(name: str, modeling_df: pd.DataFrame, drop_lag_features: bool, apply
         X_train_balanced, y_train_balanced = X_train_scaled, y_train
         balancing_method = "none"
 
-    model = RandomForestClassifier(**RF_FIXED_PARAMS)
+    model = clone(base_model)
     model.fit(X_train_balanced, y_train_balanced)
     y_pred = model.predict(X_test_scaled)
 
@@ -121,24 +117,25 @@ def run_ablation_study() -> None:
     modeling_df_full = preprocess_features(labeled_full)
     modeling_df_no_rain3day = preprocess_features(labeled_no_rain3day)
 
+    model_name, base_model = load_best_tabular_model_spec()
+
     results = []
     results.append(
-        run_arm("1. Full (đủ đặc trưng + đủ luật nhãn + SMOTE)", modeling_df_full, drop_lag_features=False, apply_balancing=True)
+        run_arm("1. Full (đủ đặc trưng + đủ luật nhãn + SMOTE)", modeling_df_full, drop_lag_features=False, apply_balancing=True, base_model=base_model)
     )
     results.append(
-        run_arm("2. (-) Lag/Rolling mưa", modeling_df_full, drop_lag_features=True, apply_balancing=True)
+        run_arm("2. (-) Lag/Rolling mưa", modeling_df_full, drop_lag_features=True, apply_balancing=True, base_model=base_model)
     )
     results.append(
-        run_arm("3. (-) Điều kiện rain_3day trong luật nhãn", modeling_df_no_rain3day, drop_lag_features=False, apply_balancing=True)
+        run_arm("3. (-) Điều kiện rain_3day trong luật nhãn", modeling_df_no_rain3day, drop_lag_features=False, apply_balancing=True, base_model=base_model)
     )
     results.append(
-        run_arm("4. (-) Cân bằng dữ liệu (giữ nguyên phân phối gốc)", modeling_df_full, drop_lag_features=False, apply_balancing=False)
+        run_arm("4. (-) Cân bằng dữ liệu (giữ nguyên phân phối gốc)", modeling_df_full, drop_lag_features=False, apply_balancing=False, base_model=base_model)
     )
 
     payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "model_used": "RandomForestClassifier (tham số cố định, không tune riêng từng arm)",
-        "fixed_params": RF_FIXED_PARAMS,
+        "model_used": model_name,
         "note": "T->T+1 shift KHÔNG ablate ở đây - đã có bằng chứng thật từ trước (LSTM F1 0.9263 -> 0.4876 khi sửa rò rỉ).",
         "results": results,
     }

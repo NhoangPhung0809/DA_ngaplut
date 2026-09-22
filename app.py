@@ -2181,7 +2181,11 @@ def render_ablation_study_section() -> None:
         st.info("File kết quả tồn tại nhưng chưa có arm nào được đánh giá.")
         return
 
-    st.caption(f"Kết quả gần nhất: {payload.get('generated_at', 'không rõ thời điểm')}.")
+    st.caption(
+        f"Kết quả gần nhất: {payload.get('generated_at', 'không rõ thời điểm')} - "
+        f"model dùng để đo: **{payload.get('model_used', 'không rõ')}** "
+        "(đúng model tốt nhất đang triển khai thật, không cố định 1 model tuỳ ý)."
+    )
 
     baseline_f1 = results[0]["f1_macro"]
     summary_rows = [
@@ -2336,7 +2340,11 @@ def render_calibration_study_section() -> None:
         )
         return
 
-    st.caption(f"Kết quả gần nhất: {payload.get('generated_at', 'không rõ thời điểm')}.")
+    st.caption(
+        f"Kết quả gần nhất: {payload.get('generated_at', 'không rõ thời điểm')} - "
+        f"model dùng để đo: **{payload.get('model_used', 'không rõ')}** "
+        "(đúng model tốt nhất đang triển khai thật, không cố định 1 model tuỳ ý)."
+    )
 
     arm_columns = st.columns(len(arms))
     for arm_column, arm in zip(arm_columns, arms):
