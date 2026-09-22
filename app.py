@@ -1356,15 +1356,32 @@ def apply_dark_plotly_theme(fig, height: int = 420) -> None:
 
 
 def render_correlation_heatmap_interactive(eda_df: pd.DataFrame) -> None:
-    """Ma trận tương quan Pearson (Plotly heatmap tương tác) - thay cho `correlation_heatmap.png` tĩnh
-    do `eda_analysis.py` sinh sẵn. Tính TRỰC TIẾP từ `eda_df` (dữ liệu lịch sử thật đang nạp trong
-    app), không phụ thuộc file ảnh xuất sẵn."""
-    numeric_cols = [col for col in [*FEATURE_COLS_FOR_INFERENCE, "Nguy_cơ_ngập"] if col in eda_df.columns]
-    if eda_df.empty or len(numeric_cols) < 2:
+    """
+    Ma trận tương quan (Plotly heatmap tương tác) - thay cho `correlation_heatmap.png` tĩnh do
+    `eda_analysis.py` sinh sẵn.
+
+    BUG PHƯƠNG PHÁP THẬT ĐÃ GẶP (GVHD góp ý "có thể bị sai phương pháp"), sửa 2 chỗ:
+
+    1) GỘP VỀ THEO NGÀY trước khi tính (`aggregate_eda_df_to_daily()`) - trước đây tính thẳng trên
+       `eda_df` THEO GIỜ, cùng lỗi granularity đã gặp ở biểu đồ "Phân bố lượng mưa theo lớp" (mưa 1
+       giờ gần như luôn ~0mm, trong khi nhãn `Nguy_cơ_ngập` được gán theo NGƯỠNG MƯA CẢ NGÀY) - tương
+       quan tính trên dữ liệu giờ bị nhiễu pha loãng, không phản ánh đúng quan hệ THẬT ở granularity
+       model thực sự học (theo ngày).
+
+    2) DÙNG SPEARMAN (hạng, rank-based) THAY VÌ PEARSON (tuyến tính) - luật gán nhãn
+       (`create_multiclass_flood_label()`) là luật NGƯỠNG (vd "mưa > 50mm mới tính Ngập nặng"), tức
+       quan hệ giữa mưa và nhãn về bản chất là BẬC THANG/PHI TUYẾN, không phải đường thẳng. Pearson chỉ
+       đo được quan hệ TUYẾN TÍNH nên sẽ ĐÁNH GIÁ THẤP mức tương quan thật trong trường hợp này; Spearman
+       đo quan hệ ĐƠN ĐIỆU (monotonic) nói chung - phù hợp hơn hẳn cho cả biến ngưỡng/phi tuyến lẫn biến
+       mục tiêu dạng thứ bậc (0/1/2) như `Nguy_cơ_ngập`.
+    """
+    daily_df = aggregate_eda_df_to_daily(eda_df)
+    numeric_cols = [col for col in [*FEATURE_COLS_FOR_INFERENCE, "Nguy_cơ_ngập"] if col in daily_df.columns]
+    if daily_df.empty or len(numeric_cols) < 2:
         st.info("Chưa đủ dữ liệu số để tính ma trận tương quan.")
         return
 
-    corr_df = eda_df[numeric_cols].corr(method="pearson").round(2)
+    corr_df = daily_df[numeric_cols].corr(method="spearman").round(2)
     fig = go.Figure(
         data=go.Heatmap(
             z=corr_df.values,
