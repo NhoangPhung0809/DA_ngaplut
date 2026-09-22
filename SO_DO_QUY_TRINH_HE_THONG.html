@@ -302,14 +302,15 @@
     <div class="eyebrow">Đồ án tốt nghiệp · Hệ thống dự báo &amp; cảnh báo ngập lụt</div>
     <h1>Sơ đồ Quy trình Dự báo Ngập lụt</h1>
     <p class="subtitle">
-      Toàn bộ luồng xử lý từ thu thập dữ liệu khí tượng - thuỷ văn đến huấn luyện 17 mô hình và ứng dụng
+      Toàn bộ luồng xử lý từ thu thập dữ liệu khí tượng - thuỷ văn đến huấn luyện 21 mô hình và ứng dụng
       cảnh báo thời gian thực cho 5 địa phương tại Thừa Thiên Huế, trích trực tiếp từ
-      <code style="font-family:'IBM Plex Mono',monospace; background:var(--surface-2); padding:1px 6px; border-radius:4px;">analyze_and_train.py</code>
+      <code style="font-family:'IBM Plex Mono',monospace; background:var(--surface-2); padding:1px 6px; border-radius:4px;">analyze_and_train.py</code>,
+      <code style="font-family:'IBM Plex Mono',monospace; background:var(--surface-2); padding:1px 6px; border-radius:4px;">training_worker.py</code>
       và <code style="font-family:'IBM Plex Mono',monospace; background:var(--surface-2); padding:1px 6px; border-radius:4px;">app.py</code>.
     </p>
     <div class="meta-row">
-      <span class="meta-chip">7 giai đoạn</span>
-      <span class="meta-chip">17 mô hình</span>
+      <span class="meta-chip">8 giai đoạn</span>
+      <span class="meta-chip">21 mô hình</span>
       <span class="meta-chip">F1-Macro làm thước đo chính</span>
       <button id="theme-toggle" type="button" aria-label="Đổi giao diện sáng / tối">
         <span id="theme-icon" aria-hidden="true">◐</span>
@@ -366,7 +367,7 @@
     <div class="stage-card">
       <div class="stage-num">05</div>
       <div class="stage-body">
-        <h3>Huấn luyện &amp; Đánh giá 17 mô hình</h3>
+        <h3>Huấn luyện &amp; Đánh giá 21 mô hình</h3>
         <p>Nhóm dạng bảng (tinh chỉnh bằng GridSearchCV / Optuna), dạng chuỗi (LSTM/GRU/1D-CNN), Hybrid và thống kê - đánh giá bằng F1-Macro, ROC-AUC, Confusion Matrix.</p>
       </div>
     </div>
@@ -379,6 +380,13 @@
     </div>
     <div class="stage-card">
       <div class="stage-num">07</div>
+      <div class="stage-body">
+        <h3>Ablation Study &amp; Calibration Study</h3>
+        <p>Tự động chạy sau khi triển khai (subprocess riêng, tránh crash native kéo sập tiến trình chính) - đo đóng góp từng thành phần và độ tin cậy xác suất, trên ĐÚNG model vừa triển khai.</p>
+      </div>
+    </div>
+    <div class="stage-card">
+      <div class="stage-num">08</div>
       <div class="stage-body">
         <h3>Ứng dụng thực tế (Streamlit)</h3>
         <p>Lấy thời tiết/triều thời gian thực, tính lại đặc trưng lag, suy luận bằng model đã triển khai, hiển thị ở tab Dự báo và tab Bản đồ tránh ngập.</p>
@@ -452,12 +460,12 @@
       "D4 --> D5",
       "end",
 
-      'subgraph S5["05 · Huấn luyện &amp; Đánh giá 17 mô hình"]',
+      'subgraph S5["05 · Huấn luyện &amp; Đánh giá 21 mô hình"]',
       "direction TB",
-      'E1["Dạng bảng · 9 mô hình<br/>RF · KNN · SVC · AdaBoost · XGBoost ·<br/>LightGBM · CatBoost · Linear · Polynomial"]:::process',
-      'E2["Dạng chuỗi<br/>LSTM · GRU · 1D-CNN"]:::process',
-      'E3["Hybrid<br/>LSTM + XGBoost"]:::process',
-      'E4["Thống kê<br/>ARIMA · SARIMA"]:::process',
+      'E1["Dạng bảng · 13 mô hình<br/>RF · KNN · SVC · AdaBoost · XGBoost ·<br/>Logistic Regression · Naive Bayes ·<br/>Decision Tree · MLP · LightGBM ·<br/>CatBoost · Linear · Polynomial"]:::process',
+      'E2["Dạng chuỗi · 4 mô hình<br/>LSTM · GRU · 1D-CNN · CNN-LSTM"]:::process',
+      'E3["Hybrid · 2 mô hình<br/>LSTM+XGBoost · LSTM+GRU+XGBoost"]:::process',
+      'E4["Thống kê · 2 mô hình<br/>ARIMA · SARIMA"]:::process',
       'E5["train_and_evaluate_models()<br/>GridSearchCV (RF) / Optuna (XGBoost)"]:::process',
       'E6[("F1-Macro · Accuracy ·<br/>Confusion Matrix · ROC-AUC")]:::store',
       "E1 --> E5",
@@ -475,7 +483,20 @@
       "F1 --> F2 --> F3",
       "end",
 
-      'subgraph S7["07 · Ứng dụng thực tế (Streamlit)"]',
+      'subgraph S7["07 · Ablation Study &amp; Calibration Study"]',
+      "direction TB",
+      'H1["load_best_tabular_model_spec()<br/>nạp đúng model đang triển khai thật<br/>(fallback model dạng bảng tốt nhất<br/>nếu model thắng là dạng chuỗi/hybrid)"]:::process',
+      'H2["Ablation Study<br/>leave-one-out: lag/rolling,<br/>luật nhãn, cân bằng dữ liệu"]:::process',
+      'H3["Calibration Study<br/>SMOTE vs CTGAN vs None:<br/>Brier Score · ECE · reliability diagram"]:::process',
+      'H4[("ablation_study_results.json<br/>calibration_study_results.json")]:::store',
+      'H5["subprocess.run()<br/>cô lập crash native (vd CTGAN/Triton)<br/>khỏi tiến trình huấn luyện chính"]:::altpath',
+      "H1 --> H2 --> H4",
+      "H1 --> H3 --> H4",
+      "H2 -.-> H5",
+      "H3 -.-> H5",
+      "end",
+
+      'subgraph S8["08 · Ứng dụng thực tế (Streamlit)"]',
       "direction TB",
       'G1(["Open-Meteo forecast +<br/>Tomorrow.io mưa + triều thời gian thực"]):::source',
       'G2["add_rain_lag_features_inference()"]:::process',
@@ -498,6 +519,7 @@
       "D5 --> E1",
       "D6 -.-> E6",
       "E6 --> F1",
+      "F3 --> H1",
       "F3 --> G3"
     ].join("\n");
   }

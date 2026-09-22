@@ -1356,15 +1356,32 @@ def apply_dark_plotly_theme(fig, height: int = 420) -> None:
 
 
 def render_correlation_heatmap_interactive(eda_df: pd.DataFrame) -> None:
-    """Ma trận tương quan Pearson (Plotly heatmap tương tác) - thay cho `correlation_heatmap.png` tĩnh
-    do `eda_analysis.py` sinh sẵn. Tính TRỰC TIẾP từ `eda_df` (dữ liệu lịch sử thật đang nạp trong
-    app), không phụ thuộc file ảnh xuất sẵn."""
-    numeric_cols = [col for col in [*FEATURE_COLS_FOR_INFERENCE, "Nguy_cơ_ngập"] if col in eda_df.columns]
-    if eda_df.empty or len(numeric_cols) < 2:
+    """
+    Ma trận tương quan (Plotly heatmap tương tác) - thay cho `correlation_heatmap.png` tĩnh do
+    `eda_analysis.py` sinh sẵn.
+
+    BUG PHƯƠNG PHÁP THẬT ĐÃ GẶP (GVHD góp ý "có thể bị sai phương pháp"), sửa 2 chỗ:
+
+    1) GỘP VỀ THEO NGÀY trước khi tính (`aggregate_eda_df_to_daily()`) - trước đây tính thẳng trên
+       `eda_df` THEO GIỜ, cùng lỗi granularity đã gặp ở biểu đồ "Phân bố lượng mưa theo lớp" (mưa 1
+       giờ gần như luôn ~0mm, trong khi nhãn `Nguy_cơ_ngập` được gán theo NGƯỠNG MƯA CẢ NGÀY) - tương
+       quan tính trên dữ liệu giờ bị nhiễu pha loãng, không phản ánh đúng quan hệ THẬT ở granularity
+       model thực sự học (theo ngày).
+
+    2) DÙNG SPEARMAN (hạng, rank-based) THAY VÌ PEARSON (tuyến tính) - luật gán nhãn
+       (`create_multiclass_flood_label()`) là luật NGƯỠNG (vd "mưa > 50mm mới tính Ngập nặng"), tức
+       quan hệ giữa mưa và nhãn về bản chất là BẬC THANG/PHI TUYẾN, không phải đường thẳng. Pearson chỉ
+       đo được quan hệ TUYẾN TÍNH nên sẽ ĐÁNH GIÁ THẤP mức tương quan thật trong trường hợp này; Spearman
+       đo quan hệ ĐƠN ĐIỆU (monotonic) nói chung - phù hợp hơn hẳn cho cả biến ngưỡng/phi tuyến lẫn biến
+       mục tiêu dạng thứ bậc (0/1/2) như `Nguy_cơ_ngập`.
+    """
+    daily_df = aggregate_eda_df_to_daily(eda_df)
+    numeric_cols = [col for col in [*FEATURE_COLS_FOR_INFERENCE, "Nguy_cơ_ngập"] if col in daily_df.columns]
+    if daily_df.empty or len(numeric_cols) < 2:
         st.info("Chưa đủ dữ liệu số để tính ma trận tương quan.")
         return
 
-    corr_df = eda_df[numeric_cols].corr(method="pearson").round(2)
+    corr_df = daily_df[numeric_cols].corr(method="spearman").round(2)
     fig = go.Figure(
         data=go.Heatmap(
             z=corr_df.values,
@@ -1630,7 +1647,7 @@ def render_eda_tab() -> None:
     phối/tương quan, và cuối cùng là khối xử lý giá trị thiếu/ngoại lai - mỗi khối đặt trong
     `st.expander` để trang không bị dồn cục, người xem chỉ mở phần mình cần.
     """
-    st.subheader("Khám phá dữ liệu (EDA)")
+    st.subheader("Khám phá dữ liệu")
     st.caption(
         "Bước 1/4 của pipeline: hiểu dữ liệu trước khi làm sạch và huấn luyện. Các biểu đồ tĩnh bên dưới "
         "được sinh sẵn bởi `eda_analysis.py` (chạy `python eda_analysis.py` để làm mới sau khi có dữ liệu mới)."
@@ -1647,7 +1664,7 @@ def render_eda_tab() -> None:
     col_raw, col_stats = st.columns(2)
 
     with col_raw:
-        with st.expander("Dữ liệu thô (Raw Data)", expanded=True):
+        with st.expander("Dữ liệu thô", expanded=True):
             # TODO: nếu bạn có logic đọc dữ liệu thô khác (ví dụ đọc trực tiếp từ 1 file cụ thể),
             # hãy thay `eda_df` bên dưới bằng DataFrame của bạn.
             if eda_df.empty:
@@ -1661,7 +1678,7 @@ def render_eda_tab() -> None:
                 )
 
     with col_stats:
-        with st.expander("Thống kê mô tả (Descriptive Statistics)", expanded=True):
+        with st.expander("Thống kê mô tả", expanded=True):
             # TODO: dán code `df.describe()` / thống kê chi tiết hơn của bạn (ví dụ describe theo
             # từng địa phương, theo từng lớp nguy cơ ngập...) vào đây.
             if eda_df.empty:
@@ -1702,10 +1719,10 @@ def render_eda_tab() -> None:
 
     # ---- Hàng 2: biểu đồ phân phối / tương quan - TƯƠNG TÁC (Plotly, tính trực tiếp từ eda_df thật,
     # thay cho 5 ảnh PNG tĩnh do eda_analysis.py sinh sẵn trước đây) ----
-    with st.expander("Phân phối dữ liệu & ma trận tương quan (Distribution / Heatmap)", expanded=True):
+    with st.expander("Phân phối dữ liệu & ma trận tương quan", expanded=True):
         chart_columns = st.columns(2)
         with chart_columns[0]:
-            st.markdown("**Ma trận tương quan (Heatmap)**")
+            st.markdown("**Ma trận tương quan**")
             render_correlation_heatmap_interactive(eda_df)
         with chart_columns[1]:
             st.markdown("**Phân bố lớp mục tiêu**")
@@ -1733,7 +1750,7 @@ def render_eda_tab() -> None:
         )
 
     # ---- Hàng 3: xử lý giá trị thiếu / ngoại lai ----
-    with st.expander("Xử lý giá trị thiếu & ngoại lai (Missing Value / Outlier)", expanded=False):
+    with st.expander("Xử lý giá trị thiếu & ngoại lai", expanded=False):
         if eda_df.empty:
             st.info("Chưa có dữ liệu để kiểm tra.")
         else:
@@ -1753,7 +1770,7 @@ def render_eda_tab() -> None:
             )
 
             st.markdown("---")
-            st.markdown("**Phát hiện ngoại lai (Outlier) bằng IQR & Z-score - tính riêng cho từng lớp**")
+            st.markdown("**Phát hiện ngoại lai bằng IQR & Z-score - tính riêng cho từng lớp**")
             if "Nguy_cơ_ngập" not in eda_df.columns:
                 st.info("Thiếu cột `Nguy_cơ_ngập` nên không thể tính ngoại lai theo từng lớp.")
             else:
@@ -2182,9 +2199,8 @@ def render_ablation_study_section() -> None:
         return
 
     st.caption(
-        f"Kết quả gần nhất: {payload.get('generated_at', 'không rõ thời điểm')} - "
-        f"model dùng để đo: **{payload.get('model_used', 'không rõ')}** "
-        "(đúng model tốt nhất đang triển khai thật, không cố định 1 model tuỳ ý)."
+        f"Model: **{payload.get('model_used', 'không rõ')}** - "
+        f"chạy lúc {payload.get('generated_at', 'không rõ thời điểm')}."
     )
 
     baseline_f1 = results[0]["f1_macro"]
@@ -2341,9 +2357,8 @@ def render_calibration_study_section() -> None:
         return
 
     st.caption(
-        f"Kết quả gần nhất: {payload.get('generated_at', 'không rõ thời điểm')} - "
-        f"model dùng để đo: **{payload.get('model_used', 'không rõ')}** "
-        "(đúng model tốt nhất đang triển khai thật, không cố định 1 model tuỳ ý)."
+        f"Model: **{payload.get('model_used', 'không rõ')}** - "
+        f"chạy lúc {payload.get('generated_at', 'không rõ thời điểm')}."
     )
 
     arm_columns = st.columns(len(arms))
@@ -2504,7 +2519,7 @@ def render_preprocessing_training_tab() -> None:
         "cân bằng lớp thiểu số, và tinh chỉnh siêu tham số (Optuna / GridSearchCV)."
     )
 
-    with st.expander("Dữ liệu đã làm sạch (Cleaned Data)", expanded=True):
+    with st.expander("Dữ liệu đã làm sạch", expanded=True):
         try:
             cleaned_df = load_cleaned_training_dataframe()
         except Exception as exc:
@@ -2529,7 +2544,7 @@ def render_preprocessing_training_tab() -> None:
 
     st.markdown("---")
 
-    with st.expander("Cân bằng dữ liệu (CTGAN Before / After)", expanded=False):
+    with st.expander("Cân bằng dữ liệu (CTGAN, trước/sau)", expanded=False):
         st.caption(
             "Đọc file export từ `analyze_and_train.py` để so sánh dữ liệu trước/sau khi cân bằng lớp "
             "thiểu số bằng CTGAN (tự fallback sang SMOTE nếu cần)."
@@ -2544,13 +2559,13 @@ def render_preprocessing_training_tab() -> None:
         render_hyperparameter_tuning_section()
         render_training_controls_panel()
 
-    with st.expander("Kiểm định chéo theo chuỗi thời gian (Time Series CV)", expanded=False):
+    with st.expander("Kiểm định chéo theo chuỗi thời gian", expanded=False):
         render_time_series_cv_section()
 
-    with st.expander("Ablation Study (đóng góp từng thành phần)", expanded=False):
+    with st.expander("Ablation Study", expanded=False):
         render_ablation_study_section()
 
-    with st.expander("Calibration Study (độ tin cậy xác suất)", expanded=False):
+    with st.expander("Calibration Study", expanded=False):
         render_calibration_study_section()
 
 
@@ -2702,7 +2717,7 @@ def render_overfitting_check_section(metrics_df: pd.DataFrame) -> None:
 
     checkable_df = checkable_df.sort_values("Chênh lệch Train-Test (F1)", ascending=False).reset_index(drop=True)
 
-    with st.expander("Kiểm tra học vẹt (Overfitting) - so sánh điểm Train vs Test", expanded=False):
+    with st.expander("Kiểm tra học vẹt - so sánh điểm Train vs Test", expanded=False):
         st.caption(
             "So sánh F1-Macro trên chính tập TRAIN model đã học với F1-Macro trên tập TEST (chưa từng "
             "thấy) - chênh lệch càng lớn, model càng có dấu hiệu học thuộc lòng dữ liệu train thay vì "
@@ -3485,7 +3500,7 @@ def render_evaluation_tab() -> None:
     with st.expander("So sánh chỉ số mô hình (F1-Score / Precision / Recall)", expanded=True):
         render_model_metrics(evaluation_metrics, deployment_config, runtime_info)
 
-    with st.expander("Nhận định & kết luận quản trị (Managerial Insights)", expanded=True):
+    with st.expander("Nhận định & kết luận quản trị", expanded=True):
         render_managerial_insights_section(evaluation_metrics, deployment_config, runtime_info)
 
 
