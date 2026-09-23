@@ -483,3 +483,135 @@ CÂU HỎI PHỤ HAY GẶP (riêng cho bản 3 thành phần):
   thành phần: chi phí huấn luyện cao hơn (phải chạy .fit() cho CẢ LSTM lẫn GRU, thay vì chỉ 1 mạng),
   đổi lại kỳ vọng embedding đầu vào cho XGBoost giàu thông tin hơn (32 chiều từ 2 góc nhìn, thay vì 16
   chiều từ 1 góc nhìn duy nhất).
+
+
+===================================================================================================
+PHẦN 7 - IQR, QUY TẮC ĐÁNH NHÃN, F1-MACRO, ROC-AUC (câu hỏi nền tảng hội đồng hay hỏi đầu tiên)
+===================================================================================================
+
+7.1. Công thức IQR (Interquartile Range) - phát hiện ngoại lai
+---------------------------------------------------------------------------------------------------
+Hàm thật: compute_outlier_summary_by_class() trong app.py (Tab EDA, khối "Xử lý giá trị thiếu &
+ngoại lai"). Tính RIÊNG cho TỪNG LỚP (Nguy_cơ_ngập = 0/1/2), KHÔNG gộp chung 3 lớp lại tính 1 ngưỡng.
+
+Công thức:
+  Q1 = phân vị 25% (giá trị mà 25% dữ liệu nhỏ hơn nó)
+  Q3 = phân vị 75%
+  IQR = Q3 - Q1                              (khoảng trải giữa - độ rộng "50% dữ liệu giữa")
+  Ngưỡng dưới = Q1 - 1.5 * IQR
+  Ngưỡng trên = Q3 + 1.5 * IQR
+  -> 1 điểm dữ liệu là NGOẠI LAI nếu nằm NGOÀI khoảng [Ngưỡng dưới, Ngưỡng trên].
+
+Hệ số 1.5 là QUY ƯỚC THỐNG KÊ CHUẨN (Tukey's fences, John Tukey đề xuất 1977) - không phải tự chọn tuỳ
+tiện, được dùng phổ biến nhất trong box plot và các công cụ EDA (kể cả box plot Plotly đang dùng ở
+biểu đồ "Phân bố lượng mưa theo lớp" cũng vẽ đúng theo 2 ngưỡng này - "whisker" của box plot CHÍNH LÀ
+2 ngưỡng IQR trên/dưới).
+
+Vì sao tính RIÊNG theo từng lớp (câu hỏi hay gặp): ngưỡng "bất thường" của lượng mưa/triều cường ở lớp
+Ngập nặng CAO HƠN NHIỀU so với lớp An toàn một cách TỰ NHIÊN (đúng bản chất hiện tượng, không phải lỗi
+đo đạc) - nếu gộp chung tính 1 ngưỡng duy nhất, phần lớn các dòng dữ liệu THẬT của lớp Ngập nặng sẽ bị
+nhầm thành ngoại lai, dẫn tới kết luận sai "dữ liệu có nhiều điểm bất thường" trong khi thực ra đó là
+tín hiệu THẬT của hiện tượng ngập.
+
+Lưu ý quan trọng: hàm này CHỈ THỐNG KÊ để hiển thị (báo cáo có bao nhiêu điểm ngoại lai), KHÔNG tự động
+xoá/loại bỏ dòng nào khỏi dữ liệu train - quyết định giữ nguyên vì các điểm "ngoại lai" ở đây thường
+chính là các đợt mưa/triều cực đoan THẬT SỰ gây ngập, xoá đi sẽ làm mất đúng những mẫu quan trọng nhất
+để model học lớp Ngập nặng (vốn đã ít mẫu).
+
+Dùng SONG SONG với Z-score (|z| > 3, z = (x - trung bình)/độ lệch chuẩn) để đối chiếu 2 phương pháp -
+IQR không giả định phân phối chuẩn (robust hơn với dữ liệu lệch phải như mưa), Z-score giả định phân
+phối gần chuẩn - 2 phương pháp cho kết quả gần nhau thì đáng tin hơn 1 phương pháp đơn lẻ.
+
+7.2. Quy tắc đánh nhãn (luật chuyên gia 3 lớp)
+---------------------------------------------------------------------------------------------------
+Hàm thật: create_multiclass_flood_label() trong analyze_and_train.py. Biến đầu vào (đã gộp THEO NGÀY):
+  R    = Lượng mưa ngày T (mm)                       - cột Lượng_mưa_mm
+  R_3d = Mưa tích luỹ 3 ngày (T-2, T-1, T) (mm)       - cột Lượng_mưa_tích_luỹ_3_ngày
+  S    = Độ ẩm đất ngày T (m3/m3)                     - cột Độ_ẩm_đất
+  H    = Chiều cao triều cường ngày T (m)             - cột Chiều_cao_triều_m
+
+Luật (đánh giá theo thứ tự ưu tiên: Ngập nặng -> Ngập nhẹ -> An toàn):
+
+  NGẬP NẶNG (2) khi CÓ ÍT NHẤT 1 trong 5 điều kiện sau:
+    (a) R > 50mm                              [mưa rất to trong 1 ngày]
+    (b) R_3d > 100mm                          [mưa tích luỹ 3 ngày lớn, dù từng ngày không cực đoan]
+    (c) R > 30mm  VÀ  S > 0.45                [mưa vừa NHƯNG đất đã bão hoà nước]
+    (d) R > 20mm  VÀ  S > 0.40  VÀ  H > 1.50m [mưa + đất ẩm + triều cường cộng hưởng]
+    (e) H > 2.50m                             [triều cường cực cao, dù không mưa]
+
+  NGẬP NHẸ (1) khi KHÔNG thuộc Ngập nặng VÀ CÓ ÍT NHẤT 1 trong 4 điều kiện:
+    (a) R > 25mm
+    (b) R_3d > 50mm
+    (c) R > 15mm  VÀ  S > 0.30
+    (d) R > 10mm  VÀ  H > 1.20m
+
+  AN TOÀN (0): các trường hợp còn lại.
+
+Căn cứ ngưỡng mưa (câu hỏi hội đồng RẤT hay hỏi "số 25/50mm lấy từ đâu"): dựa theo phân cấp mưa 24h
+CHÍNH THỨC của khí tượng Việt Nam/WMO - "mưa vừa" 16-50mm, "mưa to" 51-100mm, "mưa rất to" >100mm.
+Ngưỡng 25/50mm ở ĐÂY THẤP HƠN mốc "mưa to" chính thức (51mm) - lý do: đây là ngưỡng NGUY CƠ NGẬP CỤC BỘ
+(phụ thuộc thêm địa hình trũng + triều cường đặc thù của Huế), không phải phân cấp cường độ mưa thuần
+tuý toàn quốc, nên hợp lý khi thấp hơn. Ngưỡng 50/100mm cho mưa TÍCH LUỸ 3 NGÀY lấy ĐÚNG theo mốc 24h
+chính thức ở trên (áp cho tổng 3 ngày thay vì 1 ngày) - có căn cứ, không tự đặt tuỳ tiện.
+
+Lý do thêm R_3d vào luật (không chỉ nhìn 1 ngày): mưa dồn dập nhiều ngày liên tiếp (mỗi ngày riêng lẻ
+không cực đoan) vẫn đủ làm đất bão hoà nước gây ngập - đã kiểm chứng THẬT bằng số liệu (thêm R_3d làm
+F1-Macro tăng từ 0.52 -> 0.61, và Ablation Study xác nhận lại: bỏ điều kiện R_3d làm F1-Macro giảm
+0.09 điểm - thành phần đóng góp LỚN NHẤT trong 4 thành phần đã kiểm định).
+
+Không phải rò rỉ dữ liệu (câu hỏi hay gặp): nhãn ngày T+1 dùng R_3d của T+1 (tổng mưa T-1, T, T+1) -
+lúc suy luận, model (đặc trưng ngày T) chỉ "biết trước" 2/3 phần cửa sổ đó (T-1, T qua cột lag/tích
+luỹ của CHÍNH ngày T) - KHÔNG biết phần mưa thật của ngày T+1 (phần cần dự đoán), giống nguyên tắc dùng
+xu hướng/quán tính thời tiết trong dự báo thật.
+
+7.3. Vì sao chọn F1-Macro làm thước đo chính (không phải Accuracy)
+---------------------------------------------------------------------------------------------------
+F1-Macro = trung bình KHÔNG TRỌNG SỐ (unweighted average) của F1-score từng lớp:
+  F1-Macro = (F1_lớp0 + F1_lớp1 + F1_lớp2) / 3
+  F1_mỗi lớp = 2 * (Precision * Recall) / (Precision + Recall)   [trung bình điều hoà P và R]
+
+Vì sao KHÔNG dùng Accuracy: dữ liệu mất cân bằng NẶNG (lớp An toàn chiếm ~82%, Ngập nhẹ ~10%, Ngập
+nặng ~8% - số liệu thật từ Ablation Study). Một model NGU NGỐC luôn đoán "An toàn" cho MỌI dòng vẫn đạt
+Accuracy ~82% - con số trông "cao" nhưng VÔ DỤNG vì không bao giờ phát hiện được ca ngập thật (đúng thứ
+hệ thống cảnh báo cần). Accuracy bị "lừa" bởi lớp đa số.
+
+Vì sao F1-Macro (không phải F1-Weighted): F1-Weighted tính trung bình CÓ TRỌNG SỐ theo số lượng mẫu
+mỗi lớp (support) - vẫn ưu ái lớp đa số (An toàn), gần giống vấn đề của Accuracy. F1-Macro coi 3 lớp
+QUAN TRỌNG NGANG NHAU bất kể số lượng mẫu - ép model phải học tốt CẢ lớp Ngập nặng (hiếm nhưng quan
+trọng nhất về an toàn) chứ không được "lơ là" nó chỉ vì nó hiếm trong dữ liệu.
+
+Vì sao dùng F1 (kết hợp Precision+Recall) thay vì chỉ Recall hoặc chỉ Precision: hệ thống cảnh báo
+ngập cần CẢ 2: Recall cao (không bỏ sót ca ngập thật - false negative nguy hiểm tính mạng) VÀ Precision
+đủ tốt (không báo động giả liên tục - false positive làm người dân mất lòng tin, không còn nghe cảnh
+báo). F1 là trung bình ĐIỀU HOÀ (harmonic mean, không phải trung bình cộng) của 2 đại lượng này - phạt
+NẶNG hơn trung bình cộng khi 1 trong 2 giá trị quá thấp (vd Recall=100% nhưng Precision=1% vẫn cho F1
+thấp, trong khi trung bình cộng sẽ ra ~50% trông "ổn").
+
+7.4. ROC-AUC (One-vs-Rest) - dùng bổ sung, không phải thước đo chính
+---------------------------------------------------------------------------------------------------
+Hàm thật: safe_compute_roc_auc_ovr_macro() trong analyze_and_train.py, dùng
+sklearn.metrics.roc_auc_score(y_true_bin, y_proba, multi_class="ovr", average="macro").
+
+Cách tính cho bài toán 3 lớp (One-vs-Rest / OvR):
+  1. label_binarize(y_true, classes=[0,1,2]) - chuyển nhãn 3 lớp thành 3 cột nhị phân riêng biệt:
+     cột 0 = "là lớp 0 hay không", cột 1 = "là lớp 1 hay không", cột 2 = "là lớp 2 hay không".
+  2. Với MỖI cột (mỗi lớp), tính ROC-AUC như bài toán NHỊ PHÂN bình thường: vẽ đường cong so sánh
+     True Positive Rate (Recall) và False Positive Rate qua các ngưỡng xác suất khác nhau, AUC = diện
+     tích dưới đường cong đó (1.0 = phân loại hoàn hảo, 0.5 = ngang bằng đoán ngẫu nhiên).
+  3. average="macro": lấy trung bình KHÔNG TRỌNG SỐ của 3 giá trị AUC (1 giá trị mỗi lớp) - cùng triết
+     lý với F1-Macro (Mục 7.3), không ưu ái lớp đa số.
+
+Vì sao dùng OvR (không phải OvO - One-vs-One): OvR tính 3 đường cong (mỗi lớp so với "tất cả các lớp
+còn lại gộp chung"), OvO phải tính C(3,2)=3 đường cong (mỗi CẶP lớp so với nhau) - với 3 lớp thì số
+đường cong bằng nhau (3=3), nhưng OvR PHỔ BIẾN HƠN, DỄ DIỄN GIẢI HƠN trong bài toán có 1 lớp "an toàn"
+làm nền tảng so sánh rõ ràng (ý nghĩa trực quan: "khả năng phân biệt lớp NÀY với PHẦN CÒN LẠI"), và là
+lựa chọn MẶC ĐỊNH/khuyến nghị của sklearn cho multi-class ROC-AUC.
+
+Vì sao ROC-AUC KHÔNG phải thước đo chính (chỉ bổ sung, xem lại Mục 7.3 - F1-Macro mới là chính): ROC-
+AUC đánh giá khả năng PHÂN BIỆT XÁC SUẤT qua MỌI ngưỡng có thể (threshold-independent) - hữu ích để
+biết model có "tiềm năng" phân loại tốt hay không, nhưng KHÔNG phản ánh hiệu năng THỰC TẾ tại ngưỡng
+0.5 (ngưỡng mặc định model đang dùng để đưa ra nhãn cuối cùng) - 2 model có ROC-AUC bằng nhau vẫn có
+thể cho Precision/Recall THẬT rất khác nhau tại ngưỡng đang dùng. F1-Macro đo ĐÚNG hiệu năng tại ngưỡng
+thật đang triển khai, nên được chọn làm thước đo XẾP HẠNG chính; ROC-AUC dùng để xem thêm "độ ổn định/
+tiềm năng phân biệt" của model, đặc biệt hữu ích khi bàn tới Calibration Study (xác suất có đáng tin
+không - xem thêm reliability diagram, Brier Score, ECE trong app).
