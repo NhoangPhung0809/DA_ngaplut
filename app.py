@@ -1770,16 +1770,26 @@ def render_eda_tab() -> None:
             )
 
             st.markdown("---")
-            st.markdown("**Phát hiện ngoại lai bằng IQR & Z-score - tính riêng cho từng lớp**")
+            st.markdown("**Phát hiện ngoại lai bằng IQR & Z-score - tính riêng cho từng lớp (gộp theo ngày)**")
             if "Nguy_cơ_ngập" not in eda_df.columns:
                 st.info("Thiếu cột `Nguy_cơ_ngập` nên không thể tính ngoại lai theo từng lớp.")
             else:
+                # GỘP VỀ THEO NGÀY trước khi tính - BUG THẬT ĐÃ GẶP: tính thẳng trên `eda_df` THEO GIỜ
+                # khiến "Lượng_mưa_mm" (mưa 1 giờ) có tới 78% giá trị = 0 (Q1=Q3=0 -> IQR=0) trong lớp
+                # "Không ngập" - MỌI giờ có mưa > 0 (dù chỉ 0.1mm) đều bị tính là "ngoại lai", cho ra tỷ
+                # lệ ngoại lai ảo cao bất thường (21.74%) dù đó chỉ là bản chất mưa theo giờ hay bằng 0,
+                # không phải điểm dữ liệu bất thường thật. Gộp theo ngày (cùng cách với biểu đồ "Phân bố
+                # lượng mưa theo lớp" và ma trận tương quan đã sửa trước đó) cho Q1/Q3/IQR có ý nghĩa
+                # thống kê thật, khớp đúng granularity model thực sự học.
+                daily_outlier_df = aggregate_eda_df_to_daily(eda_df)
                 outlier_feature_columns = [
                     column
-                    for column in eda_df.select_dtypes(include="number").columns
+                    for column in daily_outlier_df.select_dtypes(include="number").columns
                     if column != "Nguy_cơ_ngập"
                 ]
-                outlier_summary = compute_outlier_summary_by_class(eda_df, "Nguy_cơ_ngập", outlier_feature_columns)
+                outlier_summary = compute_outlier_summary_by_class(
+                    daily_outlier_df, "Nguy_cơ_ngập", outlier_feature_columns
+                )
                 render_styled_table(
                     build_contrast_styler(
                         outlier_summary,
